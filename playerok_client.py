@@ -1,21 +1,50 @@
 import httpx
 import logging
 from typing import Optional
-from config import PLAYEROK_API_URL, PLAYEROK_TOKEN, PLAYEROK_BASE_URL
+from config import PLAYEROK_API_URL, PLAYEROK_BASE_URL
+import auth
 
 logger = logging.getLogger(__name__)
 
-HEADERS = {
+BASE_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
     "Origin": PLAYEROK_BASE_URL,
     "Referer": PLAYEROK_BASE_URL + "/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
 }
 
-# GraphQL query for seller's active orders
+# ── Auth mutations ────────────────────────────────────────────────────────────
+
+SEND_CODE_MUTATION = """
+mutation sendConfirmationCode($input: SendCodeInput!) {
+  sendConfirmationCode(input: $input) {
+    success
+  }
+}
+"""
+
+LOGIN_MUTATION = """
+mutation signIn($input: SignInInput!) {
+  signIn(input: $input) {
+    token
+    user {
+      id
+      username
+      email
+    }
+  }
+}
+"""
+
+# ── Data queries ──────────────────────────────────────────────────────────────
+
 ORDERS_QUERY = """
-query GetMyOrders($pagination: PaginationInput) {
+query GetMyDeals($pagination: OffsetPaginationInput) {
   myDeals(pagination: $pagination) {
     list {
       id
@@ -23,6 +52,7 @@ query GetMyOrders($pagination: PaginationInput) {
       statusDescription
       createdAt
       completedAt
+      amount
       item {
         id
         name
@@ -36,19 +66,16 @@ query GetMyOrders($pagination: PaginationInput) {
         id
         username
       }
-      amount
     }
     pageInfo {
-      hasNextPage
-      endCursor
+      total
     }
   }
 }
 """
 
-# GraphQL query for complaints/disputes
 COMPLAINTS_QUERY = """
-query GetMyComplaints($pagination: PaginationInput) {
+query GetMyComplaints($pagination: OffsetPaginationInput) {
   myComplaints(pagination: $pagination) {
     list {
       id
@@ -68,78 +95,87 @@ query GetMyComplaints($pagination: PaginationInput) {
       }
     }
     pageInfo {
-      hasNextPage
-      endCursor
-    }
-  }
-}
-"""
-
-# Alternative query names that Playerok may use
-TRANSACTIONS_QUERY = """
-query GetSellerTransactions {
-  sellerTransactions(first: 20) {
-    edges {
-      node {
-        id
-        status
-        createdAt
-        amount
-        currency
-        lot {
-          id
-          title
-        }
-        buyer {
-          id
-          login
-        }
-      }
+      total
     }
   }
 }
 """
 
 
-async def _gql(client: httpx.AsyncClient, query: str, variables: Optional[dict] = None) -> dict:
-    payload = {"query": query}
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _make_headers() -> dict:
+    headers = dict(BASE_HEADERS)
+    token = auth.get_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+async def _gql(
+    query: str,
+    variables: Optional[dict] = None,
+    token_override: Optional[str] = None,
+) -> dict:
+    headers = dict(BASE_HEADERS)
+    t = token_override or auth.get_token()
+    if t:
+        headers["Authorization"] = f"Bearer {t}"
+
+    payload: dict = {"query": query}
     if variables:
         payload["variables"] = variables
 
-    resp = await client.post(PLAYEROK_API_URL, json=payload)
-    resp.raise_for_status()
-    data = resp.json()
+    async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
+        resp = await client.post(PLAYEROK_API_URL, json=payload)
+        resp.raise_for_status()
 
+    data = resp.json()
     if "errors" in data:
-        logger.warning("GraphQL errors: %s", data["errors"])
+        msgs = [e.get("message", str(e)) for e in data["errors"]]
+        raise RuntimeError("; ".join(msgs))
 
     return data.get("data", {})
 
 
-async def fetch_new_orders(client: httpx.AsyncClient) -> list[dict]:
-    """Fetch recent orders from Playerok."""
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+async def request_auth_code(email: str) -> bool:
+    """Ask Playerok to send an OTP code to the given email."""
+    data = await _gql(SEND_CODE_MUTATION, {"input": {"email": email}})
+    return bool(data.get("sendConfirmationCode", {}).get("success"))
+
+
+async def login_with_code(email: str, code: str) -> dict:
+    """
+    Verify the OTP code and get a session token.
+    Returns {"token": str, "username": str} on success.
+    Raises RuntimeError on failure.
+    """
+    data = await _gql(LOGIN_MUTATION, {"input": {"email": email, "code": code}})
+    sign_in = data.get("signIn", {})
+    token = sign_in.get("token")
+    if not token:
+        raise RuntimeError("Токен не получен. Проверьте код и попробуйте снова.")
+    user = sign_in.get("user", {})
+    return {"token": token, "username": user.get("username", "")}
+
+
+# ── Data fetching ─────────────────────────────────────────────────────────────
+
+async def fetch_orders(limit: int = 20) -> list[dict]:
     try:
-        data = await _gql(client, ORDERS_QUERY, {"pagination": {"first": 20}})
-        deals = data.get("myDeals", {}).get("list", [])
-        return deals
+        data = await _gql(ORDERS_QUERY, {"pagination": {"limit": limit, "offset": 0}})
+        return data.get("myDeals", {}).get("list", [])
     except Exception as e:
-        logger.error("Error fetching orders: %s", e)
+        logger.error("fetch_orders error: %s", e)
         return []
 
 
-async def fetch_new_complaints(client: httpx.AsyncClient) -> list[dict]:
-    """Fetch recent complaints/disputes from Playerok."""
+async def fetch_complaints(limit: int = 20) -> list[dict]:
     try:
-        data = await _gql(client, COMPLAINTS_QUERY, {"pagination": {"first": 20}})
-        complaints = data.get("myComplaints", {}).get("list", [])
-        return complaints
+        data = await _gql(COMPLAINTS_QUERY, {"pagination": {"limit": limit, "offset": 0}})
+        return data.get("myComplaints", {}).get("list", [])
     except Exception as e:
-        logger.error("Error fetching complaints: %s", e)
+        logger.error("fetch_complaints error: %s", e)
         return []
-
-
-def build_client() -> httpx.AsyncClient:
-    headers = dict(HEADERS)
-    if PLAYEROK_TOKEN:
-        headers["Authorization"] = f"Bearer {PLAYEROK_TOKEN}"
-    return httpx.AsyncClient(headers=headers, timeout=30.0)

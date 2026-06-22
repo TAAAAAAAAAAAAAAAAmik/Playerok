@@ -36,3 +36,14 @@ def mark_seen(table: str, item_id: str):
     c.execute(f"INSERT OR IGNORE INTO {table} (id) VALUES (?)", (item_id,))
     conn.commit()
     conn.close()
+
+
+def get_stats() -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM seen_orders")
+    orders = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM seen_complaints")
+    complaints = c.fetchone()[0]
+    conn.close()
+    return {"orders": orders, "complaints": complaints}

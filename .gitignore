@@ -1,5 +1,6 @@
 .env
 *.db
+.playerok_token
 __pycache__/
 *.pyc
 *.pyo
