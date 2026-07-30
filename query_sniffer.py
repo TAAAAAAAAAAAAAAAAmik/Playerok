@@ -70,6 +70,30 @@ def _from_url(url: str) -> tuple[str, str] | None:
     return _extract({k: v[0] for k, v in query.items()})
 
 
+def _drain_log(browser, hashes: dict[str, str]):
+    """Вычерпывает журнал сети и докладывает найденные операции."""
+    for entry in browser.driver.get_log("performance"):
+        try:
+            message = json.loads(entry["message"])["message"]
+        except (KeyError, ValueError):
+            continue
+        if message.get("method") != "Network.requestWillBeSent":
+            continue
+
+        request = message.get("params", {}).get("request", {})
+        if "/graphql" not in (request.get("url") or ""):
+            continue
+
+        found = _from_url(request["url"])
+        if not found and request.get("postData"):
+            try:
+                found = _extract(json.loads(request["postData"]))
+            except ValueError:
+                found = None
+        if found:
+            hashes[found[0]] = found[1]
+
+
 def collect(browser, pages: list[str] | None = None) -> dict[str, str]:
     """
     Обходит страницы и собирает хэши из журнала сети. Браузер должен быть
@@ -87,38 +111,49 @@ def collect(browser, pages: list[str] | None = None) -> dict[str, str]:
             continue
         browser._wait_for_render()
         time.sleep(3)  # фронт догружает данные уже после отрисовки
-
-        for entry in browser.driver.get_log("performance"):
-            try:
-                message = json.loads(entry["message"])["message"]
-            except (KeyError, ValueError):
-                continue
-            if message.get("method") != "Network.requestWillBeSent":
-                continue
-
-            request = message.get("params", {}).get("request", {})
-            if "/graphql" not in (request.get("url") or ""):
-                continue
-
-            found = _from_url(request["url"])
-            if not found and request.get("postData"):
-                try:
-                    found = _extract(json.loads(request["postData"]))
-                except ValueError:
-                    found = None
-            if found:
-                hashes[found[0]] = found[1]
+        _drain_log(browser, hashes)
 
     return hashes
 
 
-def refresh(pages: list[str] | None = None) -> dict[str, str]:
+def collect_from_wizard(browser, game: str = "Telegram") -> dict[str, str]:
+    """
+    Часть операций фронт запрашивает только внутри мастера создания товара:
+    список игр (`games`), способы передачи, поля данных. Открываем мастер и
+    проходим первые шаги, снимая запросы по дороге.
+    """
+    hashes: dict[str, str] = {}
+    try:
+        browser._open_wizard()
+        _drain_log(browser, hashes)
+
+        search = browser._find_input("Поиск игр и приложений") or browser._find_input("Поиск")
+        if search:
+            search.send_keys(game)
+            time.sleep(2.5)
+            _drain_log(browser, hashes)
+
+        # Выбор игры открывает категории, дальше — способы передачи.
+        if browser._click_text(game, timeout=8, required=False):
+            time.sleep(2.5)
+            _drain_log(browser, hashes)
+    except Exception as e:
+        logger.warning("Мастер прошёл не полностью: %s", e)
+        _drain_log(browser, hashes)
+
+    return hashes
+
+
+def refresh(pages: list[str] | None = None, wizard: bool = True) -> dict[str, str]:
     """Открывает браузер, собирает хэши и дописывает их в файл."""
     from selenium_creator import PlayerokBrowser
 
     with PlayerokBrowser() as browser:
         browser.authorize()
         fresh = collect(browser, pages)
+        if wizard:
+            logger.info("Открываю мастер создания — там живут остальные операции")
+            fresh.update(collect_from_wizard(browser))
 
     if not fresh:
         raise RuntimeError("Не поймал ни одного persisted-запроса")

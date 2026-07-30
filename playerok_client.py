@@ -316,11 +316,33 @@ async def fetch_my_items(limit: int = 10) -> list[dict]:
 
 # ── Создание товара: этап 2 (запросы вместо браузера) ─────────────────────────
 
-def _persisted_hash(operation: str) -> str:
-    """Снятый с сайта хэш, если он есть, иначе запасной."""
+# Фронт со временем переименовывает операции: страница игры сейчас
+# запрашивается как Game, раньше — как GamePage. Пробуем варианты по порядку.
+OPERATION_ALIASES = {
+    "GamePage": ["Game", "GamePage"],
+    "GamePageCategory": ["GamePageCategory", "GameCategory"],
+    "games": ["games", "Games"],
+    "deals": ["deals", "Deals"],
+}
+
+
+def _resolve_operation(operation: str) -> tuple[str, str]:
+    """
+    Имя операции и её хэш. Снятое с сайта имеет приоритет над запасным:
+    имя обязано соответствовать хэшу, иначе сервер отвергнет запрос.
+    """
     import query_sniffer
 
-    return query_sniffer.load_hashes().get(operation) or FALLBACK_QUERIES[operation]
+    sniffed = query_sniffer.load_hashes()
+    for name in OPERATION_ALIASES.get(operation, [operation]):
+        if name in sniffed:
+            return name, sniffed[name]
+
+    if operation in FALLBACK_QUERIES:
+        return operation, FALLBACK_QUERIES[operation]
+    raise RuntimeError(
+        f"Нет хэша для операции {operation}. Снимите его: python query_sniffer.py"
+    )
 
 
 async def _persisted(operation: str, variables: dict, retry: bool = True) -> dict:
@@ -329,15 +351,11 @@ async def _persisted(operation: str, variables: dict, retry: bool = True) -> dic
     Apollo блокирует как возможный CSRF, поэтому шлём POST с JSON-телом: для APQ
     это равнозначно, а заголовок content-type снимает вопрос защиты.
     """
+    name, sha256 = _resolve_operation(operation)
     payload = {
-        "operationName": operation,
+        "operationName": name,
         "variables": variables,
-        "extensions": {
-            "persistedQuery": {
-                "version": 1,
-                "sha256Hash": _persisted_hash(operation),
-            }
-        },
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": sha256}},
     }
 
     try:
