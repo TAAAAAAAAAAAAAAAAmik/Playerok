@@ -7,13 +7,19 @@
 #
 # Повторный запуск безопасен: код обновляется, .env и сохранённый
 # токен Playerok остаются на месте.
+#
+# Если на сервере уже есть другие боты, скрипт их не тронет: при конфликте
+# имени каталога или сервиса он останавливается с подсказкой. Поставить
+# рядом вторую копию можно так:
+#
+#   ... | SERVICE=playerok-bot2 APP_DIR=/opt/playerok-bot2 bash -s -- <TOKEN>
 
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/TAAAAAAAAAAAAAAAAmik/Playerok.git}"
 REPO_BRANCH="${REPO_BRANCH:-claude/what-do-we-have-zd93b3}"
 APP_DIR="${APP_DIR:-/opt/playerok-bot}"
-SERVICE="playerok-bot"
+SERVICE="${SERVICE:-playerok-bot}"
 POLL_INTERVAL="${POLL_INTERVAL:-30}"
 
 BOT_TOKEN="${1:-${TELEGRAM_BOT_TOKEN:-}}"
@@ -46,13 +52,47 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
 
 # ── 2. Код ────────────────────────────────────────────────────────────────────
 
+# На сервере могут жить другие боты. Ничего не удаляем и не перезаписываем:
+# при любом пересечении останавливаемся и предлагаем другие имена.
+
+hint_rename() {
+    printf '%s\n' \
+        "    Поставить рядом отдельную копию:" \
+        "      SERVICE=${SERVICE}2 APP_DIR=${APP_DIR}2 bash bootstrap.sh <TOKEN>"
+}
+
+UNIT_FILE="${UNIT_FILE:-/etc/systemd/system/$SERVICE.service}"
+if [ -f "$UNIT_FILE" ]; then
+    unit_dir="$(sed -n 's/^WorkingDirectory=//p' "$UNIT_FILE" | tail -n1)"
+    if [ -n "$unit_dir" ] && [ "$unit_dir" != "$APP_DIR" ]; then
+        warn "Сервис $SERVICE уже существует и запускается из $unit_dir."
+        hint_rename
+        die "Не трогаю чужой сервис."
+    fi
+fi
+
+if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
+    warn "Каталог $APP_DIR уже занят, и это не клон нашего репозитория."
+    hint_rename
+    die "Ничего не удаляю."
+fi
+
 if [ -d "$APP_DIR/.git" ]; then
-    log "Обновляю код в $APP_DIR"
-    git -C "$APP_DIR" fetch --depth 1 origin "$REPO_BRANCH"
-    git -C "$APP_DIR" checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH"
+    origin="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || true)"
+    case "$origin" in
+        *[Pp]layerok*)
+            log "Обновляю код в $APP_DIR"
+            git -C "$APP_DIR" fetch --depth 1 origin "$REPO_BRANCH"
+            git -C "$APP_DIR" checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH"
+            ;;
+        *)
+            warn "В $APP_DIR лежит другой репозиторий: ${origin:-неизвестный}."
+            hint_rename
+            die "Ничего не перезаписываю."
+            ;;
+    esac
 else
     log "Клонирую репозиторий в $APP_DIR"
-    rm -rf "$APP_DIR"
     git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$APP_DIR"
 fi
 
@@ -126,9 +166,12 @@ chmod 600 "$ENV_FILE"
 
 # ── 5. systemd ────────────────────────────────────────────────────────────────
 
-log "Настраиваю systemd-сервис"
-sed "s|/opt/playerok-bot|$APP_DIR|g" "$APP_DIR/deploy/$SERVICE.service" \
-    > "/etc/systemd/system/$SERVICE.service"
+log "Настраиваю systemd-сервис $SERVICE"
+# Шаблон в репозитории всегда называется playerok-bot.service; путь и
+# идентификатор в журнале подставляем под фактические APP_DIR и SERVICE.
+sed -e "s|/opt/playerok-bot|$APP_DIR|g" \
+    -e "s|^SyslogIdentifier=.*|SyslogIdentifier=$SERVICE|" \
+    "$APP_DIR/deploy/playerok-bot.service" > "$UNIT_FILE"
 systemctl daemon-reload
 systemctl enable --quiet "$SERVICE"
 systemctl restart "$SERVICE"
