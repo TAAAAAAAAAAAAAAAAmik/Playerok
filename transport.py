@@ -20,7 +20,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
+from typing import Optional
+from urllib.parse import urlencode
 
 import config
 
@@ -67,9 +70,31 @@ def load_cookies() -> dict[str, str]:
     return jar
 
 
-def save_cookies(jar: dict[str, str]):
+def save_cookies(jar: dict[str, str], user_agent: str = ""):
     with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-        json.dump({"saved_at": time.time(), "cookies": jar}, f)
+        json.dump(
+            {"saved_at": time.time(), "cookies": jar, "user_agent": user_agent}, f
+        )
+
+
+def load_user_agent() -> str:
+    """
+    User-Agent той сессии, в которой получены куки. Кука DDoS-Guard привязана
+    к UA: запрос с другим User-Agent защита не примет.
+    """
+    if os.path.exists(COOKIES_FILE):
+        try:
+            with open(COOKIES_FILE, encoding="utf-8") as f:
+                saved = json.load(f).get("user_agent")
+            if saved:
+                return saved
+        except (OSError, ValueError):
+            pass
+    return (
+        config.SELENIUM_MOBILE_USER_AGENT
+        if config.SELENIUM_MOBILE
+        else config.SELENIUM_USER_AGENT
+    )
 
 
 def cookies_age() -> float:
@@ -108,10 +133,11 @@ def refresh_cookies() -> dict[str, str]:
     with PlayerokBrowser() as browser:
         browser.authorize()
         jar = {c["name"]: c["value"] for c in browser.driver.get_cookies()}
+        user_agent = browser.driver.execute_script("return navigator.userAgent")
 
     jar.update(_parse_cookie_string(config.PLAYEROK_COOKIES))
-    save_cookies(jar)
-    logger.info("Куки обновлены: %s", ", ".join(sorted(jar)))
+    save_cookies(jar, user_agent)
+    logger.info("Куки обновлены (UA %s): %s", user_agent[:40], ", ".join(sorted(jar)))
     return jar
 
 
@@ -123,7 +149,7 @@ def _request(method: str, cookies: dict[str, str], **kwargs):
         "content-type": kwargs.pop("content_type", "application/json"),
         "origin": config.PLAYEROK_BASE_URL,
         "referer": config.PLAYEROK_BASE_URL + "/",
-        "user-agent": config.SELENIUM_USER_AGENT,
+        "user-agent": load_user_agent(),
     }
     if headers["content-type"] is None:
         headers.pop("content-type")
@@ -146,11 +172,91 @@ def _request(method: str, cookies: dict[str, str], **kwargs):
         return client.request(method.upper(), config.PLAYEROK_API_URL, **kwargs)
 
 
+# ── Запрос из самого браузера ─────────────────────────────────────────────────
+#
+# Самый надёжный путь: fetch выполняется на открытой странице Playerok, так что
+# куки, User-Agent и TLS-отпечаток совпадают по определению. Браузер держим
+# один на процесс — поднимать его на каждый запрос слишком дорого.
+
+_browser = None
+_browser_lock = threading.Lock()
+
+FETCH_SCRIPT = """
+const cb = arguments[arguments.length - 1];
+const [url, method, body] = arguments;
+fetch(url, {
+  method: method,
+  headers: body ? {'content-type': 'application/json'} : {},
+  body: body || undefined,
+  credentials: 'include',
+})
+  .then(r => r.text().then(t => cb({status: r.status, body: t})))
+  .catch(e => cb({status: 0, body: String(e)}));
+"""
+
+
+def _browser_instance():
+    global _browser
+    from selenium_creator import PlayerokBrowser
+
+    if _browser is None or _browser.driver is None:
+        browser = PlayerokBrowser()
+        browser.start()
+        browser.authorize()
+        _browser = browser
+    return _browser
+
+
+def browser_request(method: str, json_body: Optional[dict] = None,
+                    params: Optional[dict] = None) -> dict:
+    """GraphQL-запрос через открытую страницу Playerok."""
+    global _browser
+
+    url = config.PLAYEROK_API_URL
+    if params:
+        url += "?" + urlencode(params)
+
+    with _browser_lock:
+        browser = _browser_instance()
+        try:
+            result = browser.driver.execute_async_script(
+                FETCH_SCRIPT,
+                url,
+                method.upper(),
+                json.dumps(json_body) if json_body else None,
+            )
+        except Exception as e:
+            # Браузер мог отвалиться — уронить его, чтобы следующий раз поднялся заново.
+            try:
+                browser.stop()
+            finally:
+                _browser = None
+            raise TransportError(f"Запрос через браузер не удался: {e}") from e
+
+    status = (result or {}).get("status", 0)
+    body = (result or {}).get("body", "")
+    if status >= 400 or status == 0:
+        raise TransportError(f"Браузер получил {status}: {body[:200]}")
+
+    try:
+        data = json.loads(body)
+    except ValueError as e:
+        raise TransportError(f"Ответ браузера не JSON: {e}") from e
+
+    if "errors" in data:
+        raise TransportError("; ".join(e.get("message", str(e)) for e in data["errors"]))
+    return data.get("data") or {}
+
+
 def request(method: str, *, retry: bool = True, **kwargs) -> dict:
     """
-    Запрос к /graphql. При отказе защиты обновляет куки браузером и повторяет.
-    Возвращает разобранный JSON, поднимает TransportError на ошибках GraphQL.
+    Запрос к /graphql. При отказе защиты обновляет куки браузером и повторяет,
+    а если и это не помогло — выполняет запрос прямо в браузере.
+    Возвращает данные GraphQL, поднимает TransportError на ошибках.
     """
+    if config.PLAYEROK_BROWSER_TRANSPORT:
+        return browser_request(method, kwargs.get("json"), kwargs.get("params"))
+
     cookies = load_cookies()
     if not cookies or cookies_age() > COOKIES_TTL:
         try:
@@ -164,12 +270,18 @@ def request(method: str, *, retry: bool = True, **kwargs) -> dict:
         logger.info("Ответ %s — похоже на защиту, обновляю куки", resp.status_code)
         try:
             cookies = refresh_cookies()
+            resp = _request(method, cookies, **kwargs)
         except Exception as e:
-            raise TransportError(f"Защита Playerok не пройдена: {e}") from e
-        resp = _request(method, cookies, **kwargs)
+            logger.info("Обновить куки не вышло (%s) — пробую запрос из браузера", e)
+            return browser_request(method, kwargs.get("json"), kwargs.get("params"))
 
     if resp.status_code >= 400:
-        raise TransportError(f"HTTP {resp.status_code} от {config.PLAYEROK_API_URL}")
+        # Свежие куки не помогли: значит дело не в них — идём через браузер.
+        logger.info(
+            "HTTP %s даже со свежими куками — выполняю запрос из браузера",
+            resp.status_code,
+        )
+        return browser_request(method, kwargs.get("json"), kwargs.get("params"))
 
     try:
         data = resp.json()
