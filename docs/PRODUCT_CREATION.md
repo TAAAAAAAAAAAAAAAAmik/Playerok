@@ -51,7 +51,12 @@ SELENIUM_PROFILE_DIR=.chrome-profile
 CHROME_BINARY=
 CHROMEDRIVER_PATH=
 CHROMEDRIVER_ARGS=
+SELENIUM_MOBILE=0
 ```
+
+`SELENIUM_MOBILE=1` переводит браузер в мобильный режим (Pixel 7, 412×915,
+мобильный User-Agent и тач) — у Playerok мобильная вёрстка отличается от
+десктопной, и селекторы нужно подгонять под ту, что видит пользователь.
 
 Токен берётся из DevTools браузера (Application → Cookies → playerok.com → `token`).
 Куку DDoS-Guard копировать не нужно — она привязана к IP, браузер получит свою.

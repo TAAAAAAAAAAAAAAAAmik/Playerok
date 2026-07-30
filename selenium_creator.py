@@ -117,8 +117,18 @@ class PlayerokBrowser:
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_argument("--window-size=1440,1000")
-        opts.add_argument(f"--user-agent={config.SELENIUM_USER_AGENT}")
+        if config.SELENIUM_MOBILE:
+            opts.add_argument("--window-size=412,915")
+            opts.add_experimental_option(
+                "mobileEmulation",
+                {
+                    "deviceMetrics": {"width": 412, "height": 915, "pixelRatio": 2.6},
+                    "userAgent": config.SELENIUM_MOBILE_USER_AGENT,
+                },
+            )
+        else:
+            opts.add_argument("--window-size=1440,1000")
+            opts.add_argument(f"--user-agent={config.SELENIUM_USER_AGENT}")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
 
@@ -139,6 +149,13 @@ class PlayerokBrowser:
             "Page.addScriptToEvaluateOnNewDocument",
             {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
         )
+        if config.SELENIUM_MOBILE:
+            # mobileEmulation задаёт User-Agent, но в headless не всегда меняет
+            # ширину viewport — дожимаем метрики напрямую.
+            self.driver.execute_cdp_cmd(
+                "Emulation.setDeviceMetricsOverride",
+                {"width": 412, "height": 915, "deviceScaleFactor": 2.6, "mobile": True},
+            )
 
         self._run_dir = os.path.join(
             config.DEBUG_DIR, datetime.now().strftime("%Y%m%d_%H%M%S")

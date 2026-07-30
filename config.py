@@ -27,6 +27,14 @@ SELENIUM_USER_AGENT = os.getenv(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
 )
+# Мобильная вёрстка: у Playerok она отличается от десктопной, и селекторы
+# нужно подгонять под ту, которую видите вы.
+SELENIUM_MOBILE = os.getenv("SELENIUM_MOBILE", "0") == "1"
+SELENIUM_MOBILE_USER_AGENT = os.getenv(
+    "SELENIUM_MOBILE_USER_AGENT",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36",
+)
 CHROME_BINARY = os.getenv("CHROME_BINARY", "")
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "")
 # Доп. аргументы chromedriver через пробел, например --disable-build-check,
