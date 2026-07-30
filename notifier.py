@@ -39,22 +39,22 @@ def _status_emoji(status: str) -> str:
 
 
 def format_order(order: dict) -> str:
+    """Сделка из запроса `deals`: цена в item.price числом, покупатель в user."""
     item = order.get("item") or {}
-    buyer = order.get("buyer") or {}
+    buyer = order.get("user") or {}
     status = order.get("status", "")
     emoji = _status_emoji(status)
 
-    price_block = item.get("price") or {}
-    currency = (price_block.get("currency") or {}).get("symbol", "₽")
-    price = price_block.get("value", "?")
+    price = item.get("price", "?")
+    currency = "₽"
 
-    item_name = item.get("name") or item.get("title", "Без названия")
+    item_name = item.get("name", "Без названия")
     item_slug = item.get("slug", "")
-    buyer_name = buyer.get("username") or buyer.get("login", "Неизвестен")
+    buyer_name = buyer.get("username", "Неизвестен")
     order_id = order.get("id", "?")
     created_at = order.get("createdAt", "")[:19].replace("T", " ") if order.get("createdAt") else "?"
 
-    item_url = f"{PLAYEROK_BASE_URL}/lots/{item_slug}" if item_slug else PLAYEROK_BASE_URL
+    item_url = f"{PLAYEROK_BASE_URL}/products/{item_slug}" if item_slug else PLAYEROK_BASE_URL
 
     lines = [
         f"{emoji} <b>Новая покупка!</b>",
@@ -69,30 +69,32 @@ def format_order(order: dict) -> str:
     return "\n".join(lines)
 
 
-def format_complaint(complaint: dict) -> str:
-    deal = complaint.get("deal") or {}
+def format_complaint(deal: dict) -> str:
+    """
+    Сделка с поднятым флагом hasProblem. Отдельной сущности «жалоба» в API
+    Playerok нет — покупатель сообщает о проблеме по конкретной сделке.
+    """
     item = deal.get("item") or {}
-    buyer = deal.get("buyer") or {}
+    buyer = deal.get("user") or {}
 
-    complaint_id = complaint.get("id", "?")
-    status = complaint.get("status", "")
-    reason = complaint.get("reason", "Не указана")
-    created_at = complaint.get("createdAt", "")[:19].replace("T", " ") if complaint.get("createdAt") else "?"
     deal_id = deal.get("id", "?")
-    item_name = item.get("name") or item.get("title", "Без названия")
-    buyer_name = buyer.get("username") or buyer.get("login", "Неизвестен")
+    status = deal.get("status", "")
+    description = deal.get("statusDescription") or "Покупатель сообщил о проблеме"
+    created_at = deal.get("createdAt", "")[:19].replace("T", " ") if deal.get("createdAt") else "?"
+    item_name = item.get("name", "Без названия")
+    item_slug = item.get("slug", "")
+    buyer_name = buyer.get("username", "Неизвестен")
+
+    item_url = f"{PLAYEROK_BASE_URL}/products/{item_slug}" if item_slug else PLAYEROK_BASE_URL
 
     lines = [
-        f"⚠️ <b>Новая жалоба!</b>",
+        f"⚠️ <b>Проблема по сделке!</b>",
         f"",
-        f"📦 Товар: <b>{item_name}</b>",
+        f"📦 Товар: <a href='{item_url}'>{item_name}</a>",
         f"👤 Покупатель: <b>{buyer_name}</b>",
-        f"📝 Причина: <b>{reason}</b>",
-        f"🔖 Статус жалобы: <b>{status}</b>",
+        f"📝 Что не так: {description}",
+        f"🔖 Статус сделки: <b>{status}</b>",
         f"🕐 Дата: {created_at}",
-        f"🆔 ID жалобы: <code>{complaint_id}</code>",
-        f"🔗 ID сделки: <code>{deal_id}</code>",
-        f"",
-        f"👉 <a href='{PLAYEROK_BASE_URL}/deals/{deal_id}'>Открыть сделку</a>",
+        f"🆔 ID сделки: <code>{deal_id}</code>",
     ]
     return "\n".join(lines)

@@ -181,7 +181,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🔄 Мониторинг: {polling_status}\n"
         f"⏱ Интервал: <b>{config.POLL_INTERVAL}с</b>\n\n"
         f"📦 Обработано покупок: <b>{stats['orders']}</b>\n"
-        f"⚠️ Обработано жалоб: <b>{stats['complaints']}</b>",
+        f"⚠️ Проблемных сделок: <b>{stats['complaints']}</b>",
         parse_mode=ParseMode.HTML,
     )
 

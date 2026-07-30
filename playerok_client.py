@@ -45,63 +45,16 @@ mutation signIn($input: SignInInput!) {
 
 # ── Data queries ──────────────────────────────────────────────────────────────
 
-ORDERS_QUERY = """
-query GetMyDeals($pagination: OffsetPaginationInput) {
-  myDeals(pagination: $pagination) {
-    list {
-      id
-      status
-      statusDescription
-      createdAt
-      completedAt
-      amount
-      item {
-        id
-        name
-        slug
-        price {
-          value
-          currency { symbol }
-        }
-      }
-      buyer {
-        id
-        username
-      }
-    }
-    pageInfo {
-      total
-    }
+VIEWER_QUERY = """
+query viewer {
+  viewer {
+    id
+    username
+    email
   }
 }
 """
 
-COMPLAINTS_QUERY = """
-query GetMyComplaints($pagination: OffsetPaginationInput) {
-  myComplaints(pagination: $pagination) {
-    list {
-      id
-      status
-      reason
-      createdAt
-      deal {
-        id
-        item {
-          id
-          name
-        }
-        buyer {
-          id
-          username
-        }
-      }
-    }
-    pageInfo {
-      total
-    }
-  }
-}
-"""
 MY_ITEMS_QUERY = """
 query GetMyItems($pagination: OffsetPaginationInput) {
   myItems(pagination: $pagination) {
@@ -132,6 +85,7 @@ query GetMyItems($pagination: OffsetPaginationInput) {
 
 # sha256-хэши persisted-запросов Playerok (меняются при обновлении фронта).
 PERSISTED_QUERIES = {
+    "deals": "591b0e6d036c2120c8f95b97dbfdf5635df3747cd901f4895e009935229417ef",
     "games": "5de9b3240c148579c82e2310a30b4aad5462884fd1abf93dd3c43d1f5ef14d85",
     "GamePage": "4775f8630a3e234c50537e68649043ac32a40b0370b0f1fb2dc314500ef6202d",
     "GamePageCategory": "7759f743651176ddad6afefb5f2e889ec9984cae08a015281879cd61e94bdb60",
@@ -238,22 +192,60 @@ async def login_with_code(email: str, code: str) -> dict:
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
-async def fetch_orders(limit: int = 20) -> list[dict]:
+_viewer_id: str = ""
+
+
+async def fetch_viewer() -> dict:
+    """Данные текущего аккаунта: {id, username, email}."""
+    data = await _gql(VIEWER_QUERY)
+    viewer = data.get("viewer")
+    if not viewer:
+        raise RuntimeError("Не авторизованы: сервер не вернул viewer.")
+    return viewer
+
+
+async def _get_viewer_id() -> str:
+    """ID аккаунта — обязательный фильтр в запросе сделок."""
+    global _viewer_id
+    if not _viewer_id:
+        _viewer_id = (await fetch_viewer()).get("id", "")
+    return _viewer_id
+
+
+async def fetch_deals(count: int = 20, direction: str = "OUT") -> list[dict]:
+    """
+    Сделки аккаунта. direction="OUT" — продажи (то, что купили у вас).
+    Возвращает список узлов сделок.
+    """
     try:
-        data = await _gql(ORDERS_QUERY, {"pagination": {"limit": limit, "offset": 0}})
-        return data.get("myDeals", {}).get("list", [])
+        user_id = await _get_viewer_id()
+        data = await _persisted(
+            "deals",
+            {
+                "pagination": {"first": count, "after": None},
+                "filter": {"userId": user_id, "direction": direction, "status": None},
+                "showForbiddenImage": True,
+            },
+        )
+        edges = (data.get("deals") or {}).get("edges") or []
+        return [edge["node"] for edge in edges if edge.get("node")]
     except Exception as e:
-        logger.error("fetch_orders error: %s", e)
+        logger.error("fetch_deals error: %s", e)
         return []
+
+
+async def fetch_orders(limit: int = 20) -> list[dict]:
+    """Новые покупки — все продажи аккаунта."""
+    return await fetch_deals(count=limit)
 
 
 async def fetch_complaints(limit: int = 20) -> list[dict]:
-    try:
-        data = await _gql(COMPLAINTS_QUERY, {"pagination": {"limit": limit, "offset": 0}})
-        return data.get("myComplaints", {}).get("list", [])
-    except Exception as e:
-        logger.error("fetch_complaints error: %s", e)
-        return []
+    """
+    Проблемные сделки. Отдельной сущности «жалоба» в API нет: покупатель
+    сообщает о проблеме по сделке, и у неё поднимается флаг hasProblem.
+    """
+    deals = await fetch_deals(count=limit)
+    return [d for d in deals if d.get("hasProblem")]
 
 
 async def fetch_my_items(limit: int = 10) -> list[dict]:
