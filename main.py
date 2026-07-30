@@ -23,6 +23,7 @@ from playerok_client import (
     fetch_complaints,
 )
 from notifier import send, format_order, format_complaint
+from product_flow import build_create_conversation
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -161,6 +162,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "👋 <b>Playerok Monitor Bot</b>\n\n"
         f"{status_line}\n\n"
         "/login — войти в аккаунт Playerok\n"
+        "/create — создать товар (мастер из 9 шагов)\n"
         "/status — статистика\n"
         "/check — проверить прямо сейчас\n"
         "/logout — выйти из аккаунта",
@@ -246,6 +248,7 @@ def main():
     )
 
     app.add_handler(login_conv)
+    app.add_handler(build_create_conversation())
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))
