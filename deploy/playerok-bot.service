@@ -1,0 +1,22 @@
+[Unit]
+Description=Playerok Monitor Telegram Bot
+Documentation=https://github.com/TAAAAAAAAAAAAAAAAmik/Playerok
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/playerok-bot
+ExecStart=/opt/playerok-bot/.venv/bin/python -u main.py
+Restart=always
+RestartSec=5
+
+# The app reads /opt/playerok-bot/.env itself via python-dotenv,
+# so no EnvironmentFile is needed here.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=playerok-bot
+
+[Install]
+WantedBy=multi-user.target
