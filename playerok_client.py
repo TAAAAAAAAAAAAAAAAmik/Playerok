@@ -8,7 +8,11 @@ is handed to a worker thread to keep the bot's event loop responsive.
 """
 import asyncio
 import logging
+import shutil
+from pathlib import Path
 
+import certifi
+import playerokapi.account as playerokapi_account
 from playerokapi.account import Account
 
 import auth
@@ -19,8 +23,31 @@ logger = logging.getLogger(__name__)
 _account: Account | None = None
 
 
+def _ensure_cacert():
+    """Provide the CA bundle PlayerokAPI expects inside its own package.
+
+    Account.__init__ unconditionally copies <package>/cacert.pem to a temp path
+    and hands it to curl_cffi as `verify`, but its pip build ships no such data
+    file — so construction fails with FileNotFoundError before any request is
+    made. Seed it from certifi; disabling verification is not an option.
+    """
+    target = Path(playerokapi_account.__file__).with_name("cacert.pem")
+    if target.exists():
+        return
+    try:
+        shutil.copyfile(certifi.where(), target)
+    except OSError as e:
+        raise RuntimeError(
+            f"Не удалось создать {target}: {e}. "
+            f"Скопируйте туда бандл сертификатов вручную: "
+            f"cp {certifi.where()} {target}"
+        ) from e
+    logger.info("Создан %s из certifi — pip-сборка PlayerokAPI его не содержит", target)
+
+
 def _build(token: str, ddg5: str, user_agent: str) -> Account:
     """Construct and initialise an Account. Blocking — call in a thread."""
+    _ensure_cacert()
     return Account(token=token, ddg5=ddg5, user_agent=user_agent).get()
 
 

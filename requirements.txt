@@ -12,3 +12,6 @@ PlayerokAPI @ git+https://github.com/alleexxeeyy/PlayerokAPI.git
 # tqdm — незаявленная зависимость tls_requests внутри PlayerokAPI: без неё
 # импорт падает с ModuleNotFoundError.
 tqdm
+# certifi нужен нам напрямую: PlayerokAPI ждёт cacert.pem внутри своего пакета,
+# но не кладёт его туда, и мы восполняем файл из этого бандла.
+certifi

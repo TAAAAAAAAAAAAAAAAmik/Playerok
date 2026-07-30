@@ -113,6 +113,23 @@ fi
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" \
     || die "pip не смог установить зависимости — подробности в выводе выше."
 
+# PlayerokAPI читает cacert.pem из своего каталога, но pip-сборка этот файл не
+# кладёт. Восполняем сразу, иначе /login падает с FileNotFoundError. Бот делает
+# то же самое при старте — здесь только чтобы сбой был виден при установке.
+"$APP_DIR/.venv/bin/python" - <<'PY' || die "Не удалось подготовить cacert.pem для PlayerokAPI."
+import shutil
+from pathlib import Path
+import certifi
+import playerokapi.account as pa
+
+target = Path(pa.__file__).with_name("cacert.pem")
+if target.exists():
+    print("    cacert.pem уже на месте")
+else:
+    shutil.copyfile(certifi.where(), target)
+    print(f"    создан {target} из certifi")
+PY
+
 # ── 4. Конфигурация ───────────────────────────────────────────────────────────
 
 ENV_FILE="$APP_DIR/.env"
