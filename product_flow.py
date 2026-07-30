@@ -623,5 +623,10 @@ def build_create_conversation() -> ConversationHandler:
                 cancel_handler,
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("create", cmd_create)],
+        # Повторный /create начинает диалог заново: иначе, застряв в середине,
+        # пользователь получает молчание — команда не подходит ни под одно
+        # состояние. Брошенный диалог сам закрывается через полчаса.
+        allow_reentry=True,
+        conversation_timeout=1800,
     )
