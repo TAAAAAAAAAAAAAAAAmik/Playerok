@@ -45,7 +45,7 @@
 Настройка в `.env`:
 
 ```
-PLAYEROK_COOKIES=token=eyJ...; __ddg5_=...
+PLAYEROK_COOKIES=token=eyJ...
 SELENIUM_HEADLESS=0
 SELENIUM_PROFILE_DIR=.chrome-profile
 CHROME_BINARY=
@@ -53,9 +53,12 @@ CHROMEDRIVER_PATH=
 CHROMEDRIVER_ARGS=
 ```
 
-Куки берутся из DevTools браузера (Application → Cookies → playerok.com) и должны
-быть с того же IP и User-Agent, под которыми вы вошли. Альтернатива — один раз
-войти руками в профиле `SELENIUM_PROFILE_DIR`, дальше сессия переиспользуется.
+Токен берётся из DevTools браузера (Application → Cookies → playerok.com → `token`).
+Куку DDoS-Guard копировать не нужно — она привязана к IP, браузер получит свою.
+Альтернатива — один раз войти руками в профиле `SELENIUM_PROFILE_DIR`, дальше
+сессия переиспользуется.
+
+Запуск на сервере (venv, Chrome, Xvfb, systemd) — см. [DEPLOY.md](DEPLOY.md).
 
 Запуск без Telegram, для проверки сценария:
 
