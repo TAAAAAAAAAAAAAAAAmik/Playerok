@@ -55,22 +55,28 @@ SELENIUM_HEADLESS=1 ./venv/bin/python main.py
 
 ## systemd
 
-В юните укажите python из venv и запуск через `xvfb-run`:
-
-```ini
-[Service]
-WorkingDirectory=/opt/playerok-bot
-ExecStart=/usr/bin/xvfb-run -a /opt/playerok-bot/venv/bin/python /opt/playerok-bot/main.py
-Restart=always
-```
-
-После правки:
+Готовый юнит лежит в репозитории — установить и перезапустить:
 
 ```bash
+cp systemd/playerok-bot.service /etc/systemd/system/playerok-bot.service
 systemctl daemon-reload
 systemctl restart playerok-bot
 journalctl -u playerok-bot -f
 ```
+
+Главное в нём: python берётся из `venv` (системный не видит зависимостей
+из-за PEP 668), а запуск идёт через `xvfb-run` — иначе Chrome не стартует
+и команда `/create` молча не сработает.
+
+Проверить, что реально запущено:
+
+```bash
+systemctl cat playerok-bot | grep -E "ExecStart|WorkingDirectory"
+systemctl status playerok-bot --no-pager
+```
+
+После каждого `git pull` бот нужно перезапускать: старый процесс продолжает
+работать с прежним кодом, поэтому новые команды в нём не появляются.
 
 ## Проверка мастера без Telegram
 
