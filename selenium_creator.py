@@ -368,19 +368,48 @@ class PlayerokBrowser:
     def _create_route_candidates(self) -> list[str]:
         """Маршруты, похожие на мастер создания товара, — самые точные первыми."""
         keywords = ("new", "create", "sell", "add")
+        # Страницы, которые попадают под keywords, но мастером не являются.
+        noise = (
+            "giveaway", "terms", "rules", "agreement", "policy", "privacy",
+            "faq", "support", "about", "news", "blog", "wallet", "deposit",
+            "withdraw", "login", "signin", "signup", "register", "settings",
+        )
+
+        def score(route: str) -> int:
+            r = route.lower()
+            tail = r.rstrip("/").rsplit("/", 1)[-1]
+            if r.rstrip("/") in ("/sell", "/products/new", "/items/new", "/create"):
+                return 0
+            if tail in ("new", "create", "add"):
+                return 1
+            if "sell" in r and "seller" not in r:
+                return 2
+            return 3
+
         routes = self._discover_routes()
         found = [
             r
             for r in routes
             # страницы с [param] пропускаем — туда нужен конкретный id
-            if "[" not in r and any(k in r.lower() for k in keywords)
+            if "[" not in r
+            and any(k in r.lower() for k in keywords)
+            and not any(n in r.lower() for n in noise)
         ]
-        # Сначала те, где рядом есть «item/product/lot», затем остальные.
-        found.sort(key=lambda r: 0 if any(w in r.lower() for w in ("item", "product", "lot")) else 1)
+        found.sort(key=score)
         return found + [c for c in CREATE_URL_CANDIDATES if c not in found]
 
     def _looks_like_wizard(self) -> bool:
-        markers = ("Выберите игру", "Выбор игры", "Выберите категорию", "Что продаём")
+        markers = (
+            "Выберите игру",
+            "Выбор игры",
+            "Выберите категорию",
+            "Выберите приложение",
+            "Что продаём",
+            "Что вы продаёте",
+            "Создание товара",
+            "Новый товар",
+            "Новое объявление",
+        )
         return any(self._find_by_text(m, timeout=1) for m in markers)
 
     def step1_open_create_page(self):
@@ -397,6 +426,9 @@ class PlayerokBrowser:
             except TimeoutException:
                 continue
             self._sleep(2.5)
+            # Снимок каждой проверенной страницы: если мастер не опознан,
+            # по дампам сразу видно, как страница выглядит на самом деле.
+            self.snapshot(1, f"try{path.replace('/', '-')}")
             if self._looks_like_wizard():
                 return f"Открыт {url}"
 
