@@ -12,9 +12,14 @@
   кука DDoS-Guard `__ddg5_`/`__ddg3`. Кука умирает при смене IP, User-Agent или
   TLS-отпечатка. Из-за этого «голые» запросы часто ловят проверку бота, а браузер
   проходит её сам — поэтому первый этап делаем на Selenium.
-* Чтение справочников идёт **persisted-запросами**: GET с `operationName`,
-  `variables` и `extensions.persistedQuery.sha256Hash`. Хэши меняются при
-  обновлении фронта; актуальные лежат в `playerok_client.PERSISTED_QUERIES`.
+* Чтение справочников идёт **persisted-запросами**: `operationName`,
+  `variables` и `extensions.persistedQuery.sha256Hash` вместо текста запроса.
+  Хэши меняются при каждой сборке фронта, и устаревший сервер отвергает —
+  например, `games` отвечает «Access denied». Поэтому их не зашивают:
+  `query_sniffer` открывает сайт браузером, читает журнал сети и снимает
+  актуальные пары operationName → hash в `.playerok_queries.json`.
+  Обновление запускается само при отказе операции, вручную —
+  `python query_sniffer.py`.
 * Запись (`createItem`, `publishItem`) — обычные мутации с полным текстом запроса.
 * `createItem` принимает картинки отдельным аргументом `$attachments: [Upload!]!`
   по multipart-спеке GraphQL (`operations` + `map` + пронумерованные файлы).

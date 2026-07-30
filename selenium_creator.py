@@ -162,6 +162,9 @@ class PlayerokBrowser:
             opts.add_argument(f"--user-agent={config.SELENIUM_USER_AGENT}")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
+        # Журнал сети нужен, чтобы подсмотреть запросы фронта к /graphql
+        # и снять актуальные хэши persisted-операций.
+        opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
         # Постоянный профиль: авторизация и куки DDoS-Guard живут между запусками.
         if config.SELENIUM_PROFILE_DIR:

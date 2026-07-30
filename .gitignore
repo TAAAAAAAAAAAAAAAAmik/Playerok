@@ -14,3 +14,4 @@ playerok-debug-*.tar.gz
 demo.png
 demo.jpg
 .playerok_cookies.json
+.playerok_queries.json

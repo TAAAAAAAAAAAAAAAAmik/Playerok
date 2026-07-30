@@ -125,8 +125,9 @@ query GetMyItems($pagination: OffsetPaginationInput) {
 # мутациями. Пока бот создаёт товар через Selenium (selenium_creator.py):
 # сначала проверяем сценарий в браузере, потом переводим сюда.
 
-# sha256-хэши persisted-запросов Playerok (меняются при обновлении фронта).
-PERSISTED_QUERIES = {
+# sha256-хэши persisted-запросов. Меняются при каждой сборке фронта, поэтому
+# это лишь запасные значения: актуальные снимает query_sniffer прямо с сайта.
+FALLBACK_QUERIES = {
     "deals": "591b0e6d036c2120c8f95b97dbfdf5635df3747cd901f4895e009935229417ef",
     "games": "5de9b3240c148579c82e2310a30b4aad5462884fd1abf93dd3c43d1f5ef14d85",
     "GamePage": "4775f8630a3e234c50537e68649043ac32a40b0370b0f1fb2dc314500ef6202d",
@@ -315,7 +316,14 @@ async def fetch_my_items(limit: int = 10) -> list[dict]:
 
 # ── Создание товара: этап 2 (запросы вместо браузера) ─────────────────────────
 
-async def _persisted(operation: str, variables: dict) -> dict:
+def _persisted_hash(operation: str) -> str:
+    """Снятый с сайта хэш, если он есть, иначе запасной."""
+    import query_sniffer
+
+    return query_sniffer.load_hashes().get(operation) or FALLBACK_QUERIES[operation]
+
+
+async def _persisted(operation: str, variables: dict, retry: bool = True) -> dict:
     """
     Persisted-операция. Фронт шлёт такие GET-ом, но GET без content-type
     Apollo блокирует как возможный CSRF, поэтому шлём POST с JSON-телом: для APQ
@@ -327,12 +335,31 @@ async def _persisted(operation: str, variables: dict) -> dict:
         "extensions": {
             "persistedQuery": {
                 "version": 1,
-                "sha256Hash": PERSISTED_QUERIES[operation],
+                "sha256Hash": _persisted_hash(operation),
             }
         },
     }
 
-    return await asyncio.to_thread(transport.request, "post", json=payload)
+    try:
+        return await asyncio.to_thread(transport.request, "post", json=payload)
+    except Exception as e:
+        # Устаревший хэш сервер отвергает («Access denied», PersistedQueryNotFound).
+        # Снимаем актуальные с сайта браузером и повторяем — один раз.
+        if not retry or not _looks_like_stale_hash(e):
+            raise
+        logger.info("Операция %s отклонена (%s) — обновляю хэши с сайта", operation, e)
+        import query_sniffer
+
+        await asyncio.to_thread(query_sniffer.refresh)
+        return await _persisted(operation, variables, retry=False)
+
+
+def _looks_like_stale_hash(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(
+        marker in text
+        for marker in ("access denied", "forbidden", "persistedquerynotfound", "not found")
+    )
 
 
 async def search_games(name: str = "", count: int = 24) -> list[dict]:
