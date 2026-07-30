@@ -316,21 +316,23 @@ async def fetch_my_items(limit: int = 10) -> list[dict]:
 # ── Создание товара: этап 2 (запросы вместо браузера) ─────────────────────────
 
 async def _persisted(operation: str, variables: dict) -> dict:
-    """GET-запрос persisted-операции (так фронт Playerok читает справочники)."""
+    """
+    Persisted-операция. Фронт шлёт такие GET-ом, но GET без content-type
+    Apollo блокирует как возможный CSRF, поэтому шлём POST с JSON-телом: для APQ
+    это равнозначно, а заголовок content-type снимает вопрос защиты.
+    """
     payload = {
         "operationName": operation,
-        "variables": json.dumps(variables),
-        "extensions": json.dumps({
+        "variables": variables,
+        "extensions": {
             "persistedQuery": {
                 "version": 1,
                 "sha256Hash": PERSISTED_QUERIES[operation],
             }
-        }),
+        },
     }
 
-    return await asyncio.to_thread(
-        transport.request, "get", params=payload, content_type=None
-    )
+    return await asyncio.to_thread(transport.request, "post", json=payload)
 
 
 async def search_games(name: str, count: int = 24) -> list[dict]:

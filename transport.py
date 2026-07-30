@@ -150,6 +150,9 @@ def _request(method: str, cookies: dict[str, str], **kwargs):
         "origin": config.PLAYEROK_BASE_URL,
         "referer": config.PLAYEROK_BASE_URL + "/",
         "user-agent": load_user_agent(),
+        # Apollo режет «простые» запросы как возможный CSRF; этот заголовок
+        # переводит запрос в разряд требующих preflight и снимает блокировку.
+        "apollo-require-preflight": "true",
     }
     if headers["content-type"] is None:
         headers.pop("content-type")
@@ -186,7 +189,10 @@ const cb = arguments[arguments.length - 1];
 const [url, method, body] = arguments;
 fetch(url, {
   method: method,
-  headers: body ? {'content-type': 'application/json'} : {},
+  headers: Object.assign(
+    {'apollo-require-preflight': 'true'},
+    body ? {'content-type': 'application/json'} : {}
+  ),
   body: body || undefined,
   credentials: 'include',
 })
