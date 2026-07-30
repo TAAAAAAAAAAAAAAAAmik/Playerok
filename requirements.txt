@@ -4,3 +4,4 @@ httpx==0.25.2
 python-dotenv==1.0.0
 aiofiles==23.2.1
 selenium==4.27.1
+curl_cffi==0.7.4

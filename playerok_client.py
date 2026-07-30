@@ -1,10 +1,11 @@
+import asyncio
 import json
-import httpx
 import logging
 from typing import Optional
 from config import PLAYEROK_API_URL, PLAYEROK_BASE_URL
 import config
 import auth
+import transport
 
 logger = logging.getLogger(__name__)
 
@@ -127,44 +128,19 @@ mutation publishItem($input: PublishItemInput!) {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_headers() -> dict:
-    headers = dict(BASE_HEADERS)
-    token = auth.get_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    # Playerok авторизует по кукам (token + __ddg*), а не по заголовку.
-    # Кука DDoS-Guard привязана к IP и User-Agent — берите её из браузера.
-    if config.PLAYEROK_COOKIES:
-        headers["Cookie"] = config.PLAYEROK_COOKIES
-    elif token:
-        headers["Cookie"] = f"token={token}"
-    return headers
-
-
 async def _gql(
     query: str,
     variables: Optional[dict] = None,
-    token_override: Optional[str] = None,
+    operation: Optional[str] = None,
 ) -> dict:
-    headers = dict(BASE_HEADERS)
-    t = token_override or auth.get_token()
-    if t:
-        headers["Authorization"] = f"Bearer {t}"
-
+    """POST-запрос к /graphql. Транспорт синхронный, уводим его в поток."""
     payload: dict = {"query": query}
+    if operation:
+        payload["operationName"] = operation
     if variables:
         payload["variables"] = variables
 
-    async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
-        resp = await client.post(PLAYEROK_API_URL, json=payload)
-        resp.raise_for_status()
-
-    data = resp.json()
-    if "errors" in data:
-        msgs = [e.get("message", str(e)) for e in data["errors"]]
-        raise RuntimeError("; ".join(msgs))
-
-    return data.get("data", {})
+    return await asyncio.to_thread(transport.request, "post", json=payload)
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -193,6 +169,19 @@ async def login_with_code(email: str, code: str) -> dict:
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
 _viewer_id: str = ""
+_last_error_log: float = 0.0
+
+
+def _log_error_rarely(message: str, error: Exception):
+    """Опрос идёт каждые 30 секунд — не заваливаем журнал одной и той же ошибкой."""
+    global _last_error_log
+    import time
+
+    if time.time() - _last_error_log > 300:
+        logger.error("%s: %s", message, error)
+        _last_error_log = time.time()
+    else:
+        logger.debug("%s: %s", message, error)
 
 
 async def fetch_viewer() -> dict:
@@ -230,7 +219,7 @@ async def fetch_deals(count: int = 20, direction: str = "OUT") -> list[dict]:
         edges = (data.get("deals") or {}).get("edges") or []
         return [edge["node"] for edge in edges if edge.get("node")]
     except Exception as e:
-        logger.error("fetch_deals error: %s", e)
+        _log_error_rarely("fetch_deals error", e)
         return []
 
 
@@ -272,14 +261,9 @@ async def _persisted(operation: str, variables: dict) -> dict:
         }),
     }
 
-    async with httpx.AsyncClient(headers=_make_headers(), timeout=30.0) as client:
-        resp = await client.get(PLAYEROK_API_URL, params=payload)
-        resp.raise_for_status()
-
-    data = resp.json()
-    if "errors" in data:
-        raise RuntimeError("; ".join(e.get("message", str(e)) for e in data["errors"]))
-    return data.get("data", {})
+    return await asyncio.to_thread(
+        transport.request, "get", params=payload, content_type=None
+    )
 
 
 async def search_games(name: str, count: int = 24) -> list[dict]:
@@ -377,23 +361,16 @@ async def create_item(
         files[str(i)] = (filename, content, content_type)
         file_map[str(i)] = [f"variables.attachments.{i - 1}"]
 
-    headers = _make_headers()
-    # Content-Type multipart с boundary проставит httpx.
-    headers.pop("Content-Type", None)
+    # Content-Type для multipart проставляет сам клиент — вместе с boundary.
+    data = await asyncio.to_thread(
+        transport.request,
+        "post",
+        data={"operations": json.dumps(operations), "map": json.dumps(file_map)},
+        files=files or None,
+        content_type=None,
+    )
 
-    async with httpx.AsyncClient(headers=headers, timeout=120.0) as client:
-        resp = await client.post(
-            PLAYEROK_API_URL,
-            data={"operations": json.dumps(operations), "map": json.dumps(file_map)},
-            files=files or {"": ("", b"")},
-        )
-        resp.raise_for_status()
-
-    data = resp.json()
-    if "errors" in data:
-        raise RuntimeError("; ".join(e.get("message", str(e)) for e in data["errors"]))
-
-    item = (data.get("data") or {}).get("createItem")
+    item = data.get("createItem")
     if not item or not item.get("id"):
         raise RuntimeError("Сервер не вернул созданный товар.")
     return item
