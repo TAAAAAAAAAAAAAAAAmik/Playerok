@@ -30,6 +30,11 @@ logging.basicConfig(
     level=logging.INFO,
     stream=sys.stdout,
 )
+# httpx пишет строку на каждый опрос Telegram — в журнале от этого не видно
+# ничего своего. Оставляем от него только предупреждения.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # ConversationHandler states
