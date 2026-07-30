@@ -9,3 +9,5 @@ venv/
 .chrome-profile/
 debug/
 uploads/
+last_run.log
+playerok-debug-*.tar.gz

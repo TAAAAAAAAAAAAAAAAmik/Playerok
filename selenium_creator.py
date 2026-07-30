@@ -344,18 +344,60 @@ class PlayerokBrowser:
 
     # ── Шаг 1: страница создания ──────────────────────────────────────────
 
+    def _discover_routes(self) -> list[str]:
+        """
+        Маршруты фронта из build-манифеста Next.js. Playerok собран на Next,
+        и клиент держит список всех страниц в `window.__BUILD_MANIFEST` —
+        оттуда адрес мастера берётся точно, без угадывания.
+        """
+        try:
+            routes = self.driver.execute_script(
+                "const m = window.__BUILD_MANIFEST || self.__BUILD_MANIFEST;"
+                "return m && m.sortedPages ? m.sortedPages : [];"
+            )
+        except WebDriverException as e:
+            logger.warning("Не смог прочитать build-манифест: %s", e)
+            return []
+
+        routes = [r for r in (routes or []) if isinstance(r, str)]
+        if routes and self._run_dir:
+            with open(os.path.join(self._run_dir, "routes.txt"), "w", encoding="utf-8") as f:
+                f.write("\n".join(routes))
+        return routes
+
+    def _create_route_candidates(self) -> list[str]:
+        """Маршруты, похожие на мастер создания товара, — самые точные первыми."""
+        keywords = ("new", "create", "sell", "add")
+        routes = self._discover_routes()
+        found = [
+            r
+            for r in routes
+            # страницы с [param] пропускаем — туда нужен конкретный id
+            if "[" not in r and any(k in r.lower() for k in keywords)
+        ]
+        # Сначала те, где рядом есть «item/product/lot», затем остальные.
+        found.sort(key=lambda r: 0 if any(w in r.lower() for w in ("item", "product", "lot")) else 1)
+        return found + [c for c in CREATE_URL_CANDIDATES if c not in found]
+
+    def _looks_like_wizard(self) -> bool:
+        markers = ("Выберите игру", "Выбор игры", "Выберите категорию", "Что продаём")
+        return any(self._find_by_text(m, timeout=1) for m in markers)
+
     def step1_open_create_page(self):
-        for path in CREATE_URL_CANDIDATES:
+        self.driver.get(config.PLAYEROK_BASE_URL)
+        self._sleep(2.5)
+
+        candidates = self._create_route_candidates()
+        logger.info("Кандидаты адреса мастера: %s", candidates)
+
+        for path in candidates:
             url = config.PLAYEROK_BASE_URL + path
             try:
                 self.driver.get(url)
             except TimeoutException:
                 continue
             self._sleep(2.5)
-            # Страница мастера найдена, если есть что-то про выбор игры.
-            if self._find_by_text("Выберите игру", timeout=3) or self._find_by_text(
-                "Выбор игры", timeout=1
-            ):
+            if self._looks_like_wizard():
                 return f"Открыт {url}"
 
         # Фолбэк: кнопка «Продать» на главной.
@@ -363,12 +405,14 @@ class PlayerokBrowser:
         self._sleep(2)
         for text in ("Продать", "Создать товар", "Разместить объявление"):
             if self._click_text(text, timeout=3, required=False):
-                self._sleep(2)
-                return f"Перешёл по кнопке «{text}»"
+                self._sleep(2.5)
+                if self._looks_like_wizard():
+                    return f"Перешёл по кнопке «{text}» → {self.driver.current_url}"
 
         raise CreationError(
-            "Не нашёл страницу создания товара. Проверьте авторизацию и "
-            "актуальный адрес мастера (см. CREATE_URL_CANDIDATES)."
+            "Не нашёл страницу создания товара. Проверенные адреса: "
+            + ", ".join(candidates)
+            + f". Полный список маршрутов сайта — в {self._run_dir}/routes.txt"
         )
 
     # ── Шаг 2: игра ───────────────────────────────────────────────────────
