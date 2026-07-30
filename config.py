@@ -41,6 +41,10 @@ CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "")
 # если версии Chrome и драйвера не совпадают.
 CHROMEDRIVER_ARGS = os.getenv("CHROMEDRIVER_ARGS", "").split()
 
+# Чем создавать товар: "api" — прямыми запросами (быстро),
+# "browser" — прогоном мастера в Selenium (запасной путь).
+CREATE_MODE = os.getenv("CREATE_MODE", "api")
+
 # 1 — все запросы к API выполнять внутри браузера. Медленнее, но куки,
 # User-Agent и TLS-отпечаток гарантированно совпадают с браузерной сессией.
 PLAYEROK_BROWSER_TRANSPORT = os.getenv("PLAYEROK_BROWSER_TRANSPORT", "0") == "1"

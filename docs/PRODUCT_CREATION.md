@@ -112,28 +112,57 @@ bash run_check.sh <token>      # запишет токен в .env, прогон
   на CONNECT), поэтому здесь сценарий гоняется по макетам, а живой прогон — на
   сервере через `run_check.sh`.
 
-## Этап 2 — перевод на запросы
+## Этап 2 — создание запросами (сейчас основной путь)
 
-Функции уже написаны в `playerok_client.py` (`search_games`,
-`fetch_obtaining_types`, `fetch_data_fields`, `create_item`,
-`fetch_priority_statuses`, `publish_item`), но к боту не подключены. Порядок
-вызовов повторяет таблицу выше:
+Код: `api_creator.py`, транспорт — `transport.py`. Режим выбирается в `.env`:
 
-```python
-games = await search_games("Telegram")
-types_ = await fetch_obtaining_types(category_id)
-fields = await fetch_data_fields(category_id, obtaining_type_id)
-item = await create_item(
-    game_category_id=category_id,
-    obtaining_type_id=obtaining_type_id,
-    name="...", price=90, description="...",
-    attributes={"color": "heart"},
-    data_fields=[{"fieldId": f["id"], "value": "..."}],
-    attachments=[("banner.png", data, "image/png")],
-)
-statuses = await fetch_priority_statuses(item["id"], item["price"])
-free = next(s for s in statuses if s["price"] == 0)
-await publish_item(item["id"], free["id"])
+```
+CREATE_MODE=api       # запросами (по умолчанию)
+CREATE_MODE=browser   # прогон мастера в Selenium — запасной путь
 ```
 
-Переключаем после того, как браузерный сценарий подтверждён на живом аккаунте.
+Порядок вызовов повторяет шаги мастера:
+
+| Шаг | Запрос | Что получаем |
+|-----|--------|--------------|
+| 1 | `games` | `gameId` по названию игры |
+| 2 | `GamePage` → `GamePageCategory` | `gameCategoryId` и `options` категории |
+| 3 | `gameCategoryObtainingTypes` | `obtainingTypeId` |
+| 4 | `options` категории | `attributes` = `{field: value}` |
+| 5 | `gameCategoryDataFields` | `dataFields` — только поля `ITEM_DATA` |
+| 6 | файлы с диска | вложения `createItem` |
+| 7 | `createItem` | черновик товара |
+| 8 | `itemPriorityStatuses` | статус размещения (бесплатный — с `price == 0`) |
+| 9 | `publishItem` | публикация |
+
+При `placement="later"` шаги 8–9 пропускаются: товар остаётся черновиком.
+
+Пользователь называет игру, категорию, способ передачи и характеристики так же,
+как они подписаны на сайте — сопоставление по названиям делает `api_creator`.
+Если совпадения нет, ошибка перечисляет доступные варианты, например:
+«Категория: «Несуществующая» не найдена. Есть: Звезды, Подарки (NFT)».
+
+### Транспорт
+
+Прямые запросы Playerok отбивает: перед API стоит DDoS-Guard, который смотрит
+на TLS-отпечаток и куку `__ddg*`, привязанную к IP и User-Agent. Поэтому:
+
+* запросы идут через `curl_cffi` с `impersonate="chrome"`;
+* куки и User-Agent берутся из браузерной сессии (`.playerok_cookies.json`),
+  обновляются Selenium'ом при отказе, но не чаще раза в 5 минут;
+* persisted-операции отправляются **POST**-ом с JSON-телом: GET без
+  `content-type` Apollo блокирует как возможный CSRF;
+* если ничего не помогло, запрос выполняется прямо в браузере через `fetch` на
+  открытой странице — там куки, UA и TLS совпадают по определению
+  (`PLAYEROK_BROWSER_TRANSPORT=1` включает этот путь сразу);
+* `createItem` шлёт файлы multipart-телом, собранным вручную: `curl_cffi`
+  не принимает `files=`.
+
+### Что проверено
+
+Полный цикл прогнан на локальном сервере, отвечающем как Playerok: все 9 шагов,
+правильные `operationName` и переменные, multipart с файлом и картой вложений,
+выбор бесплатного статуса, `publishItem` с `priorityStatuses`, режим черновика
+и понятные ошибки при неверных названиях. На живом аккаунте путь через браузер
+подтверждён полностью; запросный — после того, как транспорт научился проходить
+защиту.

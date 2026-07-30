@@ -345,6 +345,32 @@ async def search_games(name: str, count: int = 24) -> list[dict]:
     return [edge["node"] for edge in edges if edge.get("node")]
 
 
+async def fetch_game(slug: str = "", game_id: str = "") -> dict:
+    """Игра со списком категорий: GamePage принимает slug или id."""
+    data = await _persisted("GamePage", {"id": game_id or None, "slug": slug or None})
+    game = data.get("game")
+    if not game:
+        raise RuntimeError(f"Игра не найдена: {slug or game_id}")
+    return game
+
+
+async def fetch_category(
+    category_id: str = "", game_id: str = "", slug: str = ""
+) -> dict:
+    """
+    Полные данные категории, включая options — из них собираются
+    атрибуты товара. Берётся по id либо по связке game_id + slug.
+    """
+    data = await _persisted(
+        "GamePageCategory",
+        {"id": category_id or None, "gameId": game_id or None, "slug": slug or None},
+    )
+    category = data.get("gameCategory")
+    if not category:
+        raise RuntimeError(f"Категория не найдена: {slug or category_id}")
+    return category
+
+
 async def fetch_obtaining_types(game_category_id: str, count: int = 24) -> list[dict]:
     """Способы получения товара внутри категории."""
     data = await _persisted(
@@ -430,13 +456,11 @@ async def create_item(
         files[str(i)] = (filename, content, content_type)
         file_map[str(i)] = [f"variables.attachments.{i - 1}"]
 
-    # Content-Type для multipart проставляет сам клиент — вместе с boundary.
+    body, content_type = transport.encode_multipart(
+        {"operations": json.dumps(operations), "map": json.dumps(file_map)}, files
+    )
     data = await asyncio.to_thread(
-        transport.request,
-        "post",
-        data={"operations": json.dumps(operations), "map": json.dumps(file_map)},
-        files=files or None,
-        content_type=None,
+        transport.request, "post", data=body, content_type=content_type
     )
 
     item = data.get("createItem")

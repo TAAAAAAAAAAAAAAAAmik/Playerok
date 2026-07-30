@@ -22,6 +22,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -175,6 +176,32 @@ def _request(method: str, cookies: dict[str, str], **kwargs):
         return client.request(method.upper(), config.PLAYEROK_API_URL, **kwargs)
 
 
+def encode_multipart(
+    fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]
+) -> tuple[bytes, str]:
+    """
+    Собирает тело multipart/form-data вручную: curl_cffi не принимает files=,
+    а ручная сборка одинаково работает и с ним, и с httpx.
+    Возвращает (тело, значение content-type).
+    """
+    boundary = "----playerok" + uuid.uuid4().hex
+    body = bytearray()
+
+    for name, value in fields.items():
+        body += f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        body += str(value).encode() + b"\r\n"
+
+    for name, (filename, content, content_type) in files.items():
+        body += (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
+            f'filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n'
+        ).encode()
+        body += content + b"\r\n"
+
+    body += f"--{boundary}--\r\n".encode()
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
 # ── Запрос из самого браузера ─────────────────────────────────────────────────
 #
 # Самый надёжный путь: fetch выполняется на открытой странице Playerok, так что
@@ -297,7 +324,7 @@ def request(method: str, *, retry: bool = True, **kwargs) -> dict:
             logger.info("Обновить куки не вышло (%s) — пробую запрос из браузера", e)
             return browser_request(method, kwargs.get("json"), kwargs.get("params"))
 
-    if resp.status_code >= 400:
+    if resp.status_code >= 400 and not kwargs.get("data"):
         # Свежие куки не помогли: значит дело не в них — идём через браузер.
         logger.info(
             "HTTP %s на операции %s даже со свежими куками — иду через браузер",
@@ -305,6 +332,11 @@ def request(method: str, *, retry: bool = True, **kwargs) -> dict:
             operation,
         )
         return browser_request(method, kwargs.get("json"), kwargs.get("params"))
+
+    if resp.status_code >= 400:
+        raise TransportError(
+            f"HTTP {resp.status_code} на операции {operation}: {resp.text[:200]}"
+        )
 
     try:
         data = resp.json()

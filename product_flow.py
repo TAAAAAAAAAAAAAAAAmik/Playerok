@@ -21,7 +21,10 @@ from telegram.ext import (
 )
 
 import config
-from selenium_creator import CreationError, ProductDraft, create_product
+from api_creator import ApiCreationError
+from api_creator import create_product as create_product_api
+from selenium_creator import CreationError, ProductDraft
+from selenium_creator import create_product as create_product_browser
 
 logger = logging.getLogger(__name__)
 
@@ -246,8 +249,12 @@ async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["placement"] = query.data.split(":", 1)[1]
     draft = _draft_from(ctx.user_data)
     chat_id = query.message.chat_id
+    via_api = config.CREATE_MODE != "browser"
     await query.edit_message_text(
-        "🖥 Запускаю браузер и прохожу мастер создания…", parse_mode=ParseMode.HTML
+        "⚡ Создаю товар запросами к API…"
+        if via_api
+        else "🖥 Запускаю браузер и прохожу мастер создания…",
+        parse_mode=ParseMode.HTML,
     )
 
     loop = asyncio.get_running_loop()
@@ -277,7 +284,11 @@ async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     reporter = asyncio.create_task(report())
     try:
-        await asyncio.to_thread(create_product, draft, on_step)
+        if via_api:
+            # Запросы асинхронные — поток не нужен, on_step зовётся из этого же цикла.
+            await create_product_api(draft, lambda s: progress.put_nowait(s))
+        else:
+            await asyncio.to_thread(create_product_browser, draft, on_step)
         await progress.put(None)
         await reporter
         done_text = (
@@ -288,14 +299,17 @@ async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Проверьте его в личном кабинете Playerok."
         )
         await ctx.bot.send_message(chat_id, done_text, parse_mode=ParseMode.HTML)
-    except CreationError as e:
+    except (CreationError, ApiCreationError) as e:
         await progress.put(None)
         await reporter
+        hint = (
+            "Можно повторить через браузер: <code>CREATE_MODE=browser</code> в .env"
+            if via_api
+            else f"Скриншоты и HTML шагов лежат в <code>{config.DEBUG_DIR}</code>"
+        )
         await ctx.bot.send_message(
             chat_id,
-            f"❌ <b>Мастер остановился.</b>\n<code>{e}</code>\n\n"
-            f"Скриншоты и HTML шагов лежат в <code>{config.DEBUG_DIR}</code> — "
-            "по ним поправим селекторы.",
+            f"❌ <b>Создание остановилось.</b>\n<code>{e}</code>\n\n{hint}",
             parse_mode=ParseMode.HTML,
         )
     except Exception as e:
