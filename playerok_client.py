@@ -335,11 +335,17 @@ async def _persisted(operation: str, variables: dict) -> dict:
     return await asyncio.to_thread(transport.request, "post", json=payload)
 
 
-async def search_games(name: str, count: int = 24) -> list[dict]:
-    """Игры и приложения по названию. Возвращает [{id, name, slug}, ...]."""
+async def search_games(name: str = "", count: int = 24) -> list[dict]:
+    """
+    Игры и приложения. Без имени — первые `count` из общего списка,
+    с именем — поиск. Возвращает [{id, name, slug}, ...].
+    """
     data = await _persisted(
         "games",
-        {"pagination": {"first": count, "after": None}, "filter": {"name": name, "type": None}},
+        {
+            "pagination": {"first": count, "after": None},
+            "filter": {"name": name or None, "type": None},
+        },
     )
     edges = (data.get("games") or {}).get("edges") or []
     return [edge["node"] for edge in edges if edge.get("node")]

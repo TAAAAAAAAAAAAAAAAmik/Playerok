@@ -83,8 +83,9 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
         raise ApiCreationError(f"Шаг {number} «{title}»: {error}") from error
 
     # 1. Игра
-    title = "Раздел товаров"
-    try:
+    async def resolve_game() -> dict:
+        if draft.game_id:
+            return {"id": draft.game_id, "name": draft.game, "slug": ""}
         games = await api.search_games(draft.game)
         game = _match(games, draft.game, "name", "slug")
         if not game:
@@ -92,51 +93,67 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
                 f"«{draft.game}» не найдена. Похожие: "
                 + ", ".join(g.get("name", "?") for g in games[:5])
             )
+        return game
+
+    title = "Раздел товаров"
+    try:
+        game = await resolve_game()
         report(1, title, f"Игра: {game['name']}")
     except Exception as e:
         fail(1, title, e)
 
-    # 2. Категория
-    title = "Категория"
-    try:
+    # 2. Категория (полные данные нужны ради options)
+    async def resolve_category() -> dict:
+        if draft.category_id:
+            return await api.fetch_category(category_id=draft.category_id)
         game_page = await api.fetch_game(slug=game.get("slug", ""), game_id=game["id"])
         categories = game_page.get("categories") or []
-        category = _match(categories, draft.category, "name", "slug")
-        if not category:
+        found = _match(categories, draft.category, "name", "slug")
+        if not found:
             raise RuntimeError(
                 f"«{draft.category}» не найдена. Есть: "
                 + ", ".join(c.get("name", "?") for c in categories[:10])
             )
-        # Полные данные нужны ради options — в списке игры их нет.
-        category = await api.fetch_category(category_id=category["id"])
+        return await api.fetch_category(category_id=found["id"])
+
+    title = "Категория"
+    try:
+        category = await resolve_category()
         report(2, title, f"Категория: {category['name']}")
     except Exception as e:
         fail(2, title, e)
 
     # 3. Способ передачи
-    title = "Способ передачи"
-    try:
-        obtaining_types = await api.fetch_obtaining_types(category["id"])
-        obtaining = _match(obtaining_types, draft.obtaining_type, "name", "slug")
-        if not obtaining:
+    async def resolve_obtaining() -> dict:
+        if draft.obtaining_type_id:
+            return {"id": draft.obtaining_type_id, "name": draft.obtaining_type}
+        types_ = await api.fetch_obtaining_types(category["id"])
+        found = _match(types_, draft.obtaining_type, "name", "slug")
+        if not found:
             raise RuntimeError(
                 f"«{draft.obtaining_type}» не найден. Есть: "
-                + ", ".join(o.get("name", "?") for o in obtaining_types)
+                + ", ".join(o.get("name", "?") for o in types_)
             )
+        return found
+
+    title = "Способ передачи"
+    try:
+        obtaining = await resolve_obtaining()
         report(3, title, f"Способ передачи: {obtaining['name']}")
     except Exception as e:
         fail(3, title, e)
 
     # 4. Характеристики → attributes
-    title = "Характеристики"
-    try:
+    def resolve_attributes() -> dict[str, str]:
+        if draft.attribute_values:
+            return dict(draft.attribute_values)
         options = category.get("options") or []
-        attributes: dict[str, str] = {}
+        chosen: dict[str, str] = {}
         missing: list[str] = []
         for wanted in draft.attributes:
             option = _match(options, wanted, "label", "value")
             if option and option.get("field"):
-                attributes[option["field"]] = option.get("value")
+                chosen[option["field"]] = option.get("value")
             else:
                 missing.append(wanted)
         if missing:
@@ -146,33 +163,51 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
                 + ". Доступны: "
                 + ", ".join(str(o.get("label") or o.get("value")) for o in options[:10])
             )
-        report(4, title, "Характеристики: " + (", ".join(f"{k}={v}" for k, v in attributes.items()) or "нет"))
+        return chosen
+
+    title = "Характеристики"
+    try:
+        attributes = resolve_attributes()
+        report(
+            4,
+            title,
+            "Характеристики: "
+            + (", ".join(f"{k}={v}" for k, v in attributes.items()) or "нет"),
+        )
     except Exception as e:
         fail(4, title, e)
 
     # 5. Данные товара → dataFields
-    title = "Данные товара"
-    try:
+    async def resolve_data_fields() -> list[dict]:
+        if draft.data_field_values:
+            return list(draft.data_field_values)
         fields = await api.fetch_data_fields(category["id"], obtaining["id"])
         # Поля OBTAINING_DATA заполняет покупатель при заказе — их не трогаем.
         item_fields = [f for f in fields if f.get("type") == "ITEM_DATA"]
-        data_fields = []
+        filled = []
         for label, value in draft.data_fields.items():
-            field = _match(item_fields, label, "label")
-            if not field:
+            found = _match(item_fields, label, "label")
+            if not found:
                 raise RuntimeError(
                     f"поле «{label}» не найдено. Есть: "
                     + ", ".join(f.get("label", "?") for f in item_fields)
                 )
-            data_fields.append({"fieldId": field["id"], "value": value})
+            filled.append({"fieldId": found["id"], "value": value})
 
-        required = [f for f in item_fields if f.get("id") not in
-                    {d["fieldId"] for d in data_fields}]
-        if required:
+        skipped = [
+            f for f in item_fields
+            if f.get("id") not in {d["fieldId"] for d in filled}
+        ]
+        if skipped:
             logger.info(
                 "Не заполнены поля данных: %s",
-                ", ".join(f.get("label", "?") for f in required),
+                ", ".join(f.get("label", "?") for f in skipped),
             )
+        return filled
+
+    title = "Данные товара"
+    try:
+        data_fields = await resolve_data_fields()
         report(5, title, f"Полей заполнено: {len(data_fields)}")
     except Exception as e:
         fail(5, title, e)

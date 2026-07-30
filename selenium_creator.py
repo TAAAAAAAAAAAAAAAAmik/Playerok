@@ -110,6 +110,14 @@ class ProductDraft:
     # Размещение на девятом шаге: free — бесплатно, premium — платно,
     # later — оставить в черновике («Выставить позже»).
     placement: str = "free"
+    # Идентификаторы, если их уже выбрали кнопками: тогда искать по
+    # названиям не нужно. Браузерный мастер их не использует.
+    game_id: str = ""
+    category_id: str = ""
+    obtaining_type_id: str = ""
+    # Готовые атрибуты {field: value} и поля [{fieldId, value}].
+    attribute_values: dict[str, str] = field(default_factory=dict)
+    data_field_values: list[dict] = field(default_factory=list)
 
 
 @dataclass
