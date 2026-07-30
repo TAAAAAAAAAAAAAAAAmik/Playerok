@@ -99,9 +99,16 @@ fi
 # ── 3. Виртуальное окружение ──────────────────────────────────────────────────
 
 log "Ставлю Python-зависимости"
-[ -d "$APP_DIR/.venv" ] || python3 -m venv "$APP_DIR/.venv"
+# Пересоздаём окружение, если его нет или оно осталось битым после сбоя.
+# Каталог .venv лежит внутри уже проверенного клона, так что удалять его безопасно.
+if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
+    rm -rf "$APP_DIR/.venv"
+    python3 -m venv "$APP_DIR/.venv"
+fi
 "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
-"$APP_DIR/.venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
+# Без --quiet: если резолвер не сойдётся, нужно видеть, какие версии конфликтуют.
+"$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" \
+    || die "pip не смог установить зависимости — подробности в выводе выше."
 
 # ── 4. Конфигурация ───────────────────────────────────────────────────────────
 

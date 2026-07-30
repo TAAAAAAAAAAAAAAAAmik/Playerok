@@ -1,4 +1,5 @@
-python-telegram-bot==20.7
-httpx==0.26.0
-python-dotenv==1.0.0
-aiofiles==23.2.1
+# python-telegram-bot задаёт допустимый диапазон httpx
+# (22.8 -> httpx>=0.27,<0.29), поэтому эти две версии обновляются только вместе.
+python-telegram-bot==22.8
+httpx==0.28.1
+python-dotenv==1.2.2
