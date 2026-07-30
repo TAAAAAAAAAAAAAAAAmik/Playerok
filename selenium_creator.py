@@ -398,6 +398,26 @@ class PlayerokBrowser:
         found.sort(key=score)
         return found + [c for c in CREATE_URL_CANDIDATES if c not in found]
 
+    def _wait_for_render(self, timeout: int = 12) -> int:
+        """
+        Ждёт, пока Next.js дорисует страницу на клиенте: сразу после `get()`
+        в body пусто, и проверять содержимое бессмысленно.
+        Возвращает длину текста страницы.
+        """
+        deadline = time.time() + timeout
+        length = 0
+        while time.time() < deadline:
+            try:
+                length = self.driver.execute_script(
+                    "return (document.body && document.body.innerText || '').length;"
+                )
+            except WebDriverException:
+                length = 0
+            if length and length > 200:
+                return length
+            time.sleep(0.5)
+        return length
+
     def _looks_like_wizard(self) -> bool:
         markers = (
             "Выберите игру",
@@ -425,7 +445,8 @@ class PlayerokBrowser:
                 self.driver.get(url)
             except TimeoutException:
                 continue
-            self._sleep(2.5)
+            length = self._wait_for_render()
+            logger.info("%s — текста на странице: %s символов", url, length)
             # Снимок каждой проверенной страницы: если мастер не опознан,
             # по дампам сразу видно, как страница выглядит на самом деле.
             self.snapshot(1, f"try{path.replace('/', '-')}")
