@@ -319,9 +319,11 @@ async def fetch_my_items(limit: int = 10) -> list[dict]:
 # Фронт со временем переименовывает операции: страница игры сейчас
 # запрашивается как Game, раньше — как GamePage. Пробуем варианты по порядку.
 OPERATION_ALIASES = {
-    "GamePage": ["Game", "GamePage"],
+    # Список игр в мастере продажи; прежнее имя games сервер уже не принимает.
+    "games": ["SellGames", "games"],
+    # Игра с категориями: в мастере это gameWithCategories, на странице — Game.
+    "GamePage": ["gameWithCategories", "Game", "GamePage"],
     "GamePageCategory": ["GamePageCategory", "GameCategory"],
-    "games": ["games", "Games"],
     "deals": ["deals", "Deals"],
 }
 

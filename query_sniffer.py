@@ -31,36 +31,62 @@ QUERIES_FILE = os.getenv("PLAYEROK_QUERIES_FILE", ".playerok_queries.json")
 DEFAULT_PAGES = ["/", "/profile"]
 
 
-def load_hashes() -> dict[str, str]:
-    """Снятые ранее хэши; пустой словарь, если файла нет."""
+def load_operations() -> dict[str, dict]:
+    """
+    Снятые операции: {имя: {"hash": ..., "variables": {...}}}.
+    Переменные — образец того, что шлёт фронт: по ним видно, каких аргументов
+    ждёт операция, когда она переименовалась и параметры поменялись.
+    """
     if not os.path.exists(QUERIES_FILE):
         return {}
     try:
         with open(QUERIES_FILE, encoding="utf-8") as f:
-            return json.load(f).get("hashes", {})
+            saved = json.load(f).get("hashes", {})
     except (OSError, ValueError) as e:
         logger.warning("Не смог прочитать %s: %s", QUERIES_FILE, e)
         return {}
 
+    # Файлы старого формата хранили просто строку с хэшем.
+    return {
+        name: (value if isinstance(value, dict) else {"hash": value, "variables": {}})
+        for name, value in saved.items()
+    }
 
-def save_hashes(hashes: dict[str, str]):
+
+def load_hashes() -> dict[str, str]:
+    """Только хэши — так их читает playerok_client."""
+    return {name: op["hash"] for name, op in load_operations().items() if op.get("hash")}
+
+
+def save_hashes(operations: dict):
     with open(QUERIES_FILE, "w", encoding="utf-8") as f:
-        json.dump({"saved_at": time.time(), "hashes": hashes}, f, indent=2)
+        json.dump({"saved_at": time.time(), "hashes": operations}, f,
+                  indent=2, ensure_ascii=False)
 
 
-def _extract(payload: dict) -> tuple[str, str] | None:
-    """Из тела запроса достаёт (operationName, sha256Hash), если они есть."""
+def _extract(payload: dict) -> tuple[str, dict] | None:
+    """Из запроса достаёт (operationName, {hash, variables}), если они есть."""
     operation = payload.get("operationName")
     extensions = payload.get("extensions")
-    if isinstance(extensions, str):
-        try:
-            extensions = json.loads(extensions)
-        except ValueError:
-            return None
+    variables = payload.get("variables")
+    for field in ("extensions", "variables"):
+        value = extensions if field == "extensions" else variables
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                parsed = None
+            if field == "extensions":
+                extensions = parsed
+            else:
+                variables = parsed
+
     if not operation or not isinstance(extensions, dict):
         return None
     sha = (extensions.get("persistedQuery") or {}).get("sha256Hash")
-    return (operation, sha) if sha else None
+    if not sha:
+        return None
+    return operation, {"hash": sha, "variables": variables if isinstance(variables, dict) else {}}
 
 
 def _from_url(url: str) -> tuple[str, str] | None:
@@ -116,7 +142,8 @@ def collect(browser, pages: list[str] | None = None) -> dict[str, str]:
     return hashes
 
 
-def collect_from_wizard(browser, game: str = "Telegram") -> dict[str, str]:
+def collect_from_wizard(browser, game: str = "Telegram",
+                        category: str = "", obtaining: str = "") -> dict:
     """
     Часть операций фронт запрашивает только внутри мастера создания товара:
     список игр (`games`), способы передачи, поля данных. Открываем мастер и
@@ -133,10 +160,21 @@ def collect_from_wizard(browser, game: str = "Telegram") -> dict[str, str]:
             time.sleep(2.5)
             _drain_log(browser, hashes)
 
-        # Выбор игры открывает категории, дальше — способы передачи.
+        # Выбор игры открывает категории, категория — способы передачи,
+        # способ — поля данных. Идём по цепочке, снимая запросы.
         if browser._click_text(game, timeout=8, required=False):
-            time.sleep(2.5)
+            time.sleep(3)
             _drain_log(browser, hashes)
+
+            if category and browser._click_text(category, timeout=8, required=False):
+                browser._click_next(required=False, timeout=5)
+                time.sleep(3)
+                _drain_log(browser, hashes)
+
+                if obtaining and browser._click_text(obtaining, timeout=8, required=False):
+                    browser._click_next(required=False, timeout=5)
+                    time.sleep(3)
+                    _drain_log(browser, hashes)
     except Exception as e:
         logger.warning("Мастер прошёл не полностью: %s", e)
         _drain_log(browser, hashes)
@@ -144,7 +182,8 @@ def collect_from_wizard(browser, game: str = "Telegram") -> dict[str, str]:
     return hashes
 
 
-def refresh(pages: list[str] | None = None, wizard: bool = True) -> dict[str, str]:
+def refresh(pages: list[str] | None = None, wizard: bool = True,
+            game: str = "Telegram", category: str = "", obtaining: str = "") -> dict:
     """Открывает браузер, собирает хэши и дописывает их в файл."""
     from selenium_creator import PlayerokBrowser
 
@@ -153,25 +192,35 @@ def refresh(pages: list[str] | None = None, wizard: bool = True) -> dict[str, st
         fresh = collect(browser, pages)
         if wizard:
             logger.info("Открываю мастер создания — там живут остальные операции")
-            fresh.update(collect_from_wizard(browser))
+            fresh.update(collect_from_wizard(browser, game, category, obtaining))
 
     if not fresh:
         raise RuntimeError("Не поймал ни одного persisted-запроса")
 
-    hashes = load_hashes()
-    hashes.update(fresh)
-    save_hashes(hashes)
+    operations = load_operations()
+    operations.update(fresh)
+    save_hashes(operations)
     logger.info("Снято операций: %s", ", ".join(sorted(fresh)))
-    return hashes
+    return operations
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    pages = list(DEFAULT_PAGES)
-    for slug in sys.argv[1:]:
-        pages.append(f"/{slug}")
+    # python query_sniffer.py [slug игры] [категория] [способ передачи]
+    args = sys.argv[1:]
+    slug = args[0] if args else "telegram"
+    pages = DEFAULT_PAGES + [f"/{slug}"]
 
-    for operation, sha in sorted(refresh(pages).items()):
-        print(f"{operation:35} {sha}")
+    operations = refresh(
+        pages,
+        game=args[1] if len(args) > 1 else slug.capitalize(),
+        category=args[2] if len(args) > 2 else "",
+        obtaining=args[3] if len(args) > 3 else "",
+    )
+
+    for name, op in sorted(operations.items()):
+        print(f"\n{name}\n  hash: {op['hash']}")
+        if op.get("variables"):
+            print(f"  vars: {json.dumps(op['variables'], ensure_ascii=False)[:220]}")
     print(f"\nСохранено в {QUERIES_FILE}")
