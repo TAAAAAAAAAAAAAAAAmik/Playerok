@@ -282,8 +282,8 @@ async def fetch_deals(count: int = 20, direction: str = "OUT") -> list[dict]:
         data = await _persisted(
             "deals",
             {
-                "pagination": {"first": count, "after": None},
-                "filter": {"userId": user_id, "direction": direction, "status": None},
+                "pagination": {"first": count},
+                "filter": {"userId": user_id, "direction": direction},
                 "showForbiddenImage": True,
             },
         )
@@ -326,9 +326,22 @@ OPERATION_ALIASES = {
     "games": ["SellGames", "games"],
     # Игра с категориями: в мастере это gameWithCategories, на странице — Game.
     "GamePage": ["gameWithCategories", "Game", "GamePage"],
-    "GamePageCategory": ["GamePageCategory", "GameCategory"],
+    "GamePageCategory": ["GamePageCategory", "gameCategory"],
     "deals": ["deals", "Deals"],
 }
+
+
+def _unwrap(data: dict, *keys: str):
+    """
+    Достаёт полезную нагрузку ответа. Имена корневых полей у переименованных
+    операций разные (game / gameWithCategories и т.п.), поэтому пробуем
+    известные ключи, а если не подошли — берём единственное значение.
+    """
+    for key in keys:
+        if data.get(key) is not None:
+            return data[key]
+    values = [v for v in data.values() if v is not None]
+    return values[0] if len(values) == 1 else None
 
 
 def _resolve_operation(operation: str) -> tuple[str, str]:
@@ -387,17 +400,17 @@ def _looks_like_stale_hash(error: Exception) -> bool:
 
 async def search_games(name: str = "", count: int = 24) -> list[dict]:
     """
-    Игры и приложения. Без имени — первые `count` из общего списка,
+    Игры и приложения, доступные для продажи. Без имени — первые `count`,
     с именем — поиск. Возвращает [{id, name, slug}, ...].
     """
-    data = await _persisted(
-        "games",
-        {
-            "pagination": {"first": count, "after": None},
-            "filter": {"name": name or None, "type": None},
-        },
-    )
-    edges = (data.get("games") or {}).get("edges") or []
+    # Формат снят с самого фронта: фильтр знает name, а поля type у него нет.
+    variables = {"pagination": {"first": count}}
+    if name:
+        variables["filter"] = {"name": name}
+
+    data = await _persisted("games", variables)
+    games = _unwrap(data, "sellGames", "games") or {}
+    edges = games.get("edges") or []
     return [edge["node"] for edge in edges if edge.get("node")]
 
 
@@ -406,14 +419,18 @@ async def fetch_game(slug: str = "", game_id: str = "") -> dict:
     Игра со списком категорий. В мастере это `gameWithCategories` и она
     принимает только id; старая `Game`/`GamePage` понимала ещё и slug.
     """
+    # Аргументы зависят от того, какую операцию использует текущий фронт:
+    # gameWithCategories знает только id, Game — только slug.
     name, _ = _resolve_operation("GamePage")
-    variables = (
-        {"id": game_id}
-        if name == "gameWithCategories"
-        else {"id": game_id or None, "slug": slug or None}
-    )
+    if name == "gameWithCategories":
+        variables = {"id": game_id}
+    elif name == "Game":
+        variables = {"slug": slug}
+    else:
+        variables = {"id": game_id or None, "slug": slug or None}
+
     data = await _persisted("GamePage", variables)
-    game = data.get("game") or data.get("gameWithCategories")
+    game = _unwrap(data, "gameWithCategories", "game")
     if not game:
         raise RuntimeError(f"Игра не найдена: {slug or game_id}")
     return game
@@ -425,7 +442,7 @@ async def fetch_category_options(category_id: str) -> list[dict]:
     `gameCategoryOptions`, а не вместе с категорией.
     """
     data = await _persisted("gameCategoryOptions", {"id": category_id})
-    options = data.get("gameCategoryOptions") or data.get("gameCategory") or []
+    options = _unwrap(data, "gameCategoryOptions", "gameCategory") or []
     if isinstance(options, dict):  # иногда приходит объект категории
         options = options.get("options") or []
     return options
@@ -438,11 +455,13 @@ async def fetch_category(
     Полные данные категории, включая options — из них собираются
     атрибуты товара. Берётся по id либо по связке game_id + slug.
     """
-    data = await _persisted(
-        "GamePageCategory",
-        {"id": category_id or None, "gameId": game_id or None, "slug": slug or None},
-    )
-    category = data.get("gameCategory")
+    if category_id:
+        variables = {"id": category_id}
+    else:
+        variables = {"gameId": game_id or None, "slug": slug or None}
+
+    data = await _persisted("GamePageCategory", variables)
+    category = _unwrap(data, "gameCategory", "gamePageCategory")
     if not category:
         raise RuntimeError(f"Категория не найдена: {slug or category_id}")
     return category
@@ -453,11 +472,11 @@ async def fetch_obtaining_types(game_category_id: str, count: int = 24) -> list[
     data = await _persisted(
         "gameCategoryObtainingTypes",
         {
-            "pagination": {"first": count, "after": None},
+            "pagination": {"first": count},
             "filter": {"gameCategoryId": game_category_id},
         },
     )
-    edges = (data.get("gameCategoryObtainingTypes") or {}).get("edges") or []
+    edges = (_unwrap(data, "gameCategoryObtainingTypes") or {}).get("edges") or []
     return [edge["node"] for edge in edges if edge.get("node")]
 
 
@@ -471,15 +490,14 @@ async def fetch_data_fields(
     data = await _persisted(
         "gameCategoryDataFields",
         {
-            "pagination": {"first": count, "after": None},
+            "pagination": {"first": count},
             "filter": {
                 "gameCategoryId": game_category_id,
                 "obtainingTypeId": obtaining_type_id,
-                "type": None,
             },
         },
     )
-    edges = (data.get("gameCategoryDataFields") or {}).get("edges") or []
+    edges = (_unwrap(data, "gameCategoryDataFields") or {}).get("edges") or []
     return [edge["node"] for edge in edges if edge.get("node")]
 
 
