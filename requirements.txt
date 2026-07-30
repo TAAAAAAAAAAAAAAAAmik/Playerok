@@ -3,3 +3,12 @@
 python-telegram-bot==22.8
 httpx==0.28.1
 python-dotenv==1.2.2
+
+# Эндпоинт Playerok принимает только persisted queries: клиент отправляет имя
+# операции и sha256-хэш, а не текст запроса, — поэтому запросы нельзя написать
+# вручную. PlayerokAPI хранит эти хэши и подменяет TLS-отпечаток для DDoS-Guard.
+# Версия не прибита намеренно: когда Playerok меняет хэши операций, нужна свежая.
+PlayerokAPI @ git+https://github.com/alleexxeeyy/PlayerokAPI.git
+# tqdm — незаявленная зависимость tls_requests внутри PlayerokAPI: без неё
+# импорт падает с ModuleNotFoundError.
+tqdm

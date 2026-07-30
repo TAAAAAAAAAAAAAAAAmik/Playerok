@@ -1,181 +1,81 @@
-import httpx
+"""Async wrapper around PlayerokAPI.
+
+Playerok's GraphQL endpoint only accepts persisted queries — the frontend sends
+an operation name plus a sha256 hash, never the query text — so the operations
+cannot be hand-written. PlayerokAPI ships those hashes and the TLS
+fingerprinting needed to get past DDoS-Guard. It is synchronous, so every call
+is handed to a worker thread to keep the bot's event loop responsive.
+"""
+import asyncio
 import logging
-from typing import Optional
-from config import PLAYEROK_API_URL, PLAYEROK_BASE_URL
+
+from playerokapi.account import Account
+
 import auth
+import config
 
 logger = logging.getLogger(__name__)
 
-BASE_HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    "Origin": PLAYEROK_BASE_URL,
-    "Referer": PLAYEROK_BASE_URL + "/",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-}
-
-# ── Auth mutations ────────────────────────────────────────────────────────────
-
-SEND_CODE_MUTATION = """
-mutation sendConfirmationCode($input: SendCodeInput!) {
-  sendConfirmationCode(input: $input) {
-    success
-  }
-}
-"""
-
-LOGIN_MUTATION = """
-mutation signIn($input: SignInInput!) {
-  signIn(input: $input) {
-    token
-    user {
-      id
-      username
-      email
-    }
-  }
-}
-"""
-
-# ── Data queries ──────────────────────────────────────────────────────────────
-
-ORDERS_QUERY = """
-query GetMyDeals($pagination: OffsetPaginationInput) {
-  myDeals(pagination: $pagination) {
-    list {
-      id
-      status
-      statusDescription
-      createdAt
-      completedAt
-      amount
-      item {
-        id
-        name
-        slug
-        price {
-          value
-          currency { symbol }
-        }
-      }
-      buyer {
-        id
-        username
-      }
-    }
-    pageInfo {
-      total
-    }
-  }
-}
-"""
-
-COMPLAINTS_QUERY = """
-query GetMyComplaints($pagination: OffsetPaginationInput) {
-  myComplaints(pagination: $pagination) {
-    list {
-      id
-      status
-      reason
-      createdAt
-      deal {
-        id
-        item {
-          id
-          name
-        }
-        buyer {
-          id
-          username
-        }
-      }
-    }
-    pageInfo {
-      total
-    }
-  }
-}
-"""
+_account: Account | None = None
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _make_headers() -> dict:
-    headers = dict(BASE_HEADERS)
-    token = auth.get_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+def _build(token: str, ddg5: str, user_agent: str) -> Account:
+    """Construct and initialise an Account. Blocking — call in a thread."""
+    return Account(token=token, ddg5=ddg5, user_agent=user_agent).get()
 
 
-async def _gql(
-    query: str,
-    variables: Optional[dict] = None,
-    token_override: Optional[str] = None,
-) -> dict:
-    headers = dict(BASE_HEADERS)
-    t = token_override or auth.get_token()
-    if t:
-        headers["Authorization"] = f"Bearer {t}"
+async def login(token: str, ddg5: str = "", user_agent: str = "") -> dict:
+    """Validate credentials by fetching the account, then cache the session.
 
-    payload: dict = {"query": query}
-    if variables:
-        payload["variables"] = variables
-
-    async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
-        resp = await client.post(PLAYEROK_API_URL, json=payload)
-        resp.raise_for_status()
-
-    data = resp.json()
-    if "errors" in data:
-        msgs = [e.get("message", str(e)) for e in data["errors"]]
-        raise RuntimeError("; ".join(msgs))
-
-    return data.get("data", {})
-
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-async def request_auth_code(email: str) -> bool:
-    """Ask Playerok to send an OTP code to the given email."""
-    data = await _gql(SEND_CODE_MUTATION, {"input": {"email": email}})
-    return bool(data.get("sendConfirmationCode", {}).get("success"))
-
-
-async def login_with_code(email: str, code: str) -> dict:
+    Raises whatever PlayerokAPI raises when the token is rejected.
     """
-    Verify the OTP code and get a session token.
-    Returns {"token": str, "username": str} on success.
-    Raises RuntimeError on failure.
+    global _account
+    account = await asyncio.to_thread(_build, token, ddg5, user_agent)
+    _account = account
+    return {
+        "id": account.id,
+        "username": account.username or "",
+        "email": account.email or "",
+    }
+
+
+async def get_account() -> Account:
+    """Return the cached session, restoring it from disk on first use."""
+    global _account
+    if _account is None:
+        creds = auth.get()
+        if not creds.get("token"):
+            raise RuntimeError("Нет токена Playerok — выполните /login")
+        _account = await asyncio.to_thread(
+            _build,
+            creds["token"],
+            creds.get("ddg5", ""),
+            creds.get("user_agent", ""),
+        )
+    return _account
+
+
+def reset():
+    """Forget the cached session — used on /logout and after auth errors."""
+    global _account
+    _account = None
+
+
+async def fetch_deals(count: int | None = None) -> list:
+    """Return the most recent deals, newest first. Raises on failure.
+
+    Errors deliberately propagate: a silent empty list would make an expired
+    token look exactly like "no new purchases".
     """
-    data = await _gql(LOGIN_MUTATION, {"input": {"email": email, "code": code}})
-    sign_in = data.get("signIn", {})
-    token = sign_in.get("token")
-    if not token:
-        raise RuntimeError("Токен не получен. Проверьте код и попробуйте снова.")
-    user = sign_in.get("user", {})
-    return {"token": token, "username": user.get("username", "")}
+    account = await get_account()
+    limit = count or config.DEAL_FETCH_COUNT
+
+    def _call():
+        return account.get_deals(count=limit)
+
+    page = await asyncio.to_thread(_call)
+    return list(page.deals or [])
 
 
-# ── Data fetching ─────────────────────────────────────────────────────────────
-
-async def fetch_orders(limit: int = 20) -> list[dict]:
-    try:
-        data = await _gql(ORDERS_QUERY, {"pagination": {"limit": limit, "offset": 0}})
-        return data.get("myDeals", {}).get("list", [])
-    except Exception as e:
-        logger.error("fetch_orders error: %s", e)
-        return []
-
-
-async def fetch_complaints(limit: int = 20) -> list[dict]:
-    try:
-        data = await _gql(COMPLAINTS_QUERY, {"pagination": {"limit": limit, "offset": 0}})
-        return data.get("myComplaints", {}).get("list", [])
-    except Exception as e:
-        logger.error("fetch_complaints error: %s", e)
-        return []
+async def get_account_id() -> str:
+    return (await get_account()).id

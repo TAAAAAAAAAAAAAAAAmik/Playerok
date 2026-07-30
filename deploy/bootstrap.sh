@@ -47,8 +47,11 @@ else
     warn "Неизвестный пакетный менеджер — полагаюсь на уже установленные git/python3."
 fi
 
-python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
-    || die "Нужен Python 3.10+, а установлен $(python3 -V 2>&1)."
+# PlayerokAPI требует 3.11+.
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+    || die "Нужен Python 3.11+, а установлен $(python3 -V 2>&1).
+    На Debian 12 он идёт из коробки; на Ubuntu 22.04 поставьте python3.11
+    и запустите скрипт снова."
 
 # ── 2. Код ────────────────────────────────────────────────────────────────────
 

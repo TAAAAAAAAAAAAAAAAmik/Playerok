@@ -13,16 +13,11 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-import config
 import auth
+import config
+import playerok_client
 from database import init_db, is_seen, mark_seen, get_stats
-from playerok_client import (
-    request_auth_code,
-    login_with_code,
-    fetch_orders,
-    fetch_complaints,
-)
-from notifier import send, format_order, format_complaint
+from notifier import send, format_deal, format_problem
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -31,198 +26,267 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ConversationHandler states
-ASK_EMAIL, ASK_CODE = range(2)
+ASK_TOKEN = 0
 
-# Background polling task handle
 _polling_task: asyncio.Task | None = None
+
+
+# ── Access control ────────────────────────────────────────────────────────────
+
+def _is_owner(update: Update) -> bool:
+    """Only the configured chat may drive the bot.
+
+    Commands carry a live Playerok session: without this check any stranger who
+    finds the bot could replace the token via /login or drop it via /logout.
+    """
+    chat = update.effective_chat
+    return bool(chat and str(chat.id) == str(config.TELEGRAM_CHAT_ID))
+
+
+async def _reject(update: Update):
+    logger.warning("Отклонён доступ из чата %s", getattr(update.effective_chat, "id", "?"))
+    if update.message:
+        await update.message.reply_text("⛔ Этот бот приватный.")
 
 
 # ── Polling ───────────────────────────────────────────────────────────────────
 
-async def poll_once():
-    orders = await fetch_orders()
-    for order in orders:
-        oid = order.get("id")
-        if oid and not is_seen("seen_orders", oid):
-            await send(format_order(order))
-            mark_seen("seen_orders", oid)
+async def poll_once() -> dict:
+    """Fetch deals and notify about anything not seen before.
 
-    complaints = await fetch_complaints()
-    for complaint in complaints:
-        cid = complaint.get("id")
-        if cid and not is_seen("seen_complaints", cid):
-            await send(format_complaint(complaint))
-            mark_seen("seen_complaints", cid)
+    Returns counters so /check can report what happened.
+    """
+    deals = await playerok_client.fetch_deals()
+    account_id = await playerok_client.get_account_id()
+
+    # On an empty database every existing deal looks new, so the first pass
+    # only records state instead of sending a burst of notifications.
+    warmup = not config.NOTIFY_ON_FIRST_RUN and get_stats()["orders"] == 0
+    counters = {"deals": 0, "problems": 0, "warmed_up": 0}
+
+    for deal in reversed(deals):  # oldest first, so notifications arrive in order
+        deal_id = getattr(deal, "id", None)
+        if not deal_id:
+            continue
+
+        if not is_seen("seen_orders", deal_id):
+            if warmup:
+                counters["warmed_up"] += 1
+            else:
+                await send(format_deal(deal, account_id))
+                counters["deals"] += 1
+            mark_seen("seen_orders", deal_id)
+
+        if getattr(deal, "has_problem", False) and not is_seen("seen_complaints", deal_id):
+            if not warmup:
+                await send(format_problem(deal, account_id))
+                counters["problems"] += 1
+            mark_seen("seen_complaints", deal_id)
+
+    if warmup and counters["warmed_up"]:
+        await send(
+            f"👀 Отслеживаю аккаунт. Запомнил {counters['warmed_up']} существующих "
+            f"сделок без уведомлений — сообщу только о новых."
+        )
+
+    return counters
 
 
 async def polling_loop():
-    logger.info("Polling started (interval: %ds)", config.POLL_INTERVAL)
+    logger.info("Опрос запущен, интервал %d с", config.POLL_INTERVAL)
+    failures = 0
     while True:
         try:
             await poll_once()
+            failures = 0
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.error("Polling error: %s", e)
+            failures += 1
+            logger.error("Ошибка опроса (%d подряд): %s", failures, e)
+            # A stale session is the likeliest cause — drop it so the next pass
+            # rebuilds it from disk, and tell the owner once it looks persistent.
+            playerok_client.reset()
+            if failures == 3:
+                await send(
+                    "⚠️ <b>Опрос Playerok не проходит.</b>\n\n"
+                    f"<code>{e}</code>\n\n"
+                    "Скорее всего истёк токен — обновите его через /login."
+                )
         await asyncio.sleep(config.POLL_INTERVAL)
 
 
 def start_polling():
     global _polling_task
     if _polling_task is None or _polling_task.done():
-        _polling_task = asyncio.get_event_loop().create_task(polling_loop())
+        _polling_task = asyncio.create_task(polling_loop())
 
 
 def stop_polling():
     global _polling_task
     if _polling_task and not _polling_task.done():
         _polling_task.cancel()
-        _polling_task = None
+    _polling_task = None
 
 
-# ── /login conversation ───────────────────────────────────────────────────────
+# ── /login ────────────────────────────────────────────────────────────────────
+
+LOGIN_HELP = (
+    "🔑 <b>Вход в Playerok</b>\n\n"
+    "У Playerok нет входа по email и коду — сайт работает на JWT из cookie, "
+    "поэтому нужен он же.\n\n"
+    "Где взять:\n"
+    "1. Откройте <b>playerok.com</b> в браузере на компьютере и войдите\n"
+    "2. F12 → вкладка <b>Application</b> (в Firefox — <b>Storage</b>)\n"
+    "3. Cookies → playerok.com → скопируйте значение <code>token</code>\n\n"
+    "Пришлите его одним сообщением. Если Playerok начнёт требовать "
+    "DDoS-Guard, добавьте вторым словом значение cookie <code>__ddg5_</code>.\n\n"
+    "Сообщение с токеном я удалю сразу после проверки. /cancel — отмена."
+)
+
 
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if auth.is_authenticated():
-        await update.message.reply_text(
-            "✅ Вы уже авторизованы.\n/logout — выйти из аккаунта."
+    if not _is_owner(update):
+        await _reject(update)
+        return ConversationHandler.END
+
+    await update.message.reply_text(LOGIN_HELP, parse_mode=ParseMode.HTML)
+    return ASK_TOKEN
+
+
+async def got_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    parts = update.message.text.split()
+    token = parts[0].strip()
+    ddg5 = parts[1].strip() if len(parts) > 1 else ""
+
+    # The message contains a live credential — remove it from the chat.
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning("Не удалось удалить сообщение с токеном: %s", e)
+
+    status = await update.effective_chat.send_message("⏳ Проверяю токен...")
+
+    try:
+        info = await playerok_client.login(token, ddg5)
+    except Exception as e:
+        playerok_client.reset()
+        await status.edit_text(
+            f"❌ Токен не принят:\n<code>{e}</code>\n\nПопробуйте /login снова.",
+            parse_mode=ParseMode.HTML,
         )
         return ConversationHandler.END
 
-    await update.message.reply_text(
-        "📧 Введите email от аккаунта Playerok:",
+    auth.save(token, ddg5)
+    await status.edit_text(
+        f"✅ <b>Готово!</b>\n\n"
+        f"👤 Аккаунт: <b>{info['username']}</b>\n"
+        f"📧 {info['email']}\n\n"
+        f"Буду сообщать о новых сделках и проблемах по ним.",
         parse_mode=ParseMode.HTML,
     )
-    return ASK_EMAIL
-
-
-async def got_email(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    email = update.message.text.strip()
-
-    if "@" not in email:
-        await update.message.reply_text("❌ Похоже, это не email. Попробуйте ещё раз:")
-        return ASK_EMAIL
-
-    ctx.user_data["email"] = email
-    msg = await update.message.reply_text("⏳ Отправляю код на почту...")
-
-    try:
-        await request_auth_code(email)
-        await msg.edit_text(
-            f"✉️ Код отправлен на <b>{email}</b>\n\nВведите код из письма:",
-            parse_mode=ParseMode.HTML,
-        )
-        return ASK_CODE
-    except Exception as e:
-        await msg.edit_text(f"❌ Ошибка при отправке кода:\n<code>{e}</code>", parse_mode=ParseMode.HTML)
-        return ConversationHandler.END
-
-
-async def got_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    code = update.message.text.strip()
-    email = ctx.user_data.get("email", "")
-
-    msg = await update.message.reply_text("⏳ Проверяю код...")
-
-    try:
-        result = await login_with_code(email, code)
-        auth.save_token(result["token"])
-        username = result.get("username", "")
-
-        await msg.edit_text(
-            f"✅ <b>Авторизация успешна!</b>\n\n"
-            f"👤 Аккаунт: <b>{username}</b>\n\n"
-            f"Бот начнёт уведомлять вас о новых покупках и жалобах.",
-            parse_mode=ParseMode.HTML,
-        )
-        start_polling()
-        return ConversationHandler.END
-
-    except Exception as e:
-        await msg.edit_text(
-            f"❌ Неверный код или ошибка:\n<code>{e}</code>\n\n"
-            f"Попробуйте /login снова.",
-            parse_mode=ParseMode.HTML,
-        )
-        return ConversationHandler.END
+    start_polling()
+    return ConversationHandler.END
 
 
 async def cancel_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("↩️ Авторизация отменена.")
+    await update.message.reply_text("↩️ Отменено.")
     return ConversationHandler.END
 
 
 # ── Other commands ────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    is_auth = auth.is_authenticated()
-    status_line = "✅ Авторизован, мониторинг активен." if is_auth else "🔐 Не авторизован. Используйте /login."
+    if not _is_owner(update):
+        return await _reject(update)
 
+    state = "✅ Авторизован, мониторинг активен." if auth.is_authenticated() \
+        else "🔐 Не авторизован. Начните с /login."
     await update.message.reply_text(
-        "👋 <b>Playerok Monitor Bot</b>\n\n"
-        f"{status_line}\n\n"
-        "/login — войти в аккаунт Playerok\n"
-        "/status — статистика\n"
+        "👋 <b>Playerok Monitor</b>\n\n"
+        f"{state}\n\n"
+        "/login — указать токен Playerok\n"
+        "/status — состояние и счётчики\n"
         "/check — проверить прямо сейчас\n"
-        "/logout — выйти из аккаунта",
+        "/logout — забыть токен и остановить опрос",
         parse_mode=ParseMode.HTML,
     )
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    stats = get_stats()
-    polling_status = "🟢 Работает" if (_polling_task and not _polling_task.done()) else "🔴 Остановлен"
-    auth_status = "✅ Авторизован" if auth.is_authenticated() else "❌ Не авторизован"
+    if not _is_owner(update):
+        return await _reject(update)
 
+    stats = get_stats()
+    running = _polling_task and not _polling_task.done()
     await update.message.reply_text(
-        f"📊 <b>Статус бота</b>\n\n"
-        f"🔐 Аккаунт: {auth_status}\n"
-        f"🔄 Мониторинг: {polling_status}\n"
-        f"⏱ Интервал: <b>{config.POLL_INTERVAL}с</b>\n\n"
-        f"📦 Обработано покупок: <b>{stats['orders']}</b>\n"
-        f"⚠️ Обработано жалоб: <b>{stats['complaints']}</b>",
+        f"📊 <b>Статус</b>\n\n"
+        f"🔐 Токен: {'✅ есть' if auth.is_authenticated() else '❌ нет'}\n"
+        f"🔄 Опрос: {'🟢 работает' if running else '🔴 остановлен'}\n"
+        f"⏱ Интервал: <b>{config.POLL_INTERVAL} с</b>\n\n"
+        f"📦 Известных сделок: <b>{stats['orders']}</b>\n"
+        f"⚠️ Отмеченных проблем: <b>{stats['complaints']}</b>",
         parse_mode=ParseMode.HTML,
     )
 
 
 async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update):
+        return await _reject(update)
+
     if not auth.is_authenticated():
-        await update.message.reply_text("🔐 Сначала войдите через /login")
+        await update.message.reply_text("🔐 Сначала /login")
         return
 
-    await update.message.reply_text("🔍 Проверяю Playerok...")
+    status = await update.message.reply_text("🔍 Проверяю Playerok...")
     try:
-        await poll_once()
-        await update.message.reply_text("✅ Готово.")
+        counters = await poll_once()
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: <code>{e}</code>", parse_mode=ParseMode.HTML)
+        playerok_client.reset()
+        await status.edit_text(
+            f"❌ Ошибка: <code>{e}</code>", parse_mode=ParseMode.HTML
+        )
+        return
+
+    if counters["deals"] or counters["problems"]:
+        await status.edit_text(
+            f"✅ Новых сделок: {counters['deals']}, проблем: {counters['problems']}"
+        )
+    elif counters["warmed_up"]:
+        await status.edit_text(f"✅ Запомнил {counters['warmed_up']} сделок.")
+    else:
+        await status.edit_text("✅ Нового нет.")
 
 
 async def cmd_logout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_owner(update):
+        return await _reject(update)
+
     stop_polling()
-    auth.clear_token()
-    await update.message.reply_text("👋 Выход выполнен. Мониторинг остановлен.")
+    playerok_client.reset()
+    auth.clear()
+    await update.message.reply_text("👋 Токен удалён, опрос остановлен.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def on_startup(app: Application):
     init_db()
-    auth.load_token()
+    auth.load()
     if auth.is_authenticated():
-        logger.info("Token loaded from disk — starting polling")
+        logger.info("Токен найден на диске — запускаю опрос")
         start_polling()
     else:
-        logger.info("Not authenticated — waiting for /login")
+        logger.info("Токена нет — жду /login")
 
 
 def validate_config():
-    missing = []
-    if not config.TELEGRAM_BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not config.TELEGRAM_CHAT_ID:
-        missing.append("TELEGRAM_CHAT_ID")
+    missing = [
+        name for name in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+        if not getattr(config, name)
+    ]
     if missing:
-        logger.error("Missing required env vars: %s", ", ".join(missing))
+        logger.error("Не заданы переменные окружения: %s", ", ".join(missing))
         sys.exit(1)
 
 
@@ -236,22 +300,17 @@ def main():
         .build()
     )
 
-    login_conv = ConversationHandler(
+    app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("login", cmd_login)],
-        states={
-            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_email)],
-            ASK_CODE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_code)],
-        },
+        states={ASK_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_token)]},
         fallbacks=[CommandHandler("cancel", cancel_login)],
-    )
-
-    app.add_handler(login_conv)
+    ))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("logout", cmd_logout))
 
-    logger.info("Bot starting...")
+    logger.info("Бот запускается...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
