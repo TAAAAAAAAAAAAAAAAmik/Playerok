@@ -341,14 +341,46 @@ class PlayerokBrowser:
         self._sleep(1)
         return True
 
-    def _click_next(self, required: bool = True) -> bool:
+    @staticmethod
+    def _is_disabled(el) -> bool:
+        return bool(
+            el.get_attribute("disabled")
+            or el.get_attribute("aria-disabled") == "true"
+            or not el.is_enabled()
+        )
+
+    def _find_next_button(self):
+        """Кнопка перехода и признак её активности: (элемент, активна)."""
+        found = None
         for text in NEXT_BUTTON_TEXTS:
-            el = self._find_by_text(text, timeout=2)
-            if el and el.is_enabled():
+            el = self._find_by_text(text, timeout=1)
+            if not el:
+                continue
+            if not self._is_disabled(el):
+                return el, True
+            found = el
+        return found, False
+
+    def _click_next(self, required: bool = True, timeout: int | None = None) -> bool:
+        # Кнопка становится активной не сразу: сайт ждёт загрузки файлов
+        # и валидации полей — поэтому крутим цикл, а не проверяем один раз.
+        deadline = time.time() + (timeout or self.timeout)
+        disabled = None
+        while time.time() < deadline:
+            el, enabled = self._find_next_button()
+            if el and enabled:
                 return self._click(el)
-        if required:
-            raise CreationError("Не нашёл кнопку перехода к следующему шагу")
-        return False
+            disabled = disabled or el
+            time.sleep(0.5)
+
+        if not required:
+            return False
+        if disabled:
+            raise CreationError(
+                f"Кнопка «{disabled.text.strip() or 'Далее'}» осталась неактивной — "
+                "похоже, шаг заполнен не полностью"
+            )
+        raise CreationError("Не нашёл кнопку перехода к следующему шагу")
 
     def _find_input(self, label: str):
         """
@@ -532,30 +564,41 @@ class PlayerokBrowser:
     def step5_upload_images(self, images: list[str]):
         self._wait_title(STEP_TITLES[5], required=False)
 
+        if not images:
+            # Без фото «Далее» на этом шаге остаётся серой — проверим и скажем прямо.
+            if not self._click_next(required=False, timeout=5):
+                raise CreationError(
+                    "Фото обязательно: без изображения кнопка «Далее» неактивна"
+                )
+            return "Изображений загружено: 0"
+
         uploaded = 0
         file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-        if images and not file_inputs:
+        if not file_inputs:
             raise CreationError("Не нашёл поле загрузки изображений")
 
-        if file_inputs and images:
-            target = file_inputs[0]
-            # input[type=file] скрыт стилями — иначе send_keys не сработает.
-            self.driver.execute_script(
-                "arguments[0].style.display='block';"
-                "arguments[0].style.visibility='visible';"
-                "arguments[0].style.opacity=1;"
-                "arguments[0].style.height='1px';arguments[0].style.width='1px';",
-                target,
-            )
-            for path in images:
-                if not os.path.exists(path):
-                    logger.warning("Файл %s не найден", path)
-                    continue
-                target.send_keys(os.path.abspath(path))
-                uploaded += 1
-                self._sleep(2.5)
+        target = file_inputs[0]
+        # input[type=file] скрыт стилями — иначе send_keys не сработает.
+        self.driver.execute_script(
+            "arguments[0].style.display='block';"
+            "arguments[0].style.visibility='visible';"
+            "arguments[0].style.opacity=1;"
+            "arguments[0].style.height='1px';arguments[0].style.width='1px';",
+            target,
+        )
+        for path in images:
+            if not os.path.exists(path):
+                logger.warning("Файл %s не найден", path)
+                continue
+            target.send_keys(os.path.abspath(path))
+            uploaded += 1
+            self._sleep(2.5)
 
-        self._click_next()
+        if not uploaded:
+            raise CreationError("Ни один из указанных файлов не найден на диске")
+
+        # Загрузка идёт на сервер — «Далее» оживает только после неё.
+        self._click_next(timeout=max(self.timeout, 30))
         return f"Изображений загружено: {uploaded}"
 
     # ── Шаг 6: о товаре ───────────────────────────────────────────────────
@@ -687,6 +730,35 @@ class PlayerokBrowser:
 
 
 
+def make_placeholder_image(path: str, width: int = 900, height: int = 900) -> str:
+    """
+    Рисует однотонный PNG без сторонних библиотек — нужен для проверки шага
+    «Фото»: без изображения мастер не пускает дальше.
+    """
+    import struct
+    import zlib
+
+    row = b"\x00" + bytes((32, 58, 122)) * width  # фильтр 0 + пиксели RGB
+    raw = zlib.compress(row * height, 6)
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", raw)
+    png += chunk(b"IEND", b"")
+
+    with open(path, "wb") as f:
+        f.write(png)
+    return path
+
+
 def create_product(draft: ProductDraft, on_step=None) -> list[StepResult]:
     """Синхронная точка входа: запускает браузер, создаёт товар, закрывает браузер."""
     with PlayerokBrowser() as browser:
@@ -709,7 +781,13 @@ if __name__ == "__main__":
         description="Выдача без входа в аккаунт.",
         price=145,
         data_fields={"Комментарий": "Напишу вам в ТГ после оформления заказа"},
-        images=[p for p in ("demo.jpg", "demo.png") if os.path.exists(p)],
+        images=[
+            next(
+                (p for p in ("demo.jpg", "demo.png") if os.path.exists(p)),
+                # своей картинки нет — рисуем заглушку, без фото мастер не пустит
+                make_placeholder_image("demo.png"),
+            )
+        ],
         placement="later",
     )
     for step in create_product(demo, on_step=lambda s: print(f"[{s.number}/9] {s.title}: {s.detail}")):
