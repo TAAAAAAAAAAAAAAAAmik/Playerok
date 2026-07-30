@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -26,6 +27,12 @@ import config
 logger = logging.getLogger(__name__)
 
 QUERIES_FILE = os.getenv("PLAYEROK_QUERIES_FILE", ".playerok_queries.json")
+
+# Снятие хэшей поднимает браузер и проходит мастер — это до минуты.
+# Между попытками держим паузу, иначе каждый упавший запрос будет ждать её.
+REFRESH_COOLDOWN = int(os.getenv("PLAYEROK_HASHES_COOLDOWN", "600"))
+_last_refresh = 0.0
+_refresh_lock = threading.Lock()
 
 # Страницы, на которых фронт успевает дёрнуть интересующие нас операции.
 DEFAULT_PAGES = ["/", "/profile"]
@@ -185,7 +192,16 @@ def collect_from_wizard(browser, game: str = "Telegram",
 def refresh(pages: list[str] | None = None, wizard: bool = True,
             game: str = "Telegram", category: str = "", obtaining: str = "") -> dict:
     """Открывает браузер, собирает хэши и дописывает их в файл."""
+    global _last_refresh
     from selenium_creator import PlayerokBrowser
+
+    with _refresh_lock:
+        if time.time() - _last_refresh < REFRESH_COOLDOWN:
+            raise RuntimeError(
+                f"Хэши обновляли меньше {REFRESH_COOLDOWN} с назад — "
+                "жду, чтобы не поднимать браузер на каждый запрос"
+            )
+        _last_refresh = time.time()
 
     with PlayerokBrowser() as browser:
         browser.authorize()

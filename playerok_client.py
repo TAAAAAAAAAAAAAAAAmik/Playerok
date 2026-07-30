@@ -370,6 +370,7 @@ async def _persisted(operation: str, variables: dict, retry: bool = True) -> dic
     это равнозначно, а заголовок content-type снимает вопрос защиты.
     """
     name, sha256 = _resolve_operation(operation)
+    logger.debug("Операция %s (hash %s…)", name, sha256[:8])
     payload = {
         "operationName": name,
         "variables": variables,

@@ -46,6 +46,28 @@ logger = logging.getLogger(__name__)
 ) = range(11)
 
 PAGE_SIZE = 8
+# Дольше этого ждать ответа API нет смысла: пользователь видит «загружаю…»
+# и не понимает, жив ли бот.
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "45"))
+
+
+async def _call(coro, message, what: str):
+    """
+    Ждёт запрос к API с таймаутом и сама рассказывает об ошибке.
+    Возвращает (результат, True) либо (None, False).
+    """
+    try:
+        return await asyncio.wait_for(coro, timeout=API_TIMEOUT), True
+    except asyncio.TimeoutError:
+        await message.edit_text(
+            f"⏱ Playerok не ответил за {API_TIMEOUT} с ({what}).\n"
+            "Скорее всего обновляются хэши запросов — попробуйте /create ещё раз "
+            "через минуту.",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        await message.edit_text(f"❌ {what}:\n<code>{e}</code>", parse_mode=ParseMode.HTML)
+    return None, False
 
 
 # ── Клавиатуры ────────────────────────────────────────────────────────────────
@@ -85,11 +107,9 @@ async def cmd_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     message = await update.message.reply_text("⏳ Загружаю список игр и приложений…")
 
-    try:
-        games = await api.search_games(count=48)
-    except Exception as e:
-        await message.edit_text(f"❌ Не смог получить список игр:\n<code>{e}</code>",
-                                parse_mode=ParseMode.HTML)
+    logger.info("/create: запрашиваю список игр")
+    games, ok = await _call(api.search_games(count=48), message, "не смог получить список игр")
+    if not ok:
         return ConversationHandler.END
 
     ctx.user_data["games"] = games
@@ -127,10 +147,10 @@ async def game_search_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def game_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     message = await update.message.reply_text("⏳ Ищу…")
-    try:
-        games = await api.search_games(update.message.text.strip(), count=48)
-    except Exception as e:
-        await message.edit_text(f"❌ Ошибка поиска:\n<code>{e}</code>", parse_mode=ParseMode.HTML)
+    games, ok = await _call(
+        api.search_games(update.message.text.strip(), count=48), message, "ошибка поиска"
+    )
+    if not ok:
         return ConversationHandler.END
 
     if not games:
