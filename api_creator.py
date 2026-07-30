@@ -144,10 +144,10 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
         fail(3, title, e)
 
     # 4. Характеристики → attributes
-    def resolve_attributes() -> dict[str, str]:
+    async def resolve_attributes() -> dict[str, str]:
         if draft.attribute_values:
             return dict(draft.attribute_values)
-        options = category.get("options") or []
+        options = category.get("options") or await api.fetch_category_options(category["id"])
         chosen: dict[str, str] = {}
         missing: list[str] = []
         for wanted in draft.attributes:
@@ -167,7 +167,7 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
 
     title = "Характеристики"
     try:
-        attributes = resolve_attributes()
+        attributes = await resolve_attributes()
         report(
             4,
             title,

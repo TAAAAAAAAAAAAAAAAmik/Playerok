@@ -198,6 +198,9 @@ async def category_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         # Полные данные категории нужны ради options (характеристик).
         category = await api.fetch_category(category_id=chosen["id"])
+        if not category.get("options"):
+            # Фронт запрашивает характеристики отдельной операцией.
+            category["options"] = await api.fetch_category_options(category["id"])
         obtaining_types = await api.fetch_obtaining_types(category["id"])
     except Exception as e:
         await _edit(query, f"❌ Не смог получить данные категории:\n<code>{e}</code>")

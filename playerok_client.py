@@ -135,6 +135,9 @@ FALLBACK_QUERIES = {
     "gameCategoryObtainingTypes": "15b0991414821528251930b4c8161c299eb39882fd635dd5adb1a81fb0570aea",
     "gameCategoryDataFields": "6fdadfb9b05880ce2d307a1412bc4f2e383683061c281e2b65a93f7266ea4a49",
     "itemPriorityStatuses": "b922220c6f979537e1b99de6af8f5c13727daeff66727f679f07f986ce1c025a",
+    # Снято с сайта: характеристики категории запрашиваются отдельно.
+    "gameCategoryOptions": "ffa5a575b990f54411c60edc07558d7ee27fa60f32b08f2a0af68dd2d31ebb25",
+    "gameWithCategories": "7ee7e0cd62afcd98278ff5ece1b6e2de37353323d9c08d1dfa9e0a079ec1af16",
 }
 
 # createItem принимает файлы отдельным аргументом $attachments (multipart-спека
@@ -399,12 +402,33 @@ async def search_games(name: str = "", count: int = 24) -> list[dict]:
 
 
 async def fetch_game(slug: str = "", game_id: str = "") -> dict:
-    """Игра со списком категорий: GamePage принимает slug или id."""
-    data = await _persisted("GamePage", {"id": game_id or None, "slug": slug or None})
-    game = data.get("game")
+    """
+    Игра со списком категорий. В мастере это `gameWithCategories` и она
+    принимает только id; старая `Game`/`GamePage` понимала ещё и slug.
+    """
+    name, _ = _resolve_operation("GamePage")
+    variables = (
+        {"id": game_id}
+        if name == "gameWithCategories"
+        else {"id": game_id or None, "slug": slug or None}
+    )
+    data = await _persisted("GamePage", variables)
+    game = data.get("game") or data.get("gameWithCategories")
     if not game:
         raise RuntimeError(f"Игра не найдена: {slug or game_id}")
     return game
+
+
+async def fetch_category_options(category_id: str) -> list[dict]:
+    """
+    Характеристики категории. Фронт запрашивает их отдельной операцией
+    `gameCategoryOptions`, а не вместе с категорией.
+    """
+    data = await _persisted("gameCategoryOptions", {"id": category_id})
+    options = data.get("gameCategoryOptions") or data.get("gameCategory") or []
+    if isinstance(options, dict):  # иногда приходит объект категории
+        options = options.get("options") or []
+    return options
 
 
 async def fetch_category(
