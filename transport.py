@@ -217,7 +217,12 @@ def browser_request(method: str, json_body: Optional[dict] = None,
         url += "?" + urlencode(params)
 
     with _browser_lock:
-        browser = _browser_instance()
+        try:
+            browser = _browser_instance()
+        except Exception as e:
+            _browser = None
+            raise TransportError(f"Браузер не поднялся: {e}") from e
+
         try:
             result = browser.driver.execute_async_script(
                 FETCH_SCRIPT,
@@ -236,7 +241,8 @@ def browser_request(method: str, json_body: Optional[dict] = None,
     status = (result or {}).get("status", 0)
     body = (result or {}).get("body", "")
     if status >= 400 or status == 0:
-        raise TransportError(f"Браузер получил {status}: {body[:200]}")
+        operation = (json_body or params or {}).get("operationName", "?")
+        raise TransportError(f"Браузер получил {status} на {operation}: {body[:200]}")
 
     try:
         data = json.loads(body)
@@ -248,12 +254,22 @@ def browser_request(method: str, json_body: Optional[dict] = None,
     return data.get("data") or {}
 
 
+def _operation_name(kwargs: dict) -> str:
+    """Имя операции — чтобы в логах было видно, какой запрос упал."""
+    for source in (kwargs.get("json"), kwargs.get("params")):
+        if isinstance(source, dict) and source.get("operationName"):
+            return source["operationName"]
+    return "?"
+
+
 def request(method: str, *, retry: bool = True, **kwargs) -> dict:
     """
     Запрос к /graphql. При отказе защиты обновляет куки браузером и повторяет,
     а если и это не помогло — выполняет запрос прямо в браузере.
     Возвращает данные GraphQL, поднимает TransportError на ошибках.
     """
+    operation = _operation_name(kwargs)
+
     if config.PLAYEROK_BROWSER_TRANSPORT:
         return browser_request(method, kwargs.get("json"), kwargs.get("params"))
 
@@ -278,8 +294,9 @@ def request(method: str, *, retry: bool = True, **kwargs) -> dict:
     if resp.status_code >= 400:
         # Свежие куки не помогли: значит дело не в них — идём через браузер.
         logger.info(
-            "HTTP %s даже со свежими куками — выполняю запрос из браузера",
+            "HTTP %s на операции %s даже со свежими куками — иду через браузер",
             resp.status_code,
+            operation,
         )
         return browser_request(method, kwargs.get("json"), kwargs.get("params"))
 
@@ -289,6 +306,9 @@ def request(method: str, *, retry: bool = True, **kwargs) -> dict:
         raise TransportError(f"Ответ не JSON: {e}") from e
 
     if "errors" in data:
-        raise TransportError("; ".join(e.get("message", str(e)) for e in data["errors"]))
+        raise TransportError(
+            f"{operation}: "
+            + "; ".join(e.get("message", str(e)) for e in data["errors"])
+        )
 
     return data.get("data") or {}

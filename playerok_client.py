@@ -49,10 +49,51 @@ mutation signIn($input: SignInInput!) {
 VIEWER_QUERY = """
 query viewer {
   viewer {
-    id
-    username
-    email
+    ...Viewer
+    __typename
   }
+}
+
+fragment Viewer on User {
+  id
+  username
+  email
+  role
+  hasFrozenBalance
+  supportChatId
+  systemChatId
+  unreadChatsCounter
+  isBlocked
+  isBlockedFor
+  isFundsProtectionActive
+  createdAt
+  lastItemCreatedAt
+  hasConfirmedPhoneNumber
+  canPublishItems
+  chosenVerifiedCard {
+    ...MinimalUserBankCard
+    __typename
+  }
+  balance {
+    value
+    __typename
+  }
+  profile {
+    id
+    avatarURL
+    testimonialCounter
+    __typename
+  }
+  __typename
+}
+
+fragment MinimalUserBankCard on UserBankCard {
+  id
+  cardFirstSix
+  cardLastFour
+  cardType
+  isChosen
+  __typename
 }
 """
 
@@ -186,16 +227,42 @@ def _log_error_rarely(message: str, error: Exception):
 
 async def fetch_viewer() -> dict:
     """Данные текущего аккаунта: {id, username, email}."""
-    data = await _gql(VIEWER_QUERY)
+    data = await _gql(VIEWER_QUERY, operation="viewer")
     viewer = data.get("viewer")
     if not viewer:
         raise RuntimeError("Не авторизованы: сервер не вернул viewer.")
     return viewer
 
 
+def _user_id_from_token() -> str:
+    """
+    ID аккаунта из JWT: в полезной нагрузке токена он лежит в `sub`.
+    Это избавляет от лишнего запроса viewer на каждом старте.
+    """
+    import base64
+
+    token = ""
+    for chunk in config.PLAYEROK_COOKIES.split(";"):
+        if chunk.strip().startswith("token="):
+            token = chunk.split("=", 1)[1].strip()
+    token = token or auth.get_token()
+    if not token or token.count(".") != 2:
+        return ""
+
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)  # base64url без выравнивания
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload)).get("sub", "")
+    except Exception as e:
+        logger.debug("Не разобрал токен: %s", e)
+        return ""
+
+
 async def _get_viewer_id() -> str:
     """ID аккаунта — обязательный фильтр в запросе сделок."""
     global _viewer_id
+    if not _viewer_id:
+        _viewer_id = _user_id_from_token()
     if not _viewer_id:
         _viewer_id = (await fetch_viewer()).get("id", "")
     return _viewer_id
