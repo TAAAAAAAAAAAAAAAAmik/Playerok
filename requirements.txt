@@ -1,5 +1,6 @@
 python-telegram-bot==20.7
-httpx==0.26.0
+# python-telegram-bot 20.7 требует httpx~=0.25.2 — версии выше ломают установку
+httpx==0.25.2
 python-dotenv==1.0.0
 aiofiles==23.2.1
 selenium==4.27.1
