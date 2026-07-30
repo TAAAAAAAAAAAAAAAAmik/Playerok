@@ -287,6 +287,24 @@ def browser_request(method: str, json_body: Optional[dict] = None,
     return data.get("data") or {}
 
 
+def _graphql_error(resp) -> str:
+    """
+    Текст ошибки GraphQL, если сервер её вернул. Пустая строка означает,
+    что ответ не от GraphQL — то есть в дело вмешалась защита.
+    """
+    body = (resp.text or "")[:2000]
+    if not body.lstrip().startswith("{"):
+        return ""
+    try:
+        data = json.loads(resp.text)
+    except ValueError:
+        return ""
+    errors = data.get("errors")
+    if not errors:
+        return ""
+    return "; ".join(e.get("message", str(e)) for e in errors)
+
+
 def _operation_name(kwargs: dict) -> str:
     """Имя операции — чтобы в логах было видно, какой запрос упал."""
     for source in (kwargs.get("json"), kwargs.get("params")):
@@ -315,8 +333,17 @@ def request(method: str, *, retry: bool = True, **kwargs) -> dict:
 
     resp = _request(method, cookies, **kwargs)
 
+    # Защита отдаёт HTML или пустоту, а сервер GraphQL — JSON с errors даже
+    # при 4xx. Различаем: обновлять куки во втором случае бессмысленно.
+    graphql_error = _graphql_error(resp)
+    if graphql_error:
+        raise TransportError(f"{operation}: {graphql_error}")
+
     if resp.status_code in (403, 500, 503) and retry:
-        logger.info("Ответ %s — похоже на защиту, обновляю куки", resp.status_code)
+        logger.info(
+            "Ответ %s на %s без тела GraphQL — похоже на защиту, обновляю куки",
+            resp.status_code, operation,
+        )
         try:
             cookies = refresh_cookies()
             resp = _request(method, cookies, **kwargs)
@@ -334,8 +361,9 @@ def request(method: str, *, retry: bool = True, **kwargs) -> dict:
         return browser_request(method, kwargs.get("json"), kwargs.get("params"))
 
     if resp.status_code >= 400:
+        logger.warning("Тело ответа %s: %s", resp.status_code, (resp.text or "")[:300])
         raise TransportError(
-            f"HTTP {resp.status_code} на операции {operation}: {resp.text[:200]}"
+            f"HTTP {resp.status_code} на операции {operation}: {(resp.text or '')[:200]}"
         )
 
     try:

@@ -380,11 +380,19 @@ async def _persisted(operation: str, variables: dict, retry: bool = True) -> dic
     try:
         return await asyncio.to_thread(transport.request, "post", json=payload)
     except Exception as e:
-        # Устаревший хэш сервер отвергает («Access denied», PersistedQueryNotFound).
-        # Снимаем актуальные с сайта браузером и повторяем — один раз.
         if not retry or not _looks_like_stale_hash(e):
             raise
-        logger.info("Операция %s отклонена (%s) — обновляю хэши с сайта", operation, e)
+
+        # Часть операций сервер отдаёт только «настоящему» клиенту: тот же
+        # запрос со страницы Playerok проходит, потому что там правильные
+        # заголовки и origin.
+        logger.info("Операция %s отклонена (%s) — повторяю из браузера", name, e)
+        try:
+            return await asyncio.to_thread(transport.browser_request, "post", payload)
+        except Exception as browser_error:
+            logger.info("Из браузера тоже отказ (%s) — обновляю хэши", browser_error)
+
+        # Последняя попытка: возможно, устарел сам хэш.
         import query_sniffer
 
         await asyncio.to_thread(query_sniffer.refresh)
