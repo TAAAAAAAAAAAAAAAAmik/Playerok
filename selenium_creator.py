@@ -6,17 +6,23 @@
 получает её сам. Это временный этап — после проверки логика переносится
 на GraphQL-запросы (см. docs/PRODUCT_CREATION.md, раздел «Этап 2»).
 
-Мастер создания товара на сайте состоит из 9 шагов:
+Мастер — это модальное окно, а не отдельная страница: он открывается кнопкой
+«Выставить товар» в профиле или «Продать» в нижней навигации, и адрес при этом
+не меняется. Шагов ровно 9, они подписаны в заголовке окна:
 
-    1. Открыть страницу создания товара
-    2. Выбрать игру / приложение
-    3. Выбрать категорию товара
-    4. Выбрать способ получения (obtaining type)
-    5. Заполнить опции (атрибуты) категории
-    6. Указать название и описание
-    7. Заполнить данные товара (поля, которые получит покупатель)
-    8. Указать цену и загрузить изображения
-    9. Опубликовать (выбрать статус приоритета)
+    1. Выберите раздел товаров   — игра/приложение, есть поиск
+    2. Выберите категорию        — список категорий игры
+    3. Способ передачи           — как покупатель получит товар
+    4. Характеристики            — чипы-атрибуты категории
+    5. Фото 1/10                 — изображения товара
+    6. О товаре                  — название и описание
+    7. Цена                      — цена товара (рядом считается доход)
+    8. Данные товара             — комментарий и т.п., кнопка «Сохранить»
+    9. Выберите сервис           — Премиум / Обычный (бесплатно) / Выставить позже
+
+Внимание: на девятом шаге по умолчанию отмечен платный «Премиум», поэтому
+кнопка публикации нажимается только после явного выбора варианта и проверки,
+что в её тексте нет цены.
 
 Каждый шаг сохраняет скриншот и HTML-дамп в DEBUG_DIR — по ним подгоняются
 селекторы, если вёрстка Playerok изменится.
@@ -47,16 +53,30 @@ import config
 logger = logging.getLogger(__name__)
 
 # Кнопки «дальше» на разных шагах мастера называются по-разному.
-NEXT_BUTTON_TEXTS = ["Далее", "Продолжить", "Дальше", "Готово", "Сохранить"]
-PUBLISH_BUTTON_TEXTS = ["Опубликовать", "Выставить на продажу", "Разместить"]
+NEXT_BUTTON_TEXTS = ["Далее", "Продолжить", "Дальше", "Готово"]
 
-# Кандидаты URL страницы создания товара (сайт периодически меняет роутинг).
-CREATE_URL_CANDIDATES = [
-    "/products/new",
-    "/items/new",
-    "/create",
-    "/sell",
-]
+# Чем открывается мастер: кнопка в профиле и пункт нижней навигации.
+OPEN_WIZARD_TEXTS = ["Выставить товар", "Продать", "Создать товар"]
+
+# Заголовки шагов — по ним понимаем, что мастер доехал до нужного экрана.
+STEP_TITLES = {
+    1: "Выберите раздел товаров",
+    2: "Выберите категорию",
+    3: "Способ передачи",
+    4: "Характеристики",
+    5: "Фото",
+    6: "О товаре",
+    7: "Цена",
+    8: "Данные товара",
+    9: "Выберите сервис",
+}
+
+# Варианты размещения на девятом шаге.
+PLACEMENT_LABELS = {
+    "free": ["Обычный", "Бесплатно"],
+    "premium": ["Премиум"],
+    "later": ["Выставить позже"],
+}
 
 CLICKABLE_TAGS = (
     "self::button or self::a or self::div or self::span or self::li "
@@ -76,17 +96,20 @@ class NotAuthenticated(CreationError):
 class ProductDraft:
     """Данные товара, которые вводит пользователь бота."""
 
-    game: str
-    category: str
-    obtaining_type: str
-    name: str
-    description: str
-    price: int
-    options: dict[str, str] = field(default_factory=dict)
+    game: str                 # «Telegram» — шаг 1
+    category: str             # «Звезды» — шаг 2
+    obtaining_type: str       # «По @username» — шаг 3
+    name: str                 # шаг 6
+    description: str          # шаг 6
+    price: int                # шаг 7
+    # Чипы на шаге «Характеристики», например ["100 звёзд"].
+    attributes: list[str] = field(default_factory=list)
+    # Поля шага «Данные товара», например {"Комментарий": "..."}.
     data_fields: dict[str, str] = field(default_factory=dict)
     images: list[str] = field(default_factory=list)
-    # Статус приоритета при публикации; "free" — бесплатное размещение.
-    priority: str = "free"
+    # Размещение на девятом шаге: free — бесплатно, premium — платно,
+    # later — оставить в черновике («Выставить позже»).
+    placement: str = "free"
 
 
 @dataclass
@@ -242,16 +265,60 @@ class PlayerokBrowser:
 
     def _find_by_text(self, text: str, timeout: int = 5, exact: bool = False):
         """Первый видимый элемент с таким текстом или None."""
+        safe = text.replace('"', '\\"')
+        # Пункты списков у Playerok состоят из нескольких узлов (текст + эмодзи),
+        # поэтому кроме text() смотрим и на весь текст элемента целиком.
+        variants = [
+            self._xpath_by_text(text, exact=True),
+            f'//*[{CLICKABLE_TAGS}][normalize-space(.)="{safe}"]',
+            self._xpath_by_text(text),
+        ]
+        if exact:
+            variants = variants[:2]
+
         deadline = time.time() + timeout
         while time.time() < deadline:
-            for xpath in (self._xpath_by_text(text, exact=True), self._xpath_by_text(text)):
+            for xpath in variants:
                 for el in self.driver.find_elements(By.XPATH, xpath):
                     if el.is_displayed():
                         return el
-                if exact:
-                    break
             time.sleep(0.4)
         return None
+
+    def _page_text(self) -> str:
+        try:
+            return self.driver.execute_script(
+                "return document.body ? document.body.innerText : '';"
+            ) or ""
+        except WebDriverException:
+            return ""
+
+    def _wait_for_render(self, timeout: int = 12) -> int:
+        """
+        Ждёт, пока Next.js дорисует страницу на клиенте: сразу после `get()`
+        в body пусто, и проверять содержимое бессмысленно.
+        Возвращает длину текста страницы.
+        """
+        deadline = time.time() + timeout
+        length = 0
+        while time.time() < deadline:
+            length = len(self._page_text())
+            if length > 200:
+                return length
+            time.sleep(0.5)
+        return length
+
+    def _wait_title(self, title: str, timeout: int | None = None, required: bool = True) -> bool:
+        """Ждёт, пока мастер покажет шаг с таким заголовком."""
+        deadline = time.time() + (timeout or self.timeout)
+        while time.time() < deadline:
+            if title in self._page_text():
+                return True
+            time.sleep(0.5)
+        if required:
+            raise CreationError(f"Мастер не дошёл до шага «{title}»")
+        logger.info("Шаг «%s» не появился — вероятно, его нет в этой категории", title)
+        return False
 
     def _click_text(self, text: str, timeout: int | None = None, required: bool = True):
         el = self._find_by_text(text, timeout=timeout or self.timeout)
@@ -359,13 +426,13 @@ class PlayerokBrowser:
             logger.warning("Не смог сохранить снимок шага %s: %s", step, e)
             return None
 
-    # ── Шаг 1: страница создания ──────────────────────────────────────────
+    # ── Шаг 1: раздел товаров (игра/приложение) ───────────────────────────
 
     def _discover_routes(self) -> list[str]:
         """
-        Маршруты фронта из build-манифеста Next.js. Playerok собран на Next,
-        и клиент держит список всех страниц в `window.__BUILD_MANIFEST` —
-        оттуда адрес мастера берётся точно, без угадывания.
+        Маршруты фронта из build-манифеста Next.js — пишем их в routes.txt.
+        Мастер это модальное окно, так что для навигации они не нужны, но
+        помогают, если Playerok когда-нибудь вынесет его на отдельный адрес.
         """
         try:
             routes = self.driver.execute_script(
@@ -382,169 +449,140 @@ class PlayerokBrowser:
                 f.write("\n".join(routes))
         return routes
 
-    def _create_route_candidates(self) -> list[str]:
-        """Маршруты, похожие на мастер создания товара, — самые точные первыми."""
-        keywords = ("new", "create", "sell", "add")
-        # Страницы, которые попадают под keywords, но мастером не являются.
-        noise = (
-            "giveaway", "terms", "rules", "agreement", "policy", "privacy",
-            "faq", "support", "about", "news", "blog", "wallet", "deposit",
-            "withdraw", "login", "signin", "signup", "register", "settings",
-        )
-
-        def score(route: str) -> int:
-            r = route.lower()
-            tail = r.rstrip("/").rsplit("/", 1)[-1]
-            if r.rstrip("/") in ("/sell", "/products/new", "/items/new", "/create"):
-                return 0
-            if tail in ("new", "create", "add"):
-                return 1
-            if "sell" in r and "seller" not in r:
-                return 2
-            return 3
-
-        routes = self._discover_routes()
-        found = [
-            r
-            for r in routes
-            # страницы с [param] пропускаем — туда нужен конкретный id
-            if "[" not in r
-            and any(k in r.lower() for k in keywords)
-            and not any(n in r.lower() for n in noise)
-        ]
-        found.sort(key=score)
-        return found + [c for c in CREATE_URL_CANDIDATES if c not in found]
-
-    def _wait_for_render(self, timeout: int = 12) -> int:
+    def _open_wizard(self) -> str:
         """
-        Ждёт, пока Next.js дорисует страницу на клиенте: сразу после `get()`
-        в body пусто, и проверять содержимое бессмысленно.
-        Возвращает длину текста страницы.
+        Открывает мастер. Это модалка: кнопка «Выставить товар» в профиле или
+        «Продать» в нижней навигации. Адрес страницы при этом не меняется.
         """
-        deadline = time.time() + timeout
-        length = 0
-        while time.time() < deadline:
-            try:
-                length = self.driver.execute_script(
-                    "return (document.body && document.body.innerText || '').length;"
-                )
-            except WebDriverException:
-                length = 0
-            if length and length > 200:
-                return length
-            time.sleep(0.5)
-        return length
+        for page in ("/profile", "/"):
+            self.driver.get(config.PLAYEROK_BASE_URL + page)
+            self._wait_for_render()
+            self._discover_routes()
 
-    def _looks_like_wizard(self) -> bool:
-        markers = (
-            "Выберите игру",
-            "Выбор игры",
-            "Выберите категорию",
-            "Выберите приложение",
-            "Что продаём",
-            "Что вы продаёте",
-            "Создание товара",
-            "Новый товар",
-            "Новое объявление",
-        )
-        return any(self._find_by_text(m, timeout=1) for m in markers)
-
-    def step1_open_create_page(self):
-        self.driver.get(config.PLAYEROK_BASE_URL)
-        self._sleep(2.5)
-
-        candidates = self._create_route_candidates()
-        logger.info("Кандидаты адреса мастера: %s", candidates)
-
-        for path in candidates:
-            url = config.PLAYEROK_BASE_URL + path
-            try:
-                self.driver.get(url)
-            except TimeoutException:
-                continue
-            length = self._wait_for_render()
-            logger.info("%s — текста на странице: %s символов", url, length)
-            # Снимок каждой проверенной страницы: если мастер не опознан,
-            # по дампам сразу видно, как страница выглядит на самом деле.
-            self.snapshot(1, f"try{path.replace('/', '-')}")
-            if self._looks_like_wizard():
-                return f"Открыт {url}"
-
-        # Фолбэк: кнопка «Продать» на главной.
-        self.driver.get(config.PLAYEROK_BASE_URL)
-        self._sleep(2)
-        for text in ("Продать", "Создать товар", "Разместить объявление"):
-            if self._click_text(text, timeout=3, required=False):
-                self._sleep(2.5)
-                if self._looks_like_wizard():
-                    return f"Перешёл по кнопке «{text}» → {self.driver.current_url}"
+            for text in OPEN_WIZARD_TEXTS:
+                if not self._click_text(text, timeout=3, required=False):
+                    continue
+                if self._wait_title(STEP_TITLES[1], timeout=10, required=False):
+                    return f"Мастер открыт кнопкой «{text}» на {page}"
+                logger.info("Кнопка «%s» на %s мастер не открыла", text, page)
 
         raise CreationError(
-            "Не нашёл страницу создания товара. Проверенные адреса: "
-            + ", ".join(candidates)
-            + f". Полный список маршрутов сайта — в {self._run_dir}/routes.txt"
+            "Не нашёл, чем открыть мастер. Ожидались кнопки: "
+            + ", ".join(OPEN_WIZARD_TEXTS)
         )
 
-    # ── Шаг 2: игра ───────────────────────────────────────────────────────
+    def step1_select_game(self, game: str):
+        detail = self._open_wizard()
 
-    def step2_select_game(self, game: str):
-        self._pick_from_list(game, search_label="Поиск")
-        self._click_next(required=False)
-        return f"Игра: {game}"
+        search = self._find_input("Поиск игр и приложений") or self._find_input("Поиск")
+        if search:
+            search.send_keys(game)
+            self._sleep(1.5)
 
-    # ── Шаг 3: категория ──────────────────────────────────────────────────
+        el = self._find_by_text(game, timeout=self.timeout)
+        if not el:
+            raise CreationError(f"Не нашёл «{game}» в списке игр и приложений")
+        self._click(el)
+        # Выбор игры сам переводит на следующий шаг, кнопки «Далее» здесь нет.
+        return f"{detail}; игра: {game}"
 
-    def step3_select_category(self, category: str):
-        self._pick_from_list(category, search_label="Поиск")
-        self._click_next(required=False)
+    # ── Шаг 2: категория ──────────────────────────────────────────────────
+
+    def step2_select_category(self, category: str):
+        self._wait_title(STEP_TITLES[2])
+        el = self._find_by_text(category, timeout=self.timeout)
+        if not el:
+            raise CreationError(f"Не нашёл категорию «{category}»")
+        self._click(el)
+        self._click_next()
         return f"Категория: {category}"
 
-    # ── Шаг 4: способ получения ───────────────────────────────────────────
+    # ── Шаг 3: способ передачи ────────────────────────────────────────────
 
-    def step4_select_obtaining_type(self, obtaining_type: str):
-        self._pick_from_list(obtaining_type, search_label="Поиск")
-        self._click_next(required=False)
-        return f"Способ получения: {obtaining_type}"
+    def step3_select_obtaining_type(self, obtaining_type: str):
+        self._wait_title(STEP_TITLES[3])
+        el = self._find_by_text(obtaining_type, timeout=self.timeout)
+        if not el:
+            raise CreationError(f"Не нашёл способ передачи «{obtaining_type}»")
+        self._click(el)
+        self._click_next()
+        return f"Способ передачи: {obtaining_type}"
 
-    # ── Шаг 5: опции (атрибуты) ───────────────────────────────────────────
+    # ── Шаг 4: характеристики ─────────────────────────────────────────────
 
-    def step5_fill_options(self, options: dict[str, str]):
-        if not options:
-            self._click_next(required=False)
-            return "Опций нет — пропускаю"
+    def step4_fill_attributes(self, attributes: list[str]):
+        # У некоторых категорий характеристик нет — шаг пропускается сайтом.
+        if not self._wait_title(STEP_TITLES[4], timeout=8, required=False):
+            return "Шага «Характеристики» нет"
 
-        filled = []
-        for label, value in options.items():
-            # Опция может быть кнопкой-чипом либо полем ввода.
-            el = self._find_by_text(value, timeout=3)
+        chosen = []
+        for value in attributes:
+            el = self._find_by_text(value, timeout=5)
             if el:
                 self._click(el)
-                filled.append(f"{label}={value}")
-                continue
-            if self._fill(label, value, required=False):
-                filled.append(f"{label}={value}")
+                chosen.append(value)
             else:
-                logger.warning("Опция «%s» не найдена", label)
+                logger.warning("Характеристика «%s» не найдена", value)
 
-        self._click_next(required=False)
-        return "Опции: " + (", ".join(filled) if filled else "не заданы")
+        self._click_next()
+        return "Характеристики: " + (", ".join(chosen) if chosen else "не заданы")
 
-    # ── Шаг 6: название и описание ────────────────────────────────────────
+    # ── Шаг 5: фото ───────────────────────────────────────────────────────
 
-    def step6_fill_main_info(self, name: str, description: str):
-        if not self._fill("Название", name, required=False):
-            self._fill("Заголовок", name)
-        if not self._fill("Описание", description, required=False):
-            logger.warning("Поле описания не найдено")
-        self._click_next(required=False)
+    def step5_upload_images(self, images: list[str]):
+        self._wait_title(STEP_TITLES[5], required=False)
+
+        uploaded = 0
+        file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+        if images and not file_inputs:
+            raise CreationError("Не нашёл поле загрузки изображений")
+
+        if file_inputs and images:
+            target = file_inputs[0]
+            # input[type=file] скрыт стилями — иначе send_keys не сработает.
+            self.driver.execute_script(
+                "arguments[0].style.display='block';"
+                "arguments[0].style.visibility='visible';"
+                "arguments[0].style.opacity=1;"
+                "arguments[0].style.height='1px';arguments[0].style.width='1px';",
+                target,
+            )
+            for path in images:
+                if not os.path.exists(path):
+                    logger.warning("Файл %s не найден", path)
+                    continue
+                target.send_keys(os.path.abspath(path))
+                uploaded += 1
+                self._sleep(2.5)
+
+        self._click_next()
+        return f"Изображений загружено: {uploaded}"
+
+    # ── Шаг 6: о товаре ───────────────────────────────────────────────────
+
+    def step6_fill_about(self, name: str, description: str):
+        self._wait_title(STEP_TITLES[6])
+        if not self._fill("Название товара", name, required=False):
+            self._fill("Название", name)
+        if not self._fill("Описание товара", description, required=False):
+            self._fill("Описание", description)
+        self._click_next()
         return f"Название: {name}"
 
-    # ── Шаг 7: данные товара ──────────────────────────────────────────────
+    # ── Шаг 7: цена ───────────────────────────────────────────────────────
 
-    def step7_fill_data_fields(self, data_fields: dict[str, str]):
-        if not data_fields:
-            self._click_next(required=False)
-            return "Данные товара не заданы"
+    def step7_fill_price(self, price: int):
+        self._wait_title(STEP_TITLES[7])
+        # Рядом есть поле «Доход» — заполнять нужно именно «Цена товара».
+        if not self._fill("Цена товара", str(price), required=False):
+            self._fill("Цена", str(price))
+        self._click_next()
+        return f"Цена: {price} ₽"
+
+    # ── Шаг 8: данные товара ──────────────────────────────────────────────
+
+    def step8_fill_data_fields(self, data_fields: dict[str, str]):
+        self._wait_title(STEP_TITLES[8])
 
         filled = []
         for label, value in data_fields.items():
@@ -552,64 +590,57 @@ class PlayerokBrowser:
                 filled.append(label)
             else:
                 logger.warning("Поле данных «%s» не найдено", label)
-        self._click_next(required=False)
+
+        # Здесь кнопка называется «Сохранить», а не «Далее».
+        if not self._click_text("Сохранить", timeout=5, required=False):
+            self._click_next()
         return "Заполнены поля: " + (", ".join(filled) if filled else "нет")
 
-    # ── Шаг 8: цена и изображения ─────────────────────────────────────────
+    # ── Шаг 9: выбор сервиса и публикация ─────────────────────────────────
 
-    def step8_price_and_images(self, price: int, images: list[str]):
-        if not self._fill("Цена", str(price), required=False):
-            self._fill("Стоимость", str(price))
+    def _publish_button(self, placement: str):
+        """
+        Кнопка публикации внизу девятого шага. Её текст зависит от выбранного
+        варианта («Выставить Премиум за 19 ₽» и т.п.), поэтому ищем по началу
+        и отдельно проверяем, что бесплатное размещение не стало платным.
+        """
+        for el in self.driver.find_elements(By.XPATH, "//button | //a[@role='button']"):
+            if not el.is_displayed():
+                continue
+            label = (el.text or "").strip()
+            if not label:
+                continue
+            if label.startswith(("Выставить", "Опубликовать", "Сохранить")):
+                if placement != "premium" and ("₽" in label or "Премиум" in label):
+                    raise CreationError(
+                        f"Кнопка публикации осталась платной: «{label}». "
+                        "Вариант размещения не переключился — прерываю, "
+                        "чтобы не списать деньги."
+                    )
+                return el
+        return None
 
-        uploaded = 0
-        if images:
-            file_inputs = [
-                el
-                for el in self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-            ]
-            if not file_inputs:
-                logger.warning("Поле загрузки изображений не найдено")
-            else:
-                target = file_inputs[0]
-                # input[type=file] часто скрыт стилями — делаем его видимым.
-                self.driver.execute_script(
-                    "arguments[0].style.display='block';"
-                    "arguments[0].style.visibility='visible';"
-                    "arguments[0].style.opacity=1;"
-                    "arguments[0].style.height='1px';arguments[0].style.width='1px';",
-                    target,
-                )
-                for path in images:
-                    if not os.path.exists(path):
-                        logger.warning("Файл %s не найден", path)
-                        continue
-                    target.send_keys(os.path.abspath(path))
-                    uploaded += 1
-                    self._sleep(2)
+    def step9_publish(self, placement: str = "free"):
+        self._wait_title(STEP_TITLES[9])
 
-        self._click_next(required=False)
-        return f"Цена: {price} ₽, изображений загружено: {uploaded}"
+        # По умолчанию отмечен платный «Премиум» — переключаем явно.
+        labels = PLACEMENT_LABELS.get(placement, PLACEMENT_LABELS["free"])
+        switched = any(
+            self._click_text(label, timeout=4, required=False) for label in labels
+        )
+        if not switched:
+            raise CreationError(
+                f"Не нашёл вариант размещения {labels} на шаге «Выберите сервис»"
+            )
 
-    # ── Шаг 9: публикация ─────────────────────────────────────────────────
+        button = self._publish_button(placement)
+        if not button:
+            raise CreationError("Не нашёл кнопку публикации")
+        label = button.text.strip()
+        self._click(button)
+        self._sleep(5)
 
-    def step9_publish(self, priority: str = "free"):
-        if priority == "free":
-            # Бесплатный вариант размещения подписан по-разному.
-            for text in ("Бесплатно", "Обычное", "Стандартное", "0 ₽"):
-                if self._click_text(text, timeout=3, required=False):
-                    break
-
-        published = False
-        for text in PUBLISH_BUTTON_TEXTS:
-            if self._click_text(text, timeout=4, required=False):
-                published = True
-                break
-        if not published:
-            self._click_next()
-
-        self._sleep(4)
-        url = self.driver.current_url
-        return f"Готово. Текущий адрес: {url}"
+        return f"Размещение «{placement}», нажато «{label}»"
 
     # ── Полный проход ─────────────────────────────────────────────────────
 
@@ -619,24 +650,18 @@ class PlayerokBrowser:
         бот через него шлёт прогресс в Telegram.
         """
         steps = [
-            ("Страница создания товара", lambda: self.step1_open_create_page()),
-            ("Выбор игры", lambda: self.step2_select_game(draft.game)),
-            ("Выбор категории", lambda: self.step3_select_category(draft.category)),
+            ("Раздел товаров", lambda: self.step1_select_game(draft.game)),
+            ("Категория", lambda: self.step2_select_category(draft.category)),
             (
-                "Способ получения",
-                lambda: self.step4_select_obtaining_type(draft.obtaining_type),
+                "Способ передачи",
+                lambda: self.step3_select_obtaining_type(draft.obtaining_type),
             ),
-            ("Опции товара", lambda: self.step5_fill_options(draft.options)),
-            (
-                "Название и описание",
-                lambda: self.step6_fill_main_info(draft.name, draft.description),
-            ),
-            ("Данные товара", lambda: self.step7_fill_data_fields(draft.data_fields)),
-            (
-                "Цена и изображения",
-                lambda: self.step8_price_and_images(draft.price, draft.images),
-            ),
-            ("Публикация", lambda: self.step9_publish(draft.priority)),
+            ("Характеристики", lambda: self.step4_fill_attributes(draft.attributes)),
+            ("Фото", lambda: self.step5_upload_images(draft.images)),
+            ("О товаре", lambda: self.step6_fill_about(draft.name, draft.description)),
+            ("Цена", lambda: self.step7_fill_price(draft.price)),
+            ("Данные товара", lambda: self.step8_fill_data_fields(draft.data_fields)),
+            ("Выберите сервис", lambda: self.step9_publish(draft.placement)),
         ]
 
         results: list[StepResult] = []
@@ -661,6 +686,7 @@ class PlayerokBrowser:
         return results
 
 
+
 def create_product(draft: ProductDraft, on_step=None) -> list[StepResult]:
     """Синхронная точка входа: запускает браузер, создаёт товар, закрывает браузер."""
     with PlayerokBrowser() as browser:
@@ -672,14 +698,19 @@ if __name__ == "__main__":
     # Ручная проверка: python selenium_creator.py
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+    # placement="later" — товар остаётся черновиком: ничего не публикуется
+    # и не списывается. Для боевого прогона ставьте "free".
     demo = ProductDraft(
         game="Telegram",
-        category="Подарки (NFT)",
-        obtaining_type="Подарок",
-        name='Подарок "❤️ Сердце" (13 ⭐)',
-        description="Выдача без захода на ваш аккаунт.",
-        price=90,
+        category="Звезды",
+        obtaining_type="По @username",
+        attributes=["100 звёзд"],
+        name="100 звёзд по @username",
+        description="Выдача без входа в аккаунт.",
+        price=145,
         data_fields={"Комментарий": "Напишу вам в ТГ после оформления заказа"},
+        images=[p for p in ("demo.jpg", "demo.png") if os.path.exists(p)],
+        placement="later",
     )
     for step in create_product(demo, on_step=lambda s: print(f"[{s.number}/9] {s.title}: {s.detail}")):
         print(step)

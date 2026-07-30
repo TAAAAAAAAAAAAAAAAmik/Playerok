@@ -63,26 +63,35 @@ def _draft_from(user_data: dict) -> ProductDraft:
         name=user_data["name"],
         description=user_data["description"],
         price=user_data["price"],
-        options=user_data.get("options", {}),
+        attributes=user_data.get("attributes", []),
         data_fields=user_data.get("data_fields", {}),
         images=user_data.get("images", []),
+        placement=user_data.get("placement", "free"),
     )
 
 
+PLACEMENT_NAMES = {
+    "free": "Обычный (бесплатно)",
+    "premium": "Премиум (платно)",
+    "later": "Выставить позже (черновик)",
+}
+
+
 def _summary(d: ProductDraft) -> str:
-    options = ", ".join(f"{k}={v}" for k, v in d.options.items()) or "—"
+    attributes = ", ".join(d.attributes) or "—"
     fields = ", ".join(f"{k}={v}" for k, v in d.data_fields.items()) or "—"
     return (
         "🧾 <b>Черновик товара</b>\n\n"
         f"🎮 Игра: <b>{d.game}</b>\n"
         f"🗂 Категория: <b>{d.category}</b>\n"
-        f"📤 Способ получения: <b>{d.obtaining_type}</b>\n"
-        f"⚙️ Опции: {options}\n"
+        f"📤 Способ передачи: <b>{d.obtaining_type}</b>\n"
+        f"⚙️ Характеристики: {attributes}\n"
         f"📛 Название: <b>{d.name}</b>\n"
         f"📝 Описание: {d.description}\n"
         f"🔑 Данные товара: {fields}\n"
         f"💵 Цена: <b>{d.price} ₽</b>\n"
-        f"🖼 Изображений: <b>{len(d.images)}</b>"
+        f"🖼 Изображений: <b>{len(d.images)}</b>\n"
+        f"🚀 Размещение: <b>{PLACEMENT_NAMES.get(d.placement, d.placement)}</b>"
     )
 
 
@@ -111,7 +120,7 @@ async def got_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def got_category(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["category"] = update.message.text.strip()
     await update.message.reply_text(
-        "3️⃣ Способ получения товара (например: <code>Подарок</code>):",
+        "3️⃣ Способ передачи (например: <code>По @username</code>):",
         parse_mode=ParseMode.HTML,
     )
     return OBTAINING
@@ -120,9 +129,9 @@ async def got_category(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def got_obtaining(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["obtaining"] = update.message.text.strip()
     await update.message.reply_text(
-        "4️⃣ Опции категории — по одной в строке в формате "
-        "<code>Опция = значение</code>.\n"
-        "Если опций нет, отправьте <code>-</code>",
+        "4️⃣ Характеристики — как они подписаны на сайте, по одной в строке "
+        "(например: <code>100 звёзд</code>).\n"
+        "Если характеристик нет, отправьте <code>-</code>",
         parse_mode=ParseMode.HTML,
     )
     return OPTIONS
@@ -130,7 +139,9 @@ async def got_obtaining(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def got_options(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    ctx.user_data["options"] = {} if text.lower() in SKIP else _parse_pairs(text)
+    ctx.user_data["attributes"] = (
+        [] if text.lower() in SKIP else [t.strip() for t in text.splitlines() if t.strip()]
+    )
     await update.message.reply_text("5️⃣ Название товара:")
     return NAME
 
@@ -206,12 +217,13 @@ async def images_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     draft = _draft_from(ctx.user_data)
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🚀 Создать", callback_data="create:go")],
+            [InlineKeyboardButton("🚀 Выставить бесплатно", callback_data="create:free")],
+            [InlineKeyboardButton("📝 Сохранить черновиком", callback_data="create:later")],
             [InlineKeyboardButton("❌ Отмена", callback_data="create:cancel")],
         ]
     )
     await update.message.reply_text(
-        _summary(draft) + "\n\nСоздаём товар?",
+        _summary(draft) + "\n\nКак выставляем?",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
     )
@@ -229,6 +241,9 @@ async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.clear()
         return ConversationHandler.END
 
+    # На девятом шаге сайт по умолчанию предлагает платный «Премиум» —
+    # выбор пользователя передаём в мастер явно.
+    ctx.user_data["placement"] = query.data.split(":", 1)[1]
     draft = _draft_from(ctx.user_data)
     chat_id = query.message.chat_id
     await query.edit_message_text(
@@ -265,12 +280,14 @@ async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.to_thread(create_product, draft, on_step)
         await progress.put(None)
         await reporter
-        await ctx.bot.send_message(
-            chat_id,
-            "🎉 <b>Товар создан и отправлен на публикацию.</b>\n"
-            "Проверьте его в личном кабинете Playerok.",
-            parse_mode=ParseMode.HTML,
+        done_text = (
+            "📝 <b>Товар сохранён черновиком.</b>\n"
+            "Выставить его можно в личном кабинете Playerok."
+            if draft.placement == "later"
+            else "🎉 <b>Товар создан и отправлен на публикацию.</b>\n"
+            "Проверьте его в личном кабинете Playerok."
         )
+        await ctx.bot.send_message(chat_id, done_text, parse_mode=ParseMode.HTML)
     except CreationError as e:
         await progress.put(None)
         await reporter
