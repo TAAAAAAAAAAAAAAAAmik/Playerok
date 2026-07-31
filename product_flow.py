@@ -26,9 +26,11 @@ from telegram.ext import (
     filters,
 )
 
+import api_creator
+import catalog
 import config
 import templates
-from selenium_creator import CreationError
+from selenium_creator import CreationError, ProductDraft
 from wizard_session import WizardSession
 
 logger = logging.getLogger(__name__)
@@ -344,6 +346,86 @@ def _index_of(items: list[dict], wanted: str) -> int:
     return -1
 
 
+async def _copy_via_api(query, ctx, template: dict, fields: dict) -> bool:
+    """
+    Создаёт копию запросами. Идентификаторы берём из каталога — он
+    наполняется сам, пока бот ходит по мастеру. Нет данных в каталоге —
+    возвращаем False, и копия пойдёт через браузер.
+    """
+    ids = catalog.resolve(template["game"], template["category"],
+                          template.get("obtaining", ""))
+    if not ids.get("category_id") or not ids.get("obtaining_id"):
+        logger.info("Каталог не знает связку — копирую через браузер")
+        return False
+
+    category_id, obtaining_id = ids["category_id"], ids["obtaining_id"]
+
+    # Характеристики: подписи из шаблона переводим в {field: value}.
+    known = catalog.options(category_id)
+    attribute_values = {}
+    for wanted in template.get("attributes", []):
+        option = next(
+            (o for o in known
+             if wanted.casefold() in f"{o.get('label')} {o.get('value')}".casefold()),
+            None,
+        )
+        if not option or not option.get("field"):
+            logger.info("Характеристика «%s» не в каталоге — иду браузером", wanted)
+            return False
+        attribute_values[option["field"]] = option.get("value")
+
+    # Поля товара: подписи → fieldId.
+    known_fields = [f for f in catalog.data_fields(category_id, obtaining_id)
+                    if f.get("type") == "ITEM_DATA"]
+    data_field_values = []
+    for label, value in fields.items():
+        found = next(
+            (f for f in known_fields
+             if (f.get("label") or "").casefold() == label.casefold()),
+            None,
+        )
+        if not found:
+            logger.info("Поле «%s» не в каталоге — иду браузером", label)
+            return False
+        data_field_values.append({"fieldId": found["id"], "value": value})
+
+    draft = ProductDraft(
+        game=template["game"],
+        category=template["category"],
+        obtaining_type=template.get("obtaining", ""),
+        name=template["name"],
+        description=template["description"],
+        price=template["price"],
+        images=template.get("images", []),
+        placement="later",  # окончательный выбор пользователь сделает кнопкой
+        game_id=ids.get("game_id", ""),
+        category_id=category_id,
+        obtaining_type_id=obtaining_id,
+        attribute_values=attribute_values,
+        data_field_values=data_field_values,
+    )
+
+    await _edit(query, "⚡ Создаю копию запросами…")
+    try:
+        item = await api_creator.create_product(draft)
+    except Exception as e:
+        logger.warning("Запросами не вышло (%s) — иду браузером", e)
+        return False
+
+    ctx.user_data["api_item"] = item
+    await _edit(
+        query,
+        _summary(ctx.user_data)
+        + "\n\n<i>Комментарий заменён на новый. Товар создан запросами "
+          "и лежит в черновиках.</i>\n\nВыставляем?",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 Выставить бесплатно", callback_data="place:free")],
+            [InlineKeyboardButton("📝 Оставить черновиком", callback_data="place:later")],
+        ]),
+    )
+    return True
+
+
 async def template_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Повторяет сохранённый товар: те же данные, новый комментарий."""
     query = update.callback_query
@@ -364,6 +446,10 @@ async def template_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "discount": template.get("discount", DEFAULT_DISCOUNT),
         "from_template": True,
     })
+
+    # Быстрый путь: если каталог знает эту связку — создаём запросами.
+    if await _copy_via_api(query, ctx, template, fields):
+        return CONFIRM
 
     session = WizardSession.get()
     try:
@@ -620,6 +706,28 @@ async def placement_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     placement = query.data.split(":", 1)[1]
 
     await _edit(query, "⏳ Завершаю…")
+
+    item = ctx.user_data.get("api_item")
+    if item:
+        # Товар уже создан запросами — публикуем так же.
+        try:
+            if placement == "later":
+                detail = "Оставлен черновиком"
+            else:
+                published = await api_creator.publish_free(item)
+                detail = f"Опубликован, статус: {published.get('status', '—')}"
+        except Exception as e:
+            return await _fail(query, e)
+
+        templates.save(ctx.user_data)
+        ctx.user_data.clear()
+        await query.message.reply_text(
+            ("📝 <b>Товар сохранён черновиком.</b>" if placement == "later"
+             else "🎉 <b>Товар выставлен на продажу.</b>") + f"\n\n<i>{detail}</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+
     session = WizardSession.get()
     try:
         detail = await _run(session.publish, placement)

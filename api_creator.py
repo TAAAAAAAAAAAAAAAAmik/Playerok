@@ -105,6 +105,10 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
     # 2. Категория (полные данные нужны ради options)
     async def resolve_category() -> dict:
         if draft.category_id:
+            # Характеристики уже разобраны — категория нужна была только
+            # ради options, значит и запрашивать её незачем.
+            if draft.attribute_values or not draft.attributes:
+                return {"id": draft.category_id, "name": draft.category, "options": []}
             return await api.fetch_category(category_id=draft.category_id)
         game_page = await api.fetch_game(slug=game.get("slug", ""), game_id=game["id"])
         categories = game_page.get("categories") or []
@@ -271,3 +275,18 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
         return published
     except Exception as e:
         fail(9, title, e)
+
+
+async def publish_free(item: dict) -> dict:
+    """
+    Выставляет созданный черновик на бесплатное размещение: берёт статус
+    приоритета с нулевой ценой и вызывает publishItem.
+    """
+    statuses = await api.fetch_priority_statuses(item["id"], item.get("price", 0))
+    free = next((s for s in statuses if not s.get("price")), None)
+    if not free:
+        raise ApiCreationError(
+            "Бесплатного размещения нет, доступны: "
+            + ", ".join(f"{s.get('name')} — {s.get('price')} ₽" for s in statuses)
+        )
+    return await api.publish_item(item["id"], free["id"])

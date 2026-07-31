@@ -23,6 +23,7 @@ import time
 
 from selenium.webdriver.common.by import By
 
+import catalog
 from selenium_creator import (
     STEP_TITLES,
     CreationError,
@@ -140,18 +141,30 @@ class WizardSession:
             self._lock.release()
 
     def _screen_title(self) -> str:
-        """Заголовок текущего экрана мастера — по нему видно, где он застрял."""
+        """
+        Заголовок текущего экрана. Смотрим только на видимые элементы:
+        разметка хранит заголовки всех пройденных шагов, и по тексту страницы
+        экран определяется неверно.
+        """
         if not self.browser or not self.browser.driver:
             return "браузер закрыт"
-        try:
-            text = self.browser._page_text()
-        except Exception:
-            return "не прочитать"
         for title in STEP_TITLES.values():
-            if title in text:
-                return title
-        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-        return first[:40] or "пусто"
+            try:
+                if self.browser._find_by_text(title, timeout=0.5, exact=True):
+                    return title
+            except Exception:
+                return "не прочитать"
+        return "неизвестный экран"
+
+    def _harvest(self):
+        """
+        Забирает ответы фронта в каталог идентификаторов. Ошибки здесь не
+        должны ломать шаг — каталог это ускоритель, а не обязательное звено.
+        """
+        try:
+            catalog.harvest(self.browser)
+        except Exception as e:
+            logger.warning("Каталог не пополнился: %s", e)
 
     def _require(self):
         if not self.alive():
@@ -280,6 +293,7 @@ class WizardSession:
                     time.sleep(2)
 
             self.touched = time.time()
+            self._harvest()
             return self._items()
 
     def pick_game(self, index: int) -> list[dict]:
@@ -289,6 +303,7 @@ class WizardSession:
             self._click_index(index, "игру")
             self.browser._wait_title(STEP_TITLES[2], timeout=15)
             self.step = 2
+            self._harvest()
             return self._items()
 
     def pick_category(self, index: int) -> list[dict]:
@@ -299,6 +314,7 @@ class WizardSession:
             self.browser._click_next(required=False, timeout=8)
             self.browser._wait_title(STEP_TITLES[3], timeout=15)
             self.step = 3
+            self._harvest()
             return self._items()
 
     def pick_obtaining(self, index: int) -> list[dict]:
@@ -311,6 +327,7 @@ class WizardSession:
             self.step = 4
 
             # У части категорий характеристик нет — мастер сразу уходит к фото.
+            self._harvest()
             if not self.browser._wait_title(STEP_TITLES[4], timeout=8, required=False):
                 return []
             return self._items()
