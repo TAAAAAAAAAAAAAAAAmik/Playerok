@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 8
 # Браузер отвечает не мгновенно: шаг мастера с загрузкой файла может занять
 # полминуты. Дольше ждать нет смысла — лучше честно сказать об этом.
-STEP_TIMEOUT = int(os.getenv("WIZARD_STEP_TIMEOUT", "90"))
+STEP_TIMEOUT = int(os.getenv("WIZARD_STEP_TIMEOUT", "60"))
 
 
 # ── Служебное ─────────────────────────────────────────────────────────────────

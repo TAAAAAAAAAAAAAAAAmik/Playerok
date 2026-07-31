@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -77,14 +78,24 @@ class WizardSession:
         )
 
     def close(self):
-        with self._lock:
-            if self.browser:
-                try:
-                    self.browser.stop()
-                except Exception as e:
-                    logger.warning("Браузер не закрылся: %s", e)
-            self.browser = None
-            self.step = 0
+        """
+        Закрывает мастер. Замок здесь не берём: если предыдущий шаг завис,
+        браузер надо гасить именно поэтому. Chrome закрываем в отдельном
+        потоке — quit() на зависшем драйвере тоже умеет подвисать.
+        """
+        browser, self.browser = self.browser, None
+        self.step = 0
+        self.chosen = []
+        self._elements = []
+        if browser:
+            threading.Thread(target=self._quit, args=(browser,), daemon=True).start()
+
+    @staticmethod
+    def _quit(browser):
+        try:
+            browser.stop()
+        except Exception as e:
+            logger.warning("Браузер не закрылся: %s", e)
 
     def _open(self):
         """Поднимает браузер и открывает мастер на первом шаге."""
@@ -97,6 +108,48 @@ class WizardSession:
         self.step = 1
         self.chosen = []
         self.touched = time.time()
+
+    @contextlib.contextmanager
+    def _guard(self, what: str):
+        """
+        Замок сеанса с таймаутом. Если предыдущий шаг превысил время ожидания,
+        его поток ещё работает с браузером — без таймаута следующий шаг встал
+        бы намертво.
+        """
+        if not self._lock.acquire(timeout=5):
+            raise CreationError(
+                "Мастер занят предыдущим шагом. Подождите несколько секунд "
+                "или начните заново: /cancel, затем /create"
+            )
+        logger.info("Мастер: %s", what)
+        started = time.time()
+        try:
+            yield
+        except Exception as e:
+            # Что именно на экране — это половина диагноза, поэтому кладём
+            # заголовок и снимок прямо в ошибку и в журнал.
+            screen = self._screen_title()
+            logger.warning("Мастер: %s — ошибка: %s (экран: %s)", what, e, screen)
+            if self.browser:
+                self.browser.snapshot(0, f"ошибка_{what}")
+            raise CreationError(f"{e} (мастер на экране «{screen}»)") from e
+        finally:
+            logger.info("Мастер: %s — готово за %.1f с", what, time.time() - started)
+            self._lock.release()
+
+    def _screen_title(self) -> str:
+        """Заголовок текущего экрана мастера — по нему видно, где он застрял."""
+        if not self.browser or not self.browser.driver:
+            return "браузер закрыт"
+        try:
+            text = self.browser._page_text()
+        except Exception:
+            return "не прочитать"
+        for title in STEP_TITLES.values():
+            if title in text:
+                return title
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        return first[:40] or "пусто"
 
     def _require(self):
         if not self.alive():
@@ -208,7 +261,7 @@ class WizardSession:
 
     def games(self, search: str = "") -> list[dict]:
         """Шаг 1: список игр. `search` фильтрует прямо в мастере."""
-        with self._lock:
+        with self._guard(f"список игр {search or ''}".strip()):
             if not self.alive() or self.step != 1:
                 self._open()
 
@@ -227,7 +280,7 @@ class WizardSession:
 
     def pick_game(self, index: int) -> list[dict]:
         """Выбирает игру по позиции в показанном списке, возвращает категории."""
-        with self._lock:
+        with self._guard("выбор игры"):
             self._require()
             self._click_index(index, "игру")
             self.browser._wait_title(STEP_TITLES[2], timeout=15)
@@ -236,7 +289,7 @@ class WizardSession:
 
     def pick_category(self, index: int) -> list[dict]:
         """Выбирает категорию, возвращает способы передачи (шаг 3)."""
-        with self._lock:
+        with self._guard("выбор категории"):
             self._require()
             self._click_index(index, "категорию")
             self.browser._click_next(required=False, timeout=8)
@@ -246,7 +299,7 @@ class WizardSession:
 
     def pick_obtaining(self, index: int) -> list[dict]:
         """Выбирает способ передачи, возвращает характеристики (шаг 4)."""
-        with self._lock:
+        with self._guard("выбор способа передачи"):
             self._require()
             self._click_index(index, "способ передачи")
             self.browser._click_next(required=False, timeout=8)
@@ -260,7 +313,7 @@ class WizardSession:
 
     def pick_attribute(self, index: int):
         """Отмечает характеристику на шаге 4."""
-        with self._lock:
+        with self._guard("выбор характеристики"):
             self._require()
             self._click_index(index, "характеристику")
 
@@ -285,7 +338,7 @@ class WizardSession:
 
     def upload_images(self, paths: list[str]) -> str:
         """Шаг 5: фотографии."""
-        with self._lock:
+        with self._guard("загрузка фото"):
             self._require()
             if self.step == 4:
                 self.browser._click_next(required=False, timeout=8)
@@ -295,7 +348,7 @@ class WizardSession:
 
     def fill_about(self, name: str, description: str) -> str:
         """Шаг 6: название и описание."""
-        with self._lock:
+        with self._guard("название и описание"):
             self._require()
             detail = self.browser.step6_fill_about(name, description)
             self.step = 6
@@ -303,7 +356,7 @@ class WizardSession:
 
     def fill_price(self, price: int) -> list[str]:
         """Шаг 7: цена. Возвращает подписи полей следующего шага."""
-        with self._lock:
+        with self._guard("цена"):
             self._require()
             self.browser.step7_fill_price(price)
             self.step = 7
@@ -312,7 +365,7 @@ class WizardSession:
 
     def fill_data_fields(self, values: dict[str, str]) -> list[dict]:
         """Шаг 8: данные товара. Возвращает варианты размещения (шаг 9)."""
-        with self._lock:
+        with self._guard("данные товара"):
             self._require()
             self.browser.step8_fill_data_fields(values)
             self.step = 8
@@ -321,7 +374,7 @@ class WizardSession:
 
     def publish(self, placement: str) -> str:
         """Шаг 9: размещение и публикация."""
-        with self._lock:
+        with self._guard("публикация"):
             self._require()
             detail = self.browser.step9_publish(placement)
             self.step = 9
