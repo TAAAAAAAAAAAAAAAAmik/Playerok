@@ -177,12 +177,13 @@ async def game_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def game_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    game = ctx.user_data["games"][int(query.data.split(":")[1])]["name"]
+    index = int(query.data.split(":")[1])
+    game = ctx.user_data["games"][index]["name"]
     ctx.user_data["game"] = game
 
     await _edit(query, f"🎮 {game}\n\n⏳ Загружаю категории…")
     try:
-        categories = await _run(WizardSession.get().pick_game, game)
+        categories = await _run(WizardSession.get().pick_game, index)
     except Exception as e:
         return await _fail(query, e)
 
@@ -206,12 +207,13 @@ async def category_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def category_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    category = ctx.user_data["categories"][int(query.data.split(":")[1])]["name"]
+    index = int(query.data.split(":")[1])
+    category = ctx.user_data["categories"][index]["name"]
     ctx.user_data["category"] = category
 
     await _edit(query, f"🗂 {category}\n\n⏳ Загружаю способы передачи…")
     try:
-        obtaining = await _run(WizardSession.get().pick_category, category)
+        obtaining = await _run(WizardSession.get().pick_category, index)
     except Exception as e:
         return await _fail(query, e)
 
@@ -236,12 +238,13 @@ async def obtaining_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def obtaining_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    obtaining = ctx.user_data["obtaining_types"][int(query.data.split(":")[1])]["name"]
+    index = int(query.data.split(":")[1])
+    obtaining = ctx.user_data["obtaining_types"][index]["name"]
     ctx.user_data["obtaining"] = obtaining
 
     await _edit(query, f"📤 {obtaining}\n\n⏳ Смотрю характеристики…")
     try:
-        attributes = await _run(WizardSession.get().pick_obtaining, obtaining)
+        attributes = await _run(WizardSession.get().pick_obtaining, index)
     except Exception as e:
         return await _fail(query, e)
 
@@ -267,10 +270,11 @@ async def attribute_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def attribute_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    attribute = ctx.user_data["attribute_options"][int(query.data.split(":")[1])]["name"]
+    index = int(query.data.split(":")[1])
+    attribute = ctx.user_data["attribute_options"][index]["name"]
 
     try:
-        await _run(WizardSession.get().pick_attribute, attribute)
+        await _run(WizardSession.get().pick_attribute, index)
     except Exception as e:
         return await _fail(query, e)
 

@@ -57,6 +57,8 @@ class WizardSession:
         # Выбранное мастер показывает шапкой над списком — эти строки
         # не пункты, и в кнопки они попадать не должны.
         self.chosen: list[str] = []
+        # Элементы текущего экрана — по индексу из кнопки кликаем по ним.
+        self._elements: list = []
 
     # ── Жизненный цикл ────────────────────────────────────────────────────
 
@@ -103,59 +105,84 @@ class WizardSession:
 
     # ── Чтение экрана ─────────────────────────────────────────────────────
 
-    # Пункты берём из листовых элементов, а не из innerText страницы: чипы
-    # характеристик стоят в строку, и текстом они склеиваются в одну строку.
-    LEAF_TEXTS = """
+    # Возвращаем сами элементы, а не текст: пункт мастера бывает блоком с
+    # заголовком и пояснением («По @username» + «Передача звезд через …»),
+    # и искать его потом по склеенному тексту ненадёжно — кликаем по элементу.
+    LEAF_ELEMENTS = """
     const out = [], taken = [];
-    for (const el of document.querySelectorAll('button, a, div, span, li, label, p')) {
-      if (el.offsetParent === null) continue;              // невидимое
+    const fits = el => {
+      if (el.offsetParent === null) return false;              // невидимое
       const text = (el.innerText || '').trim();
-      if (!text || text.length > 60) continue;             // контейнеры и абзацы
-      // Пункт списка — это элемент без вложенных пунктов. Один дочерний
-      // элемент с текстом допустим: так размечают эмодзи рядом с названием.
+      return text.length > 0 && text.length <= 80;             // не контейнер
+    };
+
+    // Пункт мастера — кликабельный блок: у него cursor: pointer. Внутренние
+    // куски (заголовок, пояснение, эмодзи) отбрасываем, чтобы клик приходился
+    // на весь пункт целиком.
+    for (const el of document.querySelectorAll('*')) {
+      if (!fits(el)) continue;
+      if (getComputedStyle(el).cursor !== 'pointer') continue;
+      if (taken.some(t => t.contains(el))) continue;
+      out.push(el);
+      taken.push(el);
+    }
+    if (out.length >= 2) return out;
+
+    // Запасной путь: разметка без cursor: pointer — берём внешние элементы
+    // с коротким текстом и без вложенных пунктов.
+    out.length = 0; taken.length = 0;
+    for (const el of document.querySelectorAll('button, a, div, span, li, label, p')) {
+      if (!fits(el)) continue;
       const textChildren = Array.from(el.children)
         .filter(c => (c.innerText || '').trim()).length;
       if (textChildren > 1) continue;
-      if (taken.some(t => t.contains(el))) continue;       // уже внутри взятого
-      out.push(text);
+      if (taken.some(t => t.contains(el))) continue;
+      out.push(el);
       taken.push(el);
     }
     return out;
     """
 
-    def _visible_lines(self) -> list[str]:
-        """Видимые подписи пунктов текущего экрана мастера."""
+    def _items(self) -> list[dict]:
+        """
+        Пункты текущего экрана. Элементы запоминаются, чтобы выбор пользователя
+        превратился в клик именно по ним, а не в повторный поиск по тексту.
+        """
         try:
-            raw_lines = self.browser.driver.execute_script(self.LEAF_TEXTS) or []
+            elements = self.browser.driver.execute_script(self.LEAF_ELEMENTS) or []
         except Exception as e:
             logger.warning("Не смог прочитать экран мастера: %s", e)
-            raw_lines = []
+            elements = []
 
-        if not raw_lines:  # запасной путь, если разметка неожиданная
-            text = self.browser.driver.execute_script(
-                "return document.body ? document.body.innerText : ''"
-            ) or ""
-            raw_lines = text.splitlines()
+        items: list[dict] = []
+        self._elements = []
+        seen: set[str] = set()
 
-        lines: list[str] = []
-        for raw in raw_lines:
-            line = " ".join(str(raw).split())
-            if not line or line.casefold() in NOISE:
+        for element in elements:
+            try:
+                text = " ".join((element.text or "").split())
+            except Exception:
                 continue
-            # Служебное: счётчики вида «1/10» и длинные абзацы инструкций.
-            if len(line) > 60 or line.replace("/", "").isdigit():
+            if not text or text.casefold() in NOISE or text in seen:
                 continue
-            if line not in lines:
-                lines.append(line)
-        return lines
+            if len(text) > 80 or text.replace("/", "").isdigit():
+                continue
+            if text in self.chosen:  # шапка с уже выбранным
+                continue
 
-    def _items(self) -> list[dict]:
-        """Пункты текущего шага без шапки с уже выбранным."""
-        return [
-            {"name": line}
-            for line in self._visible_lines()
-            if line not in self.chosen
-        ]
+            # На кнопку выносим только первую строку: вторая — пояснение.
+            title = text.split("\n")[0].strip() if "\n" in text else text
+            for part in (element.text or "").splitlines():
+                part = part.strip()
+                if part:
+                    title = part
+                    break
+
+            seen.add(text)
+            items.append({"name": title[:60], "full": text})
+            self._elements.append(element)
+
+        return items
 
     def _field_labels(self) -> list[str]:
         """Подписи полей ввода на текущем экране."""
@@ -198,30 +225,30 @@ class WizardSession:
             self.touched = time.time()
             return self._items()
 
-    def pick_game(self, name: str) -> list[dict]:
-        """Выбирает игру, возвращает категории (шаг 2)."""
+    def pick_game(self, index: int) -> list[dict]:
+        """Выбирает игру по позиции в показанном списке, возвращает категории."""
         with self._lock:
             self._require()
-            self._click(name, "игру")
+            self._click_index(index, "игру")
             self.browser._wait_title(STEP_TITLES[2], timeout=15)
             self.step = 2
             return self._items()
 
-    def pick_category(self, name: str) -> list[dict]:
+    def pick_category(self, index: int) -> list[dict]:
         """Выбирает категорию, возвращает способы передачи (шаг 3)."""
         with self._lock:
             self._require()
-            self._click(name, "категорию")
+            self._click_index(index, "категорию")
             self.browser._click_next(required=False, timeout=8)
             self.browser._wait_title(STEP_TITLES[3], timeout=15)
             self.step = 3
             return self._items()
 
-    def pick_obtaining(self, name: str) -> list[dict]:
+    def pick_obtaining(self, index: int) -> list[dict]:
         """Выбирает способ передачи, возвращает характеристики (шаг 4)."""
         with self._lock:
             self._require()
-            self._click(name, "способ передачи")
+            self._click_index(index, "способ передачи")
             self.browser._click_next(required=False, timeout=8)
             time.sleep(2)
             self.step = 4
@@ -231,18 +258,28 @@ class WizardSession:
                 return []
             return self._items()
 
-    def pick_attribute(self, name: str):
+    def pick_attribute(self, index: int):
         """Отмечает характеристику на шаге 4."""
         with self._lock:
             self._require()
-            self._click(name, "характеристику")
+            self._click_index(index, "характеристику")
 
-    def _click(self, name: str, what: str):
-        if not self.browser._click_text(name, timeout=self.browser.timeout, required=False):
-            raise CreationError(f"Не нашёл {what} «{name}» на экране мастера")
-        # Выбранное уходит в шапку — запоминаем, чтобы не показать его кнопкой.
-        if name not in self.chosen:
-            self.chosen.append(name)
+    def _click_index(self, index: int, what: str):
+        """Кликает по элементу, который показывали пользователю кнопкой."""
+        if index >= len(self._elements):
+            raise CreationError(f"Экран мастера изменился — выберите {what} заново")
+
+        element = self._elements[index]
+        try:
+            text = " ".join((element.text or "").split())
+        except Exception:
+            text = ""
+
+        self.browser._click(element)
+        # Выбранное мастер показывает шапкой — запоминаем, чтобы не выводить
+        # его пунктом на следующем шаге.
+        if text and text not in self.chosen:
+            self.chosen.append(text)
 
     # ── Шаги 5–8: данные товара ───────────────────────────────────────────
 
