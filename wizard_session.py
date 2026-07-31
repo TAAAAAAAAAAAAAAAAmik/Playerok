@@ -60,6 +60,8 @@ class WizardSession:
         self.chosen: list[str] = []
         # Элементы текущего экрана — по индексу из кнопки кликаем по ним.
         self._elements: list = []
+        # Что мастер сказал про цену и скидку — показываем это пользователю.
+        self.price_detail = ""
 
     # ── Жизненный цикл ────────────────────────────────────────────────────
 
@@ -356,11 +358,11 @@ class WizardSession:
             self.step = 6
             return detail
 
-    def fill_price(self, price: int) -> list[str]:
-        """Шаг 7: цена. Возвращает подписи полей следующего шага."""
+    def fill_price(self, price: int, discount: int = 0) -> list[str]:
+        """Шаг 7: цена и скидка. Возвращает подписи полей следующего шага."""
         with self._guard("цена"):
             self._require()
-            self.browser.step7_fill_price(price)
+            self.price_detail = self.browser.step7_fill_price(price, discount)
             self.step = 7
             self.browser._wait_title(STEP_TITLES[8], timeout=15, required=False)
             return self._field_labels()

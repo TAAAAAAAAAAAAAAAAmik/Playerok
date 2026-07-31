@@ -27,12 +27,15 @@ from telegram.ext import (
 )
 
 import config
-from selenium_creator import CreationError, ProductDraft
+import templates
+from selenium_creator import CreationError
 from wizard_session import WizardSession
 
 logger = logging.getLogger(__name__)
 
 (
+    PICK_MODE,
+    PICK_TEMPLATE,
     PICK_GAME,
     SEARCH_GAME,
     PICK_CATEGORY,
@@ -44,7 +47,10 @@ logger = logging.getLogger(__name__)
     ENTER_PRICE,
     ENTER_DATA_FIELD,
     CONFIRM,
-) = range(11)
+) = range(13)
+
+# Скидка, с которой выставляются товары по умолчанию.
+DEFAULT_DISCOUNT = int(os.getenv("PLAYEROK_DISCOUNT", "27"))
 
 PAGE_SIZE = 8
 # Браузер отвечает не мгновенно: шаг мастера с загрузкой файла может занять
@@ -105,26 +111,68 @@ async def _fail(target, error: Exception, ctx=None):
 # ── Шаг 1: игра ───────────────────────────────────────────────────────────────
 
 async def cmd_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Спрашивает, создавать товар с нуля или копией сохранённого."""
     ctx.user_data.clear()
-    message = await update.message.reply_text(
-        "⏳ Открываю мастер Playerok… (первый запуск — до полуминуты)"
-    )
+    saved = templates.all_templates()
 
+    rows = [[InlineKeyboardButton("🆕 Создать товар", callback_data="mode:new")]]
+    if saved:
+        rows.append([InlineKeyboardButton(
+            f"📋 Шаблонная копия ({len(saved)})", callback_data="mode:copy")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel:1")])
+
+    await update.message.reply_text(
+        "🛠 <b>Создание товара</b>\n\n"
+        "«Шаблонная копия» повторяет уже созданный товар, но с новым "
+        "комментарием покупателю — чтобы объявление не считалось дублем.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+    return PICK_MODE
+
+
+async def mode_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await _edit(query, "⏳ Открываю мастер Playerok… (первый запуск — до полуминуты)")
+    return await _start_wizard(query, ctx)
+
+
+async def mode_copy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    saved = templates.all_templates()
+    if not saved:
+        return await _fail(query, CreationError("Сохранённых шаблонов пока нет"))
+
+    ctx.user_data["templates"] = saved
+    await _edit(
+        query,
+        "📋 <b>Выберите товар для копии.</b>\n"
+        "Комментарий покупателю бот заменит на новый.",
+        _keyboard([{"name": f"{t['name'][:40]} · {t['price']} ₽"} for t in saved],
+                  "tpl", 0),
+    )
+    return PICK_TEMPLATE
+
+
+async def _start_wizard(query, ctx: ContextTypes.DEFAULT_TYPE):
+    """Открывает мастер и показывает список игр."""
     session = WizardSession.get()
     try:
         games = await _run(session.games)
     except Exception as e:
         logger.exception("Мастер не открылся")
-        return await _fail(message, e)
+        return await _fail(query, e)
 
     if not games:
-        return await _fail(message, CreationError("Мастер открылся, но список игр пуст"))
+        return await _fail(query, CreationError("Мастер открылся, но список игр пуст"))
 
     ctx.user_data["games"] = games
-    await message.edit_text(
-        "🎮 <b>Шаг 1 из 9.</b> Выберите игру или приложение:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=_keyboard(
+    await _edit(
+        query, "🎮 <b>Шаг 1 из 9.</b> Выберите игру или приложение:",
+        _keyboard(
             games, "game", 0,
             extra=[[InlineKeyboardButton("🔎 Найти по названию", callback_data="gamesearch:1")]],
         ),
@@ -282,6 +330,122 @@ async def attribute_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await _ask_photos(query, ctx)
 
 
+# ── Копия по шаблону ──────────────────────────────────────────────────────────
+
+def _index_of(items: list[dict], wanted: str) -> int:
+    """Позиция пункта с таким названием: сначала точное, потом частичное."""
+    target = " ".join(wanted.split()).casefold()
+    names = [" ".join(i["name"].split()).casefold() for i in items]
+    if target in names:
+        return names.index(target)
+    for i, name in enumerate(names):
+        if target in name or name in target:
+            return i
+    return -1
+
+
+async def template_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Повторяет сохранённый товар: те же данные, новый комментарий."""
+    query = update.callback_query
+    await query.answer()
+    template = ctx.user_data["templates"][int(query.data.split(":")[1])]
+
+    fields = templates.vary_data_fields(template.get("data_fields", {}))
+    ctx.user_data.update({
+        "game": template["game"],
+        "category": template["category"],
+        "obtaining": template.get("obtaining", ""),
+        "attributes": template.get("attributes", []),
+        "name": template["name"],
+        "description": template["description"],
+        "price": template["price"],
+        "images": template.get("images", []),
+        "data_fields": fields,
+        "discount": template.get("discount", DEFAULT_DISCOUNT),
+        "from_template": True,
+    })
+
+    session = WizardSession.get()
+    try:
+        await _edit(query, f"📋 Копирую «{template['name'][:40]}»…\n⏳ Открываю мастер…")
+        games = await _run(session.games, template["game"])
+
+        index = _index_of(games, template["game"])
+        if index < 0:
+            raise CreationError(f"Игра «{template['game']}» не нашлась в мастере")
+        await _edit(query, f"🎮 {template['game']}\n⏳ Категория…")
+        categories = await _run(session.pick_game, index)
+
+        index = _index_of(categories, template["category"])
+        if index < 0:
+            raise CreationError(f"Категория «{template['category']}» не нашлась")
+        await _edit(query, f"🗂 {template['category']}\n⏳ Способ передачи…")
+        obtaining = await _run(session.pick_category, index)
+
+        attributes = []
+        if obtaining and template.get("obtaining"):
+            index = _index_of(obtaining, template["obtaining"])
+            if index < 0:
+                raise CreationError(f"Способ «{template['obtaining']}» не нашёлся")
+            await _edit(query, f"📤 {template['obtaining']}\n⏳ Характеристики…")
+            attributes = await _run(session.pick_obtaining, index)
+
+        for wanted in template.get("attributes", []):
+            index = _index_of(attributes, wanted)
+            if index < 0:
+                raise CreationError(f"Характеристика «{wanted}» не нашлась")
+            await _run(session.pick_attribute, index)
+
+        if not template.get("images"):
+            raise CreationError("В шаблоне нет фотографий — создайте товар заново")
+
+        await _edit(query, "🖼 Загружаю фотографии…")
+        await _run(session.upload_images, template["images"])
+
+        await _edit(query, "📝 Заполняю карточку…")
+        await _run(session.fill_about, template["name"], template["description"])
+
+        await _edit(query, f"💵 Цена {template['price']} ₽…")
+        labels = await _run(session.fill_price, template["price"],
+                            ctx.user_data["discount"])
+
+        # Подписи полей берём с экрана, значения — из шаблона с новым
+        # комментарием; чего нет в шаблоне, заполняем прежним значением.
+        values = {}
+        for label in labels:
+            match = next((v for k, v in fields.items() if k.casefold() == label.casefold()), "")
+            values[label] = match or templates.vary_comment()
+        ctx.user_data["data_fields"] = values
+
+        await _edit(query, "🔑 Заполняю данные товара…")
+        await _run(session.fill_data_fields, values)
+    except Exception as e:
+        return await _fail(query, e)
+
+    await _edit(
+        query,
+        _summary(ctx.user_data) + "\n\n<i>Комментарий заменён на новый.</i>\n\nКак выставляем?",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 Выставить бесплатно", callback_data="place:free")],
+            [InlineKeyboardButton("📝 Сохранить черновиком", callback_data="place:later")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="cancel:1")],
+        ]),
+    )
+    return CONFIRM
+
+
+async def template_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    saved = ctx.user_data["templates"]
+    await _edit(
+        query, "📋 <b>Выберите товар для копии:</b>",
+        _keyboard([{"name": f"{t['name'][:40]} · {t['price']} ₽"} for t in saved],
+                  "tpl", int(query.data.split(":")[1])),
+    )
+    return PICK_TEMPLATE
+
+
 # ── Шаг 5: фото ───────────────────────────────────────────────────────────────
 
 async def _ask_photos(query, ctx: ContextTypes.DEFAULT_TYPE):
@@ -377,8 +541,9 @@ async def got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["price"] = price
     message = await update.message.reply_text("⏳ Проставляю цену…")
 
+    ctx.user_data["discount"] = DEFAULT_DISCOUNT
     try:
-        labels = await _run(WizardSession.get().fill_price, price)
+        labels = await _run(WizardSession.get().fill_price, price, DEFAULT_DISCOUNT)
     except Exception as e:
         return await _fail(message, e)
 
@@ -442,7 +607,8 @@ def _summary(data: dict) -> str:
         f"⚙️ {attributes}\n"
         f"📛 <b>{data['name']}</b>\n"
         f"📝 {data['description']}\n"
-        f"💵 <b>{data['price']} ₽</b>\n"
+        f"💵 <b>{data['price']} ₽</b>"
+        + (f" (скидка {data['discount']}%)" if data.get("discount") else "") + "\n"
         f"🖼 Фото: {len(data.get('images', []))}\n"
         f"🔑 {fields}"
     )
@@ -459,6 +625,12 @@ async def placement_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         detail = await _run(session.publish, placement)
     except Exception as e:
         return await _fail(query, e)
+
+    # Товар получился — запоминаем его как шаблон для будущих копий.
+    try:
+        templates.save(ctx.user_data)
+    except Exception as e:
+        logger.warning("Не смог сохранить шаблон: %s", e)
 
     session.close()
     ctx.user_data.clear()
@@ -496,6 +668,16 @@ def build_create_conversation() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[CommandHandler("create", cmd_create)],
         states={
+            PICK_MODE: [
+                CallbackQueryHandler(mode_new, pattern="^mode:new$"),
+                CallbackQueryHandler(mode_copy, pattern="^mode:copy$"),
+                cancel_handler,
+            ],
+            PICK_TEMPLATE: [
+                CallbackQueryHandler(template_chosen, pattern=r"^tpl:\d+$"),
+                CallbackQueryHandler(template_page, pattern=r"^tplpage:\d+$"),
+                cancel_handler,
+            ],
             PICK_GAME: [
                 CallbackQueryHandler(game_chosen, pattern=r"^game:\d+$"),
                 CallbackQueryHandler(game_page, pattern=r"^gamepage:\d+$"),

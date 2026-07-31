@@ -711,13 +711,40 @@ class PlayerokBrowser:
 
     # ── Шаг 7: цена ───────────────────────────────────────────────────────
 
-    def step7_fill_price(self, price: int):
+    def step7_fill_price(self, price: int, discount: int = 0):
         self._wait_title(STEP_TITLES[7])
         # Рядом есть поле «Доход» — заполнять нужно именно «Цена товара».
         if self._fill_number("Цена товара", price, required=False) < 0:
             self._fill_number("Цена", price)
+
+        applied = self.set_discount(discount) if discount else False
         self._click_next()
-        return f"Цена: {price} ₽"
+
+        detail = f"Цена: {price} ₽"
+        if discount:
+            detail += f", скидка {discount}%" if applied else ", скидку задать не вышло"
+        return detail
+
+    def set_discount(self, percent: int) -> bool:
+        """
+        Ставит скидку, если мастер её предлагает. Поле называется по-разному
+        («Скидка», «Скидка, %»), а у части категорий его нет вовсе — тогда
+        возвращаем False, не роняя шаг.
+        """
+        for label in ("Скидка", "Скидк", "Discount"):
+            if self._fill_number(label, percent, required=False) >= 0:
+                logger.info("Скидка %s%% задана полем «%s»", percent, label)
+                return True
+
+        # Иногда скидка включается переключателем, а поле появляется после.
+        if self._click_text("Скидка", timeout=3, required=False):
+            self._sleep(1)
+            if self._fill_number("Скидка", percent, required=False) >= 0:
+                logger.info("Скидка %s%% задана после включения переключателя", percent)
+                return True
+
+        logger.warning("На шаге «Цена» нет поля скидки — оставляю цену как есть")
+        return False
 
     # ── Шаг 8: данные товара ──────────────────────────────────────────────
 
@@ -740,25 +767,43 @@ class PlayerokBrowser:
 
     def _publish_button(self, placement: str):
         """
-        Кнопка публикации внизу девятого шага. Её текст зависит от выбранного
-        варианта («Выставить Премиум за 19 ₽» и т.п.), поэтому ищем по началу
-        и отдельно проверяем, что бесплатное размещение не стало платным.
+        Кнопка внизу девятого шага. Текст зависит от варианта размещения, и
+        похожих кнопок на экране несколько: «Выставить бесплатно», «Выставить
+        Премиум за 19 ₽», «Сохранить». Слово «Выставить» есть даже у пункта
+        «Выставить позже», поэтому подбираем кнопку строго под выбор.
         """
+        buttons = []
         for el in self.driver.find_elements(By.XPATH, "//button | //a[@role='button']"):
-            if not el.is_displayed():
+            try:
+                if not el.is_displayed():
+                    continue
+                label = " ".join((el.text or "").split())
+            except WebDriverException:
                 continue
-            label = (el.text or "").strip()
-            if not label:
-                continue
-            if label.startswith(("Выставить", "Опубликовать", "Сохранить")):
-                if placement != "premium" and ("₽" in label or "Премиум" in label):
-                    raise CreationError(
-                        f"Кнопка публикации осталась платной: «{label}». "
-                        "Вариант размещения не переключился — прерываю, "
-                        "чтобы не списать деньги."
-                    )
-                return el
-        return None
+            if label:
+                buttons.append((el, label))
+
+        def paid(label: str) -> bool:
+            return "₽" in label or "премиум" in label.casefold()
+
+        for el, label in buttons:
+            low = label.casefold()
+            if placement == "later":
+                if "сохранить" in low or "позже" in low:
+                    return el, label
+            elif placement == "premium":
+                if "выставить" in low and paid(label):
+                    return el, label
+            else:  # бесплатное размещение
+                if "выставить" in low and "позже" not in low and not paid(label):
+                    return el, label
+
+        # Ничего подходящего: показываем, что было на экране, — это сразу
+        # объясняет, почему товар ушёл не туда.
+        raise CreationError(
+            f"Не нашёл кнопку для размещения «{placement}». На экране: "
+            + "; ".join(label for _, label in buttons[:6])
+        )
 
     def step9_publish(self, placement: str = "free"):
         self._wait_title(STEP_TITLES[9])
@@ -772,13 +817,25 @@ class PlayerokBrowser:
             raise CreationError(
                 f"Не нашёл вариант размещения {labels} на шаге «Выберите сервис»"
             )
+        self._sleep(1)
 
-        button = self._publish_button(placement)
-        if not button:
-            raise CreationError("Не нашёл кнопку публикации")
-        label = button.text.strip()
+        button, label = self._publish_button(placement)
+        if placement != "premium" and ("₽" in label or "Премиум" in label):
+            raise CreationError(
+                f"Кнопка публикации осталась платной: «{label}» — прерываю, "
+                "чтобы не списать деньги."
+            )
+
         self._click(button)
         self._sleep(5)
+
+        # Проверяем, что мастер действительно закрылся: если он остался на том
+        # же экране, товар не выставлен и сообщать об успехе нельзя.
+        if STEP_TITLES[9] in self._page_text():
+            raise CreationError(
+                f"Нажал «{label}», но мастер остался на шаге «Выберите сервис» — "
+                "товар не выставлен"
+            )
 
         return f"Размещение «{placement}», нажато «{label}»"
 
