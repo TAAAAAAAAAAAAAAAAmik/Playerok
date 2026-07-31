@@ -136,6 +136,20 @@ async def cmd_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def mode_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    # Если каталог уже знает игры, браузер не нужен: и кнопки, и создание
+    # делаются запросами. Каталог наполняется при первом проходе мастера.
+    games = catalog.list_games()
+    if games:
+        ctx.user_data["source"] = "catalog"
+        ctx.user_data["games"] = games
+        await _edit(
+            query, "⚡ <b>Шаг 1 из 9.</b> Выберите игру (создаём запросами):",
+            _keyboard(games, "game", 0),
+        )
+        return PICK_GAME
+
+    ctx.user_data["source"] = "wizard"
     await _edit(query, "⏳ Открываю мастер Playerok… (первый запуск — до полуминуты)")
     return await _start_wizard(query, ctx)
 
@@ -231,6 +245,18 @@ async def game_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     game = ctx.user_data["games"][index]["name"]
     ctx.user_data["game"] = game
 
+    if ctx.user_data.get("source") == "catalog":
+        chosen = ctx.user_data["games"][index]
+        ctx.user_data["game_id"] = chosen["id"]
+        categories = catalog.list_categories(chosen["id"])
+        if not categories:
+            return await _fail(query, CreationError(
+                "Каталог не знает категорий этой игры — создайте товар мастером"))
+        ctx.user_data["categories"] = categories
+        await _edit(query, f"🎮 {game}\n\n🗂 <b>Шаг 2 из 9.</b> Выберите категорию:",
+                    _keyboard(categories, "cat", 0))
+        return PICK_CATEGORY
+
     await _edit(query, f"🎮 {game}\n\n⏳ Загружаю категории…")
     try:
         categories = await _run(WizardSession.get().pick_game, index)
@@ -260,6 +286,18 @@ async def category_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     index = int(query.data.split(":")[1])
     category = ctx.user_data["categories"][index]["name"]
     ctx.user_data["category"] = category
+
+    if ctx.user_data.get("source") == "catalog":
+        chosen = ctx.user_data["categories"][index]
+        ctx.user_data["category_id"] = chosen["id"]
+        obtaining = catalog.list_obtaining(chosen["id"])
+        if not obtaining:
+            return await _fail(query, CreationError(
+                "Каталог не знает способов передачи — создайте товар мастером"))
+        ctx.user_data["obtaining_types"] = obtaining
+        await _edit(query, f"🗂 {category}\n\n📤 <b>Шаг 3 из 9.</b> Способ передачи:",
+                    _keyboard(obtaining, "obt", 0))
+        return PICK_OBTAINING
 
     await _edit(query, f"🗂 {category}\n\n⏳ Загружаю способы передачи…")
     try:
@@ -292,6 +330,20 @@ async def obtaining_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     obtaining = ctx.user_data["obtaining_types"][index]["name"]
     ctx.user_data["obtaining"] = obtaining
 
+    if ctx.user_data.get("source") == "catalog":
+        chosen = ctx.user_data["obtaining_types"][index]
+        ctx.user_data["obtaining_id"] = chosen["id"]
+        known = catalog.options(ctx.user_data["category_id"])
+        if not known:
+            ctx.user_data["attributes"] = []
+            return await _ask_photos(query, ctx)
+        ctx.user_data["attribute_options"] = [
+            {"name": o.get("label") or o.get("value"), **o} for o in known
+        ]
+        await _edit(query, "⚙️ <b>Шаг 4 из 9.</b> Выберите характеристику:",
+                    _keyboard(ctx.user_data["attribute_options"], "attr", 0))
+        return PICK_ATTRIBUTE
+
     await _edit(query, f"📤 {obtaining}\n\n⏳ Смотрю характеристики…")
     try:
         attributes = await _run(WizardSession.get().pick_obtaining, index)
@@ -321,7 +373,14 @@ async def attribute_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     index = int(query.data.split(":")[1])
-    attribute = ctx.user_data["attribute_options"][index]["name"]
+    option = ctx.user_data["attribute_options"][index]
+    attribute = option["name"]
+
+    if ctx.user_data.get("source") == "catalog":
+        if option.get("field"):
+            ctx.user_data.setdefault("attribute_values", {})[option["field"]] = option.get("value")
+        ctx.user_data.setdefault("attributes", []).append(attribute)
+        return await _ask_photos(query, ctx)
 
     try:
         await _run(WizardSession.get().pick_attribute, index)
@@ -580,11 +639,12 @@ async def photos_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer("Сначала пришлите хотя бы одно фото", show_alert=True)
         return UPLOAD_PHOTOS
 
-    await _edit(query, f"🖼 Загружаю {len(images)} фото в мастер…")
-    try:
-        await _run(WizardSession.get().upload_images, images)
-    except Exception as e:
-        return await _fail(query, e)
+    if ctx.user_data.get("source") != "catalog":
+        await _edit(query, f"🖼 Загружаю {len(images)} фото в мастер…")
+        try:
+            await _run(WizardSession.get().upload_images, images)
+        except Exception as e:
+            return await _fail(query, e)
 
     await _edit(query, "📛 <b>Шаг 6 из 9.</b> Введите название товара:")
     return ENTER_NAME
@@ -601,8 +661,13 @@ async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def got_description(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["description"] = update.message.text.strip()
-    message = await update.message.reply_text("⏳ Заполняю карточку…")
 
+    if ctx.user_data.get("source") == "catalog":
+        await update.message.reply_text(
+            "💵 <b>Шаг 8 из 9.</b> Введите цену в рублях:", parse_mode=ParseMode.HTML)
+        return ENTER_PRICE
+
+    message = await update.message.reply_text("⏳ Заполняю карточку…")
     try:
         await _run(WizardSession.get().fill_about,
                    ctx.user_data["name"], ctx.user_data["description"])
@@ -625,9 +690,18 @@ async def got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ENTER_PRICE
 
     ctx.user_data["price"] = price
-    message = await update.message.reply_text("⏳ Проставляю цену…")
-
     ctx.user_data["discount"] = DEFAULT_DISCOUNT
+
+    if ctx.user_data.get("source") == "catalog":
+        fields = catalog.item_data_fields(ctx.user_data["category_id"],
+                                          ctx.user_data["obtaining_id"])
+        ctx.user_data["catalog_fields"] = fields
+        ctx.user_data["field_labels"] = [f.get("label", "Значение") for f in fields]
+        ctx.user_data["field_index"] = 0
+        ctx.user_data["data_fields"] = {}
+        return await _ask_data_field(update.message, ctx)
+
+    message = await update.message.reply_text("⏳ Проставляю цену…")
     try:
         labels = await _run(WizardSession.get().fill_price, price, DEFAULT_DISCOUNT)
     except Exception as e:
@@ -664,6 +738,26 @@ async def got_data_field(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _ask_placement(message, ctx: ContextTypes.DEFAULT_TYPE):
+    if ctx.user_data.get("source") == "catalog":
+        sending = await message.reply_text("⚡ Создаю товар запросами…")
+        try:
+            item = await _create_via_api(ctx)
+        except Exception as e:
+            logger.exception("Создание запросами не удалось")
+            return await _fail(sending, e)
+
+        ctx.user_data["api_item"] = item
+        await sending.edit_text(
+            _summary(ctx.user_data) + "\n\n<i>Товар создан и лежит в черновиках.</i>"
+                                      "\n\nВыставляем?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚀 Выставить бесплатно", callback_data="place:free")],
+                [InlineKeyboardButton("📝 Оставить черновиком", callback_data="place:later")],
+            ]),
+        )
+        return CONFIRM
+
     sending = await message.reply_text("⏳ Сохраняю данные товара…")
     try:
         await _run(WizardSession.get().fill_data_fields, ctx.user_data["data_fields"])
@@ -680,6 +774,38 @@ async def _ask_placement(message, ctx: ContextTypes.DEFAULT_TYPE):
         ]),
     )
     return CONFIRM
+
+
+async def _create_via_api(ctx) -> dict:
+    """Создаёт товар запросами по данным, собранным кнопками из каталога."""
+    data = ctx.user_data
+    fields = data.get("catalog_fields", [])
+    values = []
+    for label, value in data.get("data_fields", {}).items():
+        found = next(
+            (f for f in fields if (f.get("label") or "").casefold() == label.casefold()),
+            None,
+        )
+        if found:
+            values.append({"fieldId": found["id"], "value": value})
+
+    draft = ProductDraft(
+        game=data["game"],
+        category=data["category"],
+        obtaining_type=data.get("obtaining", ""),
+        name=data["name"],
+        description=data["description"],
+        price=data["price"],
+        images=data.get("images", []),
+        placement="later",  # публикуем отдельно, по кнопке пользователя
+        game_id=data.get("game_id", ""),
+        category_id=data["category_id"],
+        obtaining_type_id=data["obtaining_id"],
+        attribute_values=data.get("attribute_values", {}),
+        data_field_values=values,
+        discount=data.get("discount", 0),
+    )
+    return await api_creator.create_product(draft)
 
 
 def _summary(data: dict) -> str:

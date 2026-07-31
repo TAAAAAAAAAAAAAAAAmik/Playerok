@@ -238,6 +238,7 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
             attributes=attributes,
             data_fields=data_fields,
             attachments=attachments,
+            discount=getattr(draft, "discount", 0),
         )
         report(7, title, f"Черновик создан: {item.get('name')} (id {item['id']})")
     except Exception as e:

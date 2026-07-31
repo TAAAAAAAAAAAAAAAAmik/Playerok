@@ -527,6 +527,7 @@ async def create_item(
     attributes: Optional[dict] = None,
     data_fields: Optional[list[dict]] = None,
     attachments: Optional[list[tuple[str, bytes, str]]] = None,
+    discount: int = 0,
 ) -> dict:
     """
     Создаёт товар (попадает в черновик, на продажу его выставляет publish_item).
@@ -537,21 +538,23 @@ async def create_item(
     """
     attachments = attachments or []
 
+    item_input = {
+        "gameCategoryId": game_category_id,
+        "obtainingTypeId": obtaining_type_id,
+        "name": name,
+        "price": int(price),
+        "description": description,
+        "attributes": attributes or {},
+        "dataFields": data_fields or [],
+    }
+    if discount:
+        # Поля скидки может не быть в схеме — тогда повторим запрос без него.
+        item_input["discount"] = int(discount)
+
     operations = {
         "operationName": "createItem",
         "query": CREATE_ITEM_MUTATION,
-        "variables": {
-            "input": {
-                "gameCategoryId": game_category_id,
-                "obtainingTypeId": obtaining_type_id,
-                "name": name,
-                "price": int(price),
-                "description": description,
-                "attributes": attributes or {},
-                "dataFields": data_fields or [],
-            },
-            "attachments": [None] * len(attachments),
-        },
+        "variables": {"input": item_input, "attachments": [None] * len(attachments)},
     }
 
     files = {}
@@ -560,12 +563,23 @@ async def create_item(
         files[str(i)] = (filename, content, content_type)
         file_map[str(i)] = [f"variables.attachments.{i - 1}"]
 
-    body, content_type = transport.encode_multipart(
-        {"operations": json.dumps(operations), "map": json.dumps(file_map)}, files
-    )
-    data = await asyncio.to_thread(
-        transport.request, "post", data=body, content_type=content_type
-    )
+    async def send() -> dict:
+        body, content_type = transport.encode_multipart(
+            {"operations": json.dumps(operations), "map": json.dumps(file_map)}, files
+        )
+        return await asyncio.to_thread(
+            transport.request, "post", data=body, content_type=content_type
+        )
+
+    try:
+        data = await send()
+    except Exception as e:
+        # Схема не знает про скидку — создаём товар без неё, а не падаем.
+        if not discount or "discount" not in str(e).casefold():
+            raise
+        logger.info("Поле скидки схемой не принято (%s) — создаю без неё", e)
+        item_input.pop("discount", None)
+        data = await send()
 
     item = data.get("createItem")
     if not item or not item.get("id"):

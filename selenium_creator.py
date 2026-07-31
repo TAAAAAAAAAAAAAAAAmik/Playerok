@@ -119,6 +119,9 @@ class ProductDraft:
     # Готовые атрибуты {field: value} и поля [{fieldId, value}].
     attribute_values: dict[str, str] = field(default_factory=dict)
     data_field_values: list[dict] = field(default_factory=list)
+    # Скидка в процентах: в браузере задаётся полем на шаге цены,
+    # в запросах — полем input.discount, если схема его принимает.
+    discount: int = 0
 
 
 @dataclass
@@ -911,11 +914,13 @@ class PlayerokBrowser:
 
             if self._wait_gone(button, timeout=8):
                 self._sleep(3)  # даём сайту дорисовать карточку товара
-                return f"Размещение «{placement}», нажато «{label}»"
+                extra = self._publish_from_card(placement)
+                return f"Размещение «{placement}», нажато «{label}»{extra}"
 
             if self._confirm_dialog() and self._wait_gone(button, timeout=8):
                 self._sleep(3)
-                return f"Размещение «{placement}», подтверждено после «{label}»"
+                extra = self._publish_from_card(placement)
+                return f"Размещение «{placement}», подтверждено после «{label}»{extra}"
 
             logger.warning("Кнопка «%s» не сработала, попытка %s", label, attempt + 2)
 
@@ -926,6 +931,46 @@ class PlayerokBrowser:
             f"Нажал «{label}» трижды, но мастер не сдвинулся. Кнопки на экране: "
             f"{visible}"
         )
+
+    def _publish_from_card(self, placement: str, rounds: int = 3) -> str:
+        """
+        Мастер доводит товар только до черновика: на карточке остаётся
+        «Черновик — выставите товар на продажу» и кнопка «Выставить».
+        Дожимаем её и, если снова спросят про сервис, выбираем нужный.
+        """
+        if placement == "later":
+            return " (оставлен черновиком)"
+
+        for round_number in range(rounds):
+            # Слово «Черновик» стоит в заголовке карточки, а не в кликабельном
+            # элементе, поэтому смотрим видимый текст страницы целиком.
+            self._sleep(1)
+            if "Черновик" not in self._page_text():
+                return " и выставлен" if round_number else ""
+
+            logger.info("Товар в черновике — жму «Выставить» (круг %s)", round_number + 1)
+            button = self._find_by_text("Выставить", timeout=5)
+            if not button:
+                return " — товар остался черновиком: кнопки «Выставить» нет"
+
+            self._click(button)
+            self._sleep(3)
+
+            # Часто после этого сайт снова спрашивает про сервис.
+            if STEP_TITLES[9] in self._page_text():
+                if not self._select_placement(placement):
+                    return " — не удалось выбрать бесплатное размещение"
+                confirm, label = self._publish_button(placement)
+                if "₽" in label or "Премиум" in label:
+                    return f" — кнопка осталась платной: «{label}»"
+                self._click(confirm)
+                self._wait_gone(confirm, timeout=10)
+                self._sleep(3)
+
+            self._confirm_dialog()
+            self._sleep(2)
+
+        return " — товар всё ещё в черновиках"
 
     def _visible_button_texts(self) -> list[str]:
         texts = []

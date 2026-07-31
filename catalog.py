@@ -92,6 +92,41 @@ def data_fields(category_id: str, obtaining_id: str) -> list[dict]:
     return load().get("data_fields", {}).get(f"{category_id}|{obtaining_id}", [])
 
 
+def list_games() -> list[dict]:
+    """Игры из каталога — для кнопок без браузера."""
+    return [{"name": name, **value} for name, value in load().get("games", {}).items()]
+
+
+def list_categories(game_id: str) -> list[dict]:
+    bucket = load().get("categories", {}).get(game_id, {})
+    return [{"name": name, **value} for name, value in bucket.items()]
+
+
+def list_obtaining(category_id: str) -> list[dict]:
+    bucket = load().get("obtaining", {}).get(category_id, {})
+    return [{"name": name, **value} for name, value in bucket.items()]
+
+
+def item_data_fields(category_id: str, obtaining_id: str) -> list[dict]:
+    """Только поля, которые заполняет продавец: покупательские не наши."""
+    return [f for f in data_fields(category_id, obtaining_id)
+            if f.get("type") == "ITEM_DATA"]
+
+
+def knows(game_id: str = "", category_id: str = "", obtaining_id: str = "") -> bool:
+    """Хватает ли каталога, чтобы обойтись без браузера."""
+    data = load()
+    if not data.get("games"):
+        return False
+    if game_id and not data.get("categories", {}).get(game_id):
+        return False
+    if category_id and not data.get("obtaining", {}).get(category_id):
+        return False
+    if category_id and obtaining_id:
+        return bool(item_data_fields(category_id, obtaining_id)) or True
+    return True
+
+
 def resolve(game: str, category: str, obtaining: str) -> dict:
     """
     Идентификаторы по названиям — то, что нужно `createItem`.
