@@ -473,6 +473,53 @@ class PlayerokBrowser:
             f"Поле «{label}» не приняло текст — возможно, из-за эмодзи в нём"
         )
 
+    def _fill_number(self, label: str, value: int, required: bool = True) -> int:
+        """
+        Заполняет числовое поле и проверяет результат. Поле цены на сайте с
+        форматированием («14 914 ₽»), поэтому сверяем именно цифры, а не
+        строку, и не дописываем к тому, что там уже было.
+        """
+        el = self._find_input(label)
+        if not el:
+            if required:
+                raise CreationError(f"Не нашёл поле «{label}»")
+            return -1
+
+        def digits(raw: str) -> str:
+            return "".join(ch for ch in (raw or "") if ch.isdigit())
+
+        for attempt in range(2):
+            # Чистим тремя способами: React иногда игнорирует clear().
+            try:
+                el.clear()
+            except WebDriverException:
+                pass
+            self._set_value(el, "")
+            try:
+                el.send_keys(Keys.CONTROL, "a")
+                el.send_keys(Keys.DELETE)
+            except WebDriverException:
+                pass
+
+            if attempt == 0:
+                self._set_value(el, str(value))
+            else:
+                el.send_keys(str(value))  # цифры печатаются без проблем
+            self._sleep(0.5)
+
+            actual = digits(el.get_attribute("value"))
+            if actual == str(value):
+                return value
+            logger.warning(
+                "Поле «%s»: ожидал %s, в поле %s — пробую ещё раз",
+                label, value, actual or "пусто",
+            )
+
+        raise CreationError(
+            f"Поле «{label}» приняло {digits(el.get_attribute('value')) or 'пусто'} "
+            f"вместо {value}"
+        )
+
     def _pick_from_list(self, value: str, search_label: str = "Поиск") -> bool:
         """
         Выбор элемента из списка (игра, категория, способ получения).
@@ -667,8 +714,8 @@ class PlayerokBrowser:
     def step7_fill_price(self, price: int):
         self._wait_title(STEP_TITLES[7])
         # Рядом есть поле «Доход» — заполнять нужно именно «Цена товара».
-        if not self._fill("Цена товара", str(price), required=False):
-            self._fill("Цена", str(price))
+        if self._fill_number("Цена товара", price, required=False) < 0:
+            self._fill_number("Цена", price)
         self._click_next()
         return f"Цена: {price} ₽"
 
