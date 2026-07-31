@@ -227,22 +227,54 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
         fail(6, title, e)
 
     # 7. Создание черновика
+    #
+    # Отдельного поля скидки в схеме нет — площадка рисует её сама, когда цена
+    # стала ниже прежней (`prevPrice`). Поэтому черновик создаётся по цене «до
+    # скидки», а следом updateItem опускает её до той, которую назвал продавец:
+    # покупатель видит зачёркнутую старую цену и −27%, а продавец получает ровно
+    # свою сумму.
+    discount = int(getattr(draft, "discount", 0) or 0)
+    list_price = draft.price
+    if 0 < discount < 100:
+        list_price = round(draft.price / (1 - discount / 100))
+        if list_price <= draft.price:  # копеечные цены округлятся в ту же цифру
+            discount, list_price = 0, draft.price
+
     title = "Создание товара"
     try:
         item = await api.create_item(
             game_category_id=category["id"],
             obtaining_type_id=obtaining["id"],
             name=draft.name,
-            price=draft.price,
+            price=list_price,
             description=draft.description,
             attributes=attributes,
             data_fields=data_fields,
             attachments=attachments,
-            discount=getattr(draft, "discount", 0),
         )
         report(7, title, f"Черновик создан: {item.get('name')} (id {item['id']})")
     except Exception as e:
         fail(7, title, e)
+
+    if discount:
+        try:
+            item = await api.update_item(item["id"], price=draft.price)
+            report(
+                7,
+                "Скидка",
+                f"Цена {list_price} → {draft.price} ₽, скидка {discount}%",
+            )
+        except Exception as e:
+            # Оставить товар по завышенной цене нельзя — это не то, что просили.
+            fail(
+                7,
+                "Скидка",
+                RuntimeError(
+                    f"{e}. Черновик создан по цене {list_price} ₽ вместо "
+                    f"{draft.price} ₽ — удалите его на сайте и повторите "
+                    f"с PLAYEROK_DISCOUNT=0"
+                ),
+            )
 
     # 8. Статусы приоритета
     title = "Выберите сервис"

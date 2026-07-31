@@ -170,6 +170,23 @@ mutation publishItem($input: PublishItemInput!) {
 }
 """
 
+# updateItem меняет уже созданный товар. Нам он нужен ради цены: скидку
+# площадка показывает сама, когда цена стала ниже прежней (prevPrice).
+UPDATE_ITEM_MUTATION = """
+mutation updateItem($input: UpdateItemInput!) {
+  updateItem(input: $input) {
+    ... on MyItem {
+      id
+      slug
+      name
+      price
+      prevPrice
+      status
+    }
+  }
+}
+"""
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -527,7 +544,6 @@ async def create_item(
     attributes: Optional[dict] = None,
     data_fields: Optional[list[dict]] = None,
     attachments: Optional[list[tuple[str, bytes, str]]] = None,
-    discount: int = 0,
 ) -> dict:
     """
     Создаёт товар (попадает в черновик, на продажу его выставляет publish_item).
@@ -535,6 +551,10 @@ async def create_item(
     attributes:  {field: value} — выбранные опции категории.
     data_fields: [{"fieldId": ..., "value": ...}] — только поля ITEM_DATA.
     attachments: [(имя файла, байты, mime-тип), ...] — картинки товара.
+
+    Состав input повторяет то, что шлёт сам сайт: лишнее поле схема не
+    принимает и отвечает обезличенным «Something went wrong». Скидки здесь
+    нет — её делает update_item, понижая цену (см. api_creator).
     """
     attachments = attachments or []
 
@@ -547,9 +567,6 @@ async def create_item(
         "attributes": attributes or {},
         "dataFields": data_fields or [],
     }
-    if discount:
-        # Поля скидки может не быть в схеме — тогда повторим запрос без него.
-        item_input["discount"] = int(discount)
 
     operations = {
         "operationName": "createItem",
@@ -563,27 +580,52 @@ async def create_item(
         files[str(i)] = (filename, content, content_type)
         file_map[str(i)] = [f"variables.attachments.{i - 1}"]
 
-    async def send() -> dict:
-        body, content_type = transport.encode_multipart(
-            {"operations": json.dumps(operations), "map": json.dumps(file_map)}, files
-        )
-        return await asyncio.to_thread(
-            transport.request, "post", data=body, content_type=content_type
-        )
-
-    try:
-        data = await send()
-    except Exception as e:
-        # Схема не знает про скидку — создаём товар без неё, а не падаем.
-        if not discount or "discount" not in str(e).casefold():
-            raise
-        logger.info("Поле скидки схемой не принято (%s) — создаю без неё", e)
-        item_input.pop("discount", None)
-        data = await send()
+    # Картинки в лог не тащим — только то, по чему видно, что ушло не так.
+    logger.info(
+        "createItem: %s | картинок: %s",
+        json.dumps(item_input, ensure_ascii=False)[:500],
+        len(attachments),
+    )
+    body, content_type = transport.encode_multipart(
+        {"operations": json.dumps(operations), "map": json.dumps(file_map)}, files
+    )
+    data = await asyncio.to_thread(
+        transport.request, "post", data=body, content_type=content_type
+    )
 
     item = data.get("createItem")
     if not item or not item.get("id"):
         raise RuntimeError("Сервер не вернул созданный товар.")
+    return item
+
+
+async def update_item(item_id: str, *, price: Optional[int] = None, **fields) -> dict:
+    """
+    Меняет уже созданный товар. Запрос — тот же multipart, что и у createItem:
+    сайт шлёт updateItem так же, потому что мутация умеет принимать вложения.
+    """
+    item_input: dict = {"id": item_id}
+    if price is not None:
+        item_input["price"] = int(price)
+    item_input.update(fields)
+
+    operations = {
+        "operationName": "updateItem",
+        "query": UPDATE_ITEM_MUTATION,
+        "variables": {"input": item_input, "addedAttachments": None},
+    }
+    logger.info("updateItem: %s", json.dumps(item_input, ensure_ascii=False)[:300])
+
+    body, content_type = transport.encode_multipart(
+        {"operations": json.dumps(operations), "map": "{}"}, {}
+    )
+    data = await asyncio.to_thread(
+        transport.request, "post", data=body, content_type=content_type
+    )
+
+    item = data.get("updateItem")
+    if not item or not item.get("id"):
+        raise RuntimeError("Сервер не вернул обновлённый товар.")
     return item
 
 

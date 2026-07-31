@@ -283,8 +283,38 @@ def browser_request(method: str, json_body: Optional[dict] = None,
         raise TransportError(f"Ответ браузера не JSON: {e}") from e
 
     if "errors" in data:
-        raise TransportError("; ".join(e.get("message", str(e)) for e in data["errors"]))
+        raise TransportError(describe_errors(data["errors"]))
     return data.get("data") or {}
+
+
+def describe_errors(errors: list) -> str:
+    """
+    Ошибки GraphQL одной строкой. Playerok часто отвечает обезличенным
+    «Something went wrong», и вся полезная часть лежит рядом — в `extensions`
+    (код, а иногда и поле ввода) и в `path`. Без них разбираться не в чем,
+    поэтому вытаскиваем всё, что есть.
+    """
+    parts = []
+    for error in errors:
+        if not isinstance(error, dict):
+            parts.append(str(error))
+            continue
+
+        text = error.get("message") or "без текста"
+        extensions = error.get("extensions") or {}
+        details = []
+        for key in ("code", "field", "argumentName", "errorCode", "reason"):
+            if extensions.get(key):
+                details.append(f"{key}={extensions[key]}")
+        if error.get("path"):
+            details.append("path=" + ".".join(str(p) for p in error["path"]))
+        # Сообщения валидатора складывают подробности во вложенный список.
+        for nested in extensions.get("errors") or []:
+            if isinstance(nested, dict) and nested.get("message"):
+                details.append(str(nested["message"]))
+
+        parts.append(text + (f" ({', '.join(details)})" if details else ""))
+    return "; ".join(parts)
 
 
 def _graphql_error(resp) -> str:
@@ -302,14 +332,32 @@ def _graphql_error(resp) -> str:
     errors = data.get("errors")
     if not errors:
         return ""
-    return "; ".join(e.get("message", str(e)) for e in errors)
+    return describe_errors(errors)
 
 
 def _operation_name(kwargs: dict) -> str:
-    """Имя операции — чтобы в логах было видно, какой запрос упал."""
+    """
+    Имя операции — чтобы в логах и в сообщении об ошибке было видно, какой
+    запрос упал. У multipart-запросов (createItem с картинками) тело собрано
+    руками, поэтому имя достаём из его части `operations`.
+    """
     for source in (kwargs.get("json"), kwargs.get("params")):
         if isinstance(source, dict) and source.get("operationName"):
             return source["operationName"]
+
+    body = kwargs.get("data")
+    if isinstance(body, (bytes, bytearray)):
+        marker = b'name="operations"\r\n\r\n'
+        start = body.find(marker)
+        if start != -1:
+            start += len(marker)
+            end = body.find(b"\r\n--", start)
+            try:
+                operations = json.loads(bytes(body[start:end]).decode("utf-8"))
+                if operations.get("operationName"):
+                    return operations["operationName"]
+            except (ValueError, UnicodeDecodeError):
+                pass
     return "?"
 
 
@@ -372,9 +420,6 @@ def request(method: str, *, retry: bool = True, **kwargs) -> dict:
         raise TransportError(f"Ответ не JSON: {e}") from e
 
     if "errors" in data:
-        raise TransportError(
-            f"{operation}: "
-            + "; ".join(e.get("message", str(e)) for e in data["errors"])
-        )
+        raise TransportError(f"{operation}: " + describe_errors(data["errors"]))
 
     return data.get("data") or {}
