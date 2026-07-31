@@ -462,6 +462,7 @@ async def _copy_via_api(query, ctx, template: dict, fields: dict) -> bool:
         obtaining_type_id=obtaining_id,
         attribute_values=attribute_values,
         data_field_values=data_field_values,
+        discount=ctx.user_data.get("discount", 0),
     )
 
     await _edit(query, "⚡ Создаю копию запросами…")

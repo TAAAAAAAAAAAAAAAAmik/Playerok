@@ -252,7 +252,16 @@ async def create_product(draft: ProductDraft, on_step=None) -> dict:
             data_fields=data_fields,
             attachments=attachments,
         )
-        report(7, title, f"Черновик создан: {item.get('name')} (id {item['id']})")
+        detail = f"Черновик создан: {item.get('name')} (id {item['id']})"
+        # Сервер сам решает, можно ли выставлять товар. Если нельзя — сказать об
+        # этом здесь, а не ловить безымянный отказ на девятом шаге.
+        if item.get("mayBePublished") is False:
+            detail += (
+                f"; выставлять пока нельзя (статус {item.get('status')}"
+                + (f": {item['statusDescription']}" if item.get("statusDescription") else "")
+                + ")"
+            )
+        report(7, title, detail)
     except Exception as e:
         fail(7, title, e)
 

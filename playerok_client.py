@@ -142,6 +142,9 @@ FALLBACK_QUERIES = {
 
 # createItem принимает файлы отдельным аргументом $attachments (multipart-спека
 # GraphQL: operations + map + пронумерованные файлы).
+# mayBePublished и statusDescription сервер считает сам: по ним видно, можно ли
+# вообще выставлять товар и почему нельзя. Без них отказ публикации выглядит
+# безымянной ошибкой. Имена полей сверены с рабочей PlayerokAPI.
 CREATE_ITEM_MUTATION = """
 mutation createItem($input: CreateItemInput!, $attachments: [Upload!]!) {
   createItem(input: $input, attachments: $attachments) {
@@ -151,6 +154,8 @@ mutation createItem($input: CreateItemInput!, $attachments: [Upload!]!) {
       name
       price
       status
+      statusDescription
+      mayBePublished
     }
   }
 }
@@ -165,6 +170,8 @@ mutation publishItem($input: PublishItemInput!) {
       name
       price
       status
+      statusDescription
+      mayBePublished
     }
   }
 }
@@ -182,7 +189,25 @@ mutation updateItem($input: UpdateItemInput!) {
       price
       prevPrice
       status
+      statusDescription
+      mayBePublished
     }
+  }
+}
+"""
+
+# Тот же запрос статусов приоритета, но полным текстом. Аргументы подставляются
+# литералами: так не нужно объявлять типы переменных и невозможно ошибиться в
+# их написании. Ответные поля сверены с парсером PlayerokAPI.
+PRIORITY_STATUSES_QUERY = """
+query itemPriorityStatuses {
+  itemPriorityStatuses(itemId: %s, price: %d) {
+    id
+    name
+    price
+    type
+    period
+    priceRange { min max }
   }
 }
 """
@@ -380,6 +405,18 @@ def _resolve_operation(operation: str) -> tuple[str, str]:
     )
 
 
+async def _plain_query(query: str, operation: str) -> dict:
+    """Запрос полным текстом, без persisted-хэша.
+
+    Сервер разбирает обычные запросы: на неизвестное поле он отвечает
+    GRAPHQL_VALIDATION_FAILED, то есть текст доходит до валидатора и
+    исполняется. Это даёт путь, не зависящий от сборки фронта.
+    """
+    return await asyncio.to_thread(
+        transport.request, "post", json={"operationName": operation, "query": query}
+    )
+
+
 async def _persisted(operation: str, variables: dict, retry: bool = True) -> dict:
     """
     Persisted-операция. Фронт шлёт такие GET-ом, но GET без content-type
@@ -528,10 +565,27 @@ async def fetch_data_fields(
 
 
 async def fetch_priority_statuses(item_id: str, price: int) -> list[dict]:
-    """Статусы приоритета для публикации (у бесплатного price == 0)."""
-    data = await _persisted(
-        "itemPriorityStatuses", {"itemId": item_id, "price": int(price)}
-    )
+    """Статусы приоритета для публикации (у бесплатного price == 0).
+
+    Единственный persisted-запрос на пути публикации, и потому самое хрупкое
+    место: хэши живут до следующей сборки фронта, а обновляет их только сниффер
+    через браузер — на сервере без Chrome это тупик. Поэтому при отказе тот же
+    запрос повторяется полным текстом: сервер обычные запросы исполняет, и этот
+    путь от сборки фронта не зависит. Браузер остаётся последним средством.
+    """
+    variables = {"itemId": item_id, "price": int(price)}
+
+    try:
+        data = await _persisted("itemPriorityStatuses", variables, retry=False)
+    except Exception as hash_error:
+        logger.info("Статусы по хэшу не пришли (%s) — повторяю полным текстом", hash_error)
+        query = PRIORITY_STATUSES_QUERY % (json.dumps(item_id), int(price))
+        try:
+            data = await _plain_query(query, "itemPriorityStatuses")
+        except Exception as plain_error:
+            logger.info("Полным текстом тоже отказ (%s) — пробую через браузер", plain_error)
+            data = await _persisted("itemPriorityStatuses", variables, retry=True)
+
     return data.get("itemPriorityStatuses") or []
 
 
@@ -645,5 +699,5 @@ async def publish_item(
     )
     item = data.get("publishItem")
     if not item or not item.get("id"):
-        raise RuntimeError("Не удалось опубликовать товар.")
+        raise RuntimeError(f"Не удалось опубликовать товар. Ответ сервера: {data}")
     return item
