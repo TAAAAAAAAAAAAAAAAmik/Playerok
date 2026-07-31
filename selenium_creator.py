@@ -41,6 +41,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     WebDriverException,
 )
+from selenium.webdriver import ActionChains
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -805,19 +806,88 @@ class PlayerokBrowser:
             + "; ".join(label for _, label in buttons[:6])
         )
 
+    def _row_of(self, element):
+        """
+        Строка списка, в которой лежит найденный текст. Радио-кружок стоит
+        у правого края строки, а не рядом с подписью, поэтому кликать надо
+        по строке целиком.
+        """
+        try:
+            return self.driver.execute_script(
+                """
+                let el = arguments[0];
+                for (let i = 0; i < 4 && el.parentElement; i++) {
+                  el = el.parentElement;
+                  if (el.clientWidth > window.innerWidth * 0.6) return el;
+                }
+                return arguments[0];
+                """,
+                element,
+            )
+        except WebDriverException:
+            return element
+
+    def _placement_ready(self, placement: str) -> bool:
+        """Проверяет, что кнопка внизу соответствует выбранному размещению."""
+        try:
+            _, label = self._publish_button(placement)
+            return bool(label)
+        except CreationError:
+            return False
+
+    def _select_placement(self, placement: str) -> bool:
+        """
+        Отмечает вариант размещения. Пробуем по-разному: клик по подписи,
+        по строке целиком и по её правому краю, где стоит переключатель.
+        Успех проверяем по кнопке внизу — её текст меняется вслед за выбором.
+        """
+        for label in PLACEMENT_LABELS.get(placement, PLACEMENT_LABELS["free"]):
+            element = self._find_by_text(label, timeout=4)
+            if not element:
+                continue
+
+            row = self._row_of(element)
+            for target in (element, row):
+                self._click(target)
+                self._sleep(1)
+                if self._placement_ready(placement):
+                    logger.info("Размещение «%s» выбрано по «%s»", placement, label)
+                    return True
+
+            # Переключатель у правого края строки — жмём по координатам.
+            try:
+                width = row.size["width"]
+                ActionChains(self.driver).move_to_element_with_offset(
+                    row, max(width // 2 - 20, 1), 0
+                ).click().perform()
+                self._sleep(1)
+                if self._placement_ready(placement):
+                    logger.info("Размещение «%s» выбрано переключателем", placement)
+                    return True
+            except WebDriverException as e:
+                logger.debug("Клик по краю строки не удался: %s", e)
+
+        return False
+
+    def _confirm_dialog(self) -> bool:
+        """Подтверждает всплывающий вопрос, если сайт его показал."""
+        for text in ("Подтвердить", "Да, выставить", "Выставить", "Да", "Продолжить"):
+            element = self._find_by_text(text, timeout=2)
+            if element:
+                self._click(element)
+                logger.info("Подтвердил диалог кнопкой «%s»", text)
+                return True
+        return False
+
     def step9_publish(self, placement: str = "free"):
         self._wait_title(STEP_TITLES[9])
 
         # По умолчанию отмечен платный «Премиум» — переключаем явно.
-        labels = PLACEMENT_LABELS.get(placement, PLACEMENT_LABELS["free"])
-        switched = any(
-            self._click_text(label, timeout=4, required=False) for label in labels
-        )
-        if not switched:
+        if not self._select_placement(placement):
             raise CreationError(
-                f"Не нашёл вариант размещения {labels} на шаге «Выберите сервис»"
+                f"Не удалось выбрать размещение «{placement}»: кнопка внизу "
+                "не сменилась. Возможно, вариант недоступен для этого товара."
             )
-        self._sleep(1)
 
         button, label = self._publish_button(placement)
         if placement != "premium" and ("₽" in label or "Премиум" in label):
@@ -826,19 +896,46 @@ class PlayerokBrowser:
                 "чтобы не списать деньги."
             )
 
-        self._click(button)
+        # Жмём и, если ничего не изменилось, пробуем ещё раз другим способом:
+        # клик мог не дойти из-за анимации или всплывающего подтверждения.
+        for attempt in range(3):
+            if attempt == 0:
+                self._click(button)
+            elif attempt == 1:
+                self.driver.execute_script("arguments[0].click();", button)
+            else:
+                try:
+                    ActionChains(self.driver).move_to_element(button).click().perform()
+                except WebDriverException:
+                    pass
 
-        # Судим по самой кнопке, а не по тексту на странице: заголовки шагов
-        # остаются в разметке, и по ним мастер кажется незакрытым даже после
-        # успешной публикации. Кнопка же исчезает ровно тогда, когда шаг
-        # действительно пройден.
-        if not self._wait_gone(button, timeout=20):
-            raise CreationError(
-                f"Нажал «{label}», но кнопка осталась на месте — товар не выставлен"
-            )
+            if self._wait_gone(button, timeout=8):
+                self._sleep(3)  # даём сайту дорисовать карточку товара
+                return f"Размещение «{placement}», нажато «{label}»"
 
-        self._sleep(3)  # даём сайту дорисовать карточку товара
-        return f"Размещение «{placement}», нажато «{label}»"
+            if self._confirm_dialog() and self._wait_gone(button, timeout=8):
+                self._sleep(3)
+                return f"Размещение «{placement}», подтверждено после «{label}»"
+
+            logger.warning("Кнопка «%s» не сработала, попытка %s", label, attempt + 2)
+
+        visible = ", ".join(
+            text for text in self._visible_button_texts()[:6]
+        )
+        raise CreationError(
+            f"Нажал «{label}» трижды, но мастер не сдвинулся. Кнопки на экране: "
+            f"{visible}"
+        )
+
+    def _visible_button_texts(self) -> list[str]:
+        texts = []
+        for el in self.driver.find_elements(By.XPATH, "//button | //a[@role='button']"):
+            try:
+                if el.is_displayed() and el.text.strip():
+                    texts.append(" ".join(el.text.split()))
+            except WebDriverException:
+                continue
+        return texts
 
     def _wait_gone(self, element, timeout: int = 15) -> bool:
         """Ждёт, пока элемент исчезнет: пропадёт из DOM или скроется."""
