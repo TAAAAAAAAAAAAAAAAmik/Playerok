@@ -272,7 +272,9 @@ class WizardSession:
                 )
                 if field:
                     field.clear()
-                    field.send_keys(search)
+                    # ChromeDriver не печатает символы вне BMP — эмодзи из
+                    # поискового запроса выбрасываем, они всё равно не помогут.
+                    field.send_keys("".join(c for c in search if ord(c) <= 0xFFFF))
                     time.sleep(2)
 
             self.touched = time.time()

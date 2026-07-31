@@ -419,6 +419,21 @@ class PlayerokBrowser:
                     return el
         return None
 
+    # React не замечает value, выставленное напрямую, — нужен нативный сеттер
+    # и события input/change, иначе форма считает поле пустым.
+    SET_VALUE = """
+    const [el, value] = arguments;
+    const proto = el.tagName === 'TEXTAREA'
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+    """
+
+    def _set_value(self, el, value: str):
+        self.driver.execute_script(self.SET_VALUE, el, str(value))
+
     def _fill(self, label: str, value: str, required: bool = True) -> bool:
         el = self._find_input(label)
         if not el:
@@ -426,13 +441,37 @@ class PlayerokBrowser:
                 raise CreationError(f"Не нашёл поле «{label}»")
             logger.warning("Поле «%s» не найдено, пропускаю", label)
             return False
+
+        value = str(value)
         try:
             el.clear()
         except WebDriverException:
-            el.send_keys(Keys.CONTROL, "a")
-        el.send_keys(str(value))
-        self._sleep(0.4)
-        return True
+            pass
+
+        # Печатать посимвольно нельзя по двум причинам: ChromeDriver не умеет
+        # эмодзи («only supports characters in the BMP»), а описание в пару
+        # абзацев набирается десятки секунд. Ставим значение сразу.
+        self._set_value(el, value)
+        self._sleep(0.3)
+
+        try:
+            filled = el.get_attribute("value") or ""
+        except WebDriverException:
+            return True
+
+        if filled.strip() == value.strip():
+            return True
+
+        # Поле не приняло значение — пробуем ввод с клавиатуры, но только
+        # если в тексте нет символов вне BMP, иначе драйвер откажет.
+        if all(ord(ch) <= 0xFFFF for ch in value):
+            el.send_keys(value)
+            self._sleep(0.3)
+            return True
+
+        raise CreationError(
+            f"Поле «{label}» не приняло текст — возможно, из-за эмодзи в нём"
+        )
 
     def _pick_from_list(self, value: str, search_label: str = "Поиск") -> bool:
         """
