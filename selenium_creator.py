@@ -827,18 +827,30 @@ class PlayerokBrowser:
             )
 
         self._click(button)
-        self._sleep(5)
 
-        # Проверяем по видимым элементам, а не по тексту всей страницы:
-        # заголовки пройденных шагов остаются в разметке скрытыми, и по ним
-        # мастер кажется незакрытым, даже когда товар уже выставлен.
-        if self._find_by_text(STEP_TITLES[9], timeout=3, exact=True):
+        # Судим по самой кнопке, а не по тексту на странице: заголовки шагов
+        # остаются в разметке, и по ним мастер кажется незакрытым даже после
+        # успешной публикации. Кнопка же исчезает ровно тогда, когда шаг
+        # действительно пройден.
+        if not self._wait_gone(button, timeout=20):
             raise CreationError(
-                f"Нажал «{label}», но мастер остался на шаге «Выберите сервис» — "
-                "товар не выставлен"
+                f"Нажал «{label}», но кнопка осталась на месте — товар не выставлен"
             )
 
+        self._sleep(3)  # даём сайту дорисовать карточку товара
         return f"Размещение «{placement}», нажато «{label}»"
+
+    def _wait_gone(self, element, timeout: int = 15) -> bool:
+        """Ждёт, пока элемент исчезнет: пропадёт из DOM или скроется."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if not element.is_displayed():
+                    return True
+            except WebDriverException:
+                return True  # элемента больше нет в DOM — то, что нужно
+            time.sleep(0.5)
+        return False
 
     # ── Полный проход ─────────────────────────────────────────────────────
 
