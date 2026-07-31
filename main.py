@@ -15,6 +15,7 @@ from telegram.constants import ParseMode
 
 import auth
 import config
+import new_item
 import playerok_client
 from database import init_db, is_seen, mark_seen, get_stats
 from notifier import send, format_deal, format_problem
@@ -206,6 +207,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "👋 <b>Playerok Monitor</b>\n\n"
         f"{state}\n\n"
         "/login — указать токен Playerok\n"
+        "/newitem — создать объявление\n"
         "/status — состояние и счётчики\n"
         "/check — проверить прямо сейчас\n"
         "/logout — забыть токен и остановить опрос",
@@ -305,6 +307,7 @@ def main():
         states={ASK_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_token)]},
         fallbacks=[CommandHandler("cancel", cancel_login)],
     ))
+    app.add_handler(new_item.build_handler(_is_owner))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))

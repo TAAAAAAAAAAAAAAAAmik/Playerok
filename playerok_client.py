@@ -106,3 +106,88 @@ async def fetch_deals(count: int | None = None) -> list:
 
 async def get_account_id() -> str:
     return (await get_account()).id
+
+
+# ── Item creation ─────────────────────────────────────────────────────────────
+
+async def search_games(name: str, count: int = 12) -> list:
+    account = await get_account()
+    page = await asyncio.to_thread(lambda: account.get_games(name=name, count=count))
+    return list(page.games or [])
+
+
+async def get_game(game_id: str):
+    """Fetch a game by id — needed because it carries the category list."""
+    account = await get_account()
+    return await asyncio.to_thread(lambda: account.get_game(id=game_id))
+
+
+async def get_category(category_id: str):
+    account = await get_account()
+    return await asyncio.to_thread(lambda: account.get_game_category(id=category_id))
+
+
+async def get_obtaining_types(category_id: str) -> list:
+    account = await get_account()
+    page = await asyncio.to_thread(
+        lambda: account.get_game_category_obtaining_types(category_id)
+    )
+    return list(page.obtaining_types or [])
+
+
+async def get_item_data_fields(category_id: str, obtaining_type_id: str) -> list:
+    """Only ITEM_DATA fields belong to the seller.
+
+    OBTAINING_DATA fields are filled in by the buyer at checkout and must not be
+    submitted with the item.
+    """
+    from playerokapi.enums import GameCategoryDataFieldTypes
+
+    account = await get_account()
+    page = await asyncio.to_thread(
+        lambda: account.get_game_category_data_fields(
+            category_id, obtaining_type_id, type=GameCategoryDataFieldTypes.ITEM_DATA
+        )
+    )
+    return list(page.data_fields or [])
+
+
+async def create_item(
+    category_id: str,
+    obtaining_type_id: str,
+    name: str,
+    price: int,
+    description: str,
+    options: list,
+    data_fields: list,
+    attachments: list,
+):
+    """Create the item. It lands in drafts — publishing is a separate call."""
+    account = await get_account()
+    return await asyncio.to_thread(
+        lambda: account.create_item(
+            game_category_id=category_id,
+            obtaining_type_id=obtaining_type_id,
+            name=name,
+            price=price,
+            description=description,
+            options=options,
+            data_fields=data_fields,
+            attachments=attachments,
+        )
+    )
+
+
+async def get_priority_statuses(item_id: str, price: int) -> list:
+    account = await get_account()
+    return list(await asyncio.to_thread(
+        lambda: account.get_item_priority_statuses(item_id, price)
+    ) or [])
+
+
+async def publish_item(item_id: str, priority_status_id: str):
+    """Put a draft on sale. A paid priority status charges the balance."""
+    account = await get_account()
+    return await asyncio.to_thread(
+        lambda: account.publish_item(item_id, priority_status_id)
+    )
