@@ -1,6 +1,24 @@
 # Запуск на сервере
 
-## Установка
+## С нуля — две команды
+
+```bash
+sudo mkdir -p /opt/playerok-bot && sudo chown $USER:$USER /opt/playerok-bot
+git clone -b claude/product-creation-lsfuo0 \
+  https://github.com/TAAAAAAAAAAAAAAAAmik/Playerok.git /opt/playerok-bot
+
+cd /opt/playerok-bot && bash deploy.sh
+```
+
+`deploy.sh` ставит окружение, спрашивает три значения (токен Telegram-бота,
+ваш chat id, токен Playerok), пишет `.env` с правами 600, ставит службу и
+запускает её. Если служба не поднялась, скрипт сам покажет журнал.
+
+Повторный запуск безопасен: уже заполненные значения он не переспрашивает, так
+что `git pull && bash deploy.sh` работает и как обновление. Каталог может быть
+любым — путь в юнит подставляется настоящий, не только `/opt/playerok-bot`.
+
+## Установка по шагам
 
 ```bash
 cd /opt/playerok-bot
