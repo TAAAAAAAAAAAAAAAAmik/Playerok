@@ -97,22 +97,40 @@ fragment MinimalUserBankCard on UserBankCard {
 }
 """
 
+# Свои объявления. Операция называется items и берёт товары по фильтру userId —
+# отдельного myItems в схеме нет. Хэш persisted-запроса живёт до следующей
+# сборки фронта, поэтому рядом лежит тот же запрос полным текстом. Аргументы
+# подставляются литералами: так не нужно объявлять типы переменных и негде
+# ошибиться в их написании. Статусы — enum, потому идут без кавычек.
 MY_ITEMS_QUERY = """
-query GetMyItems($pagination: OffsetPaginationInput) {
-  myItems(pagination: $pagination) {
-    list {
-      id
-      slug
-      name
-      status
-      createdAt
-      price {
-        value
-        currency { symbol }
+query items {
+  items(pagination: {first: %(count)d},
+        filter: {userId: %(user)s, status: [%(statuses)s]}) {
+    edges {
+      node {
+        ... on MyItem {
+          id
+          slug
+          name
+          price
+          status
+          createdAt
+        }
       }
     }
-    pageInfo {
-      total
+  }
+}
+"""
+
+# Удаление объявления. Обычная мутация: текст запроса свой, от хэшей фронта
+# не зависит. Товар удаляется совсем — статус DELETED и обратной кнопки нет.
+REMOVE_ITEM_MUTATION = """
+mutation removeItem($id: UUID!) {
+  removeItem(id: $id) {
+    ... on MyItem {
+      id
+      name
+      status
     }
   }
 }
@@ -138,6 +156,8 @@ FALLBACK_QUERIES = {
     # Снято с сайта: характеристики категории запрашиваются отдельно.
     "gameCategoryOptions": "ffa5a575b990f54411c60edc07558d7ee27fa60f32b08f2a0af68dd2d31ebb25",
     "gameWithCategories": "7ee7e0cd62afcd98278ff5ece1b6e2de37353323d9c08d1dfa9e0a079ec1af16",
+    # Свои объявления — для /delete.
+    "items": "3f20c731f8f769a094ee3fa32e09f8e12250357e9a4f0ebb4e6988e7a0bb9260",
 }
 
 # createItem принимает файлы отдельным аргументом $attachments (multipart-спека
@@ -350,13 +370,48 @@ async def fetch_complaints(limit: int = 20) -> list[dict]:
     return [d for d in deals if d.get("hasProblem")]
 
 
-async def fetch_my_items(limit: int = 10) -> list[dict]:
+async def fetch_my_items(limit: int = 24, statuses: Optional[list[str]] = None) -> list[dict]:
+    """
+    Свои объявления, свежие сверху. По умолчанию — и выставленные, и то, что
+    ждёт модерации, и черновики: удалять чаще всего нужно как раз их.
+
+    Сначала пробуем persisted-запрос, при отказе повторяем полным текстом:
+    хэш живёт до следующей сборки фронта, а текст — всегда.
+    """
+    count = min(limit, 24)  # больше 24 за раз сервер не отдаёт
+    user_id = await _get_viewer_id()
+    statuses = statuses or ["APPROVED", "APPROVING", "PENDING_APPROVAL", "DRAFT"]
+
     try:
-        data = await _gql(MY_ITEMS_QUERY, {"pagination": {"limit": limit, "offset": 0}})
-        return data.get("myItems", {}).get("list", [])
-    except Exception as e:
-        logger.error("fetch_my_items error: %s", e)
-        return []
+        data = await _persisted(
+            "items",
+            {
+                "pagination": {"first": count},
+                "filter": {"userId": user_id, "status": statuses},
+                "showForbiddenImage": True,
+            },
+            retry=False,
+        )
+    except Exception as hash_error:
+        logger.info("Объявления по хэшу не пришли (%s) — повторяю текстом", hash_error)
+        query = MY_ITEMS_QUERY % {
+            "count": count,
+            "user": json.dumps(user_id),
+            "statuses": ", ".join(statuses),
+        }
+        data = await _gql(query, operation="items")
+
+    edges = (data.get("items") or {}).get("edges") or []
+    return [edge["node"] for edge in edges if edge.get("node")]
+
+
+async def remove_item(item_id: str) -> dict:
+    """Удаляет объявление. Возвращает удалённый товар — по нему видно, что всё."""
+    data = await _gql(REMOVE_ITEM_MUTATION, {"id": item_id}, operation="removeItem")
+    removed = data.get("removeItem")
+    if not removed:
+        raise RuntimeError("Сервер не подтвердил удаление.")
+    return removed
 
 
 # ── Создание товара: этап 2 (запросы вместо браузера) ─────────────────────────
