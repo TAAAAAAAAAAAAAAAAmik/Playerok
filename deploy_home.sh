@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Установка бота без прав root — целиком в домашнюю папку.
+#
+# Нужна, когда sudo отвечает «may not run sudo»: тогда ни apt, ни служба
+# systemd недоступны. Всё, на что здесь опираемся, есть в любой Ubuntu и
+# работает от обычного пользователя:
+#
+#   * код       — тарболлом с GitHub (git ставить нечем);
+#   * venv      — своим Python, системные пакеты не трогаем;
+#   * Chrome    — .deb распаковывается dpkg-deb'ом в домашнюю папку, туда же
+#                 идут его библиотеки, скачанные apt-get download (он root
+#                 не требует, читает уже готовые списки пакетов);
+#   * автозапуск — cron: @reboot поднимает бота, а проверка раз в 5 минут
+#                 возвращает его, если он упал. Это замена systemd.
+#
+# Запуск:  bash deploy_home.sh
+set -euo pipefail
+
+REPO="TAAAAAAAAAAAAAAAAmik/Playerok"
+BRANCH="claude/product-creation-lsfuo0"
+ROOT="${PLAYEROK_HOME:-$HOME/playerok-bot}"
+SYSROOT="$ROOT/sysroot"          # сюда распаковывается Chrome со своими библиотеками
+LIBS="$SYSROOT/usr/lib/x86_64-linux-gnu:$SYSROOT/usr/lib:$SYSROOT/lib/x86_64-linux-gnu"
+
+say() { printf '\n── %s %s\n' "$1" "$(printf '─%.0s' $(seq 1 $((56 - ${#1}))))"; }
+
+ask() {
+    local prompt="$1" current="${2:-}" answer=""
+    if [ -n "$current" ]; then
+        echo "  $prompt — уже задано, оставляю." >&2
+        printf '%s' "$current"
+        return
+    fi
+    # Спрашиваем терминал напрямую: скрипт могли запустить через конвейер, и
+    # обычный read съел бы не ответ, а сам скрипт. Наличие терминала проверяем
+    # попыткой открыть его — /dev/tty есть и там, где открыть его нельзя.
+    if (exec 3<>/dev/tty) 2>/dev/null; then
+        printf '  %s: ' "$prompt" > /dev/tty
+        read -r answer < /dev/tty
+    else
+        printf '  %s: ' "$prompt" >&2
+        read -r answer
+    fi
+    printf '%s' "$answer"
+}
+
+value_of() {
+    [ -f "$ROOT/.env" ] || return 0
+    sed -n "s/^$1=//p" "$ROOT/.env" | tail -1
+}
+
+# ── Код ───────────────────────────────────────────────────────────────────────
+say "Код бота"
+mkdir -p "$ROOT"
+if [ -d "$ROOT/.git" ] && command -v git > /dev/null 2>&1; then
+    git -C "$ROOT" pull --ff-only
+else
+    # Тарболлом, потому что git на сервере может быть не установлен, а поставить
+    # его нечем. --strip-components=1 снимает верхнюю папку из архива.
+    echo "  Качаю $BRANCH…"
+    curl -fsSL "https://codeload.github.com/$REPO/tar.gz/refs/heads/$BRANCH" \
+        | tar xz --strip-components=1 -C "$ROOT"
+fi
+cd "$ROOT"
+echo "  Код в $ROOT"
+
+# ── Python ────────────────────────────────────────────────────────────────────
+say "Python-окружение"
+if [ ! -x "$ROOT/venv/bin/python" ]; then
+    if ! python3 -m venv venv 2> /dev/null; then
+        # Без пакета python3-venv модуль ensurepip недоступен, а поставить его
+        # нечем. Тогда делаем окружение без pip и приносим pip отдельно.
+        echo "  ensurepip недоступен — создаю окружение и ставлю pip вручную"
+        python3 -m venv --without-pip venv
+        curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+        ./venv/bin/python /tmp/get-pip.py --quiet
+        rm -f /tmp/get-pip.py
+    fi
+fi
+./venv/bin/pip install --quiet --upgrade pip
+./venv/bin/pip install --quiet -r requirements.txt
+echo "  Зависимости поставлены: $(./venv/bin/python -V)"
+
+# ── Chrome ────────────────────────────────────────────────────────────────────
+say "Chrome"
+CHROME=""
+for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+    if command -v "$candidate" > /dev/null 2>&1; then
+        CHROME="$(command -v "$candidate")"
+        echo "  Уже установлен: $CHROME"
+        break
+    fi
+done
+
+if [ -z "$CHROME" ] && [ -x "$SYSROOT/opt/google/chrome/google-chrome" ]; then
+    CHROME="$SYSROOT/opt/google/chrome/google-chrome"
+    echo "  Уже распакован: $CHROME"
+fi
+
+# Отдельной функцией, чтобы её неудача не роняла установку: бот полезен и
+# без Chrome, а вызов под `if` отключает для неё выход по ошибке.
+fetch_chrome() {
+    mkdir -p "$SYSROOT" "$ROOT/.debs"
+    cd "$ROOT/.debs"
+    curl -fsSL -o chrome.deb \
+        https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb || return 1
+    # Библиотеки Chrome: на «минимизированной» Ubuntu их нет, а поставить
+    # системно нечем. apt-get download работает от пользователя — он лишь
+    # скачивает файлы, ничего не устанавливая. Имена с t64 — Ubuntu 24.04,
+    # без него — более ранние выпуски; лишние просто не найдутся.
+    apt-get download \
+        libnss3 libnspr4 libgbm1 libdrm2 libxkbcommon0 libxcomposite1 \
+        libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2 \
+        libasound2t64 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
+        libatspi2.0-0t64 \
+        > /dev/null 2>&1 || true
+    apt-get download libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+        libatspi2.0-0 > /dev/null 2>&1 || true
+    for deb in *.deb; do
+        [ -e "$deb" ] && dpkg-deb -x "$deb" "$SYSROOT"
+    done
+    cd "$ROOT"
+    rm -rf "$ROOT/.debs"
+    [ -x "$SYSROOT/opt/google/chrome/google-chrome" ]
+}
+
+if [ -z "$CHROME" ]; then
+    echo "  Ставлю в домашнюю папку (без root)…"
+    if fetch_chrome; then
+        CHROME="$SYSROOT/opt/google/chrome/google-chrome"
+    else
+        cd "$ROOT"
+        rm -rf "$ROOT/.debs"
+        echo "  ⚠️  Скачать Chrome не вышло."
+    fi
+fi
+
+# Проверяем не наличие файла, а способность запуститься: библиотеки могли
+# и не собраться, и узнать об этом лучше сейчас, чем при первом /create.
+CHROME_OK=0
+if [ -n "$CHROME" ] && LD_LIBRARY_PATH="$LIBS" "$CHROME" --headless=new \
+        --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null 2>&1; then
+    CHROME_OK=1
+    echo "  Chrome запускается: $CHROME"
+else
+    echo "  ⚠️  Chrome не работает. Бот запустится, мониторинг и /delete будут"
+    echo "      в порядке, а /create не сможет наполнить каталог с нуля."
+    if [ -n "$CHROME" ]; then
+        echo "      Чего не хватает, покажет:"
+        echo "      LD_LIBRARY_PATH=$LIBS ldd $CHROME | grep 'not found'"
+    fi
+fi
+
+# ── Настройки ─────────────────────────────────────────────────────────────────
+say "Настройки (.env)"
+BOT_TOKEN="$(ask 'Токен Telegram-бота (от @BotFather)' "$(value_of TELEGRAM_BOT_TOKEN)")"
+CHAT_ID="$(ask 'Ваш Telegram chat id (скажет @userinfobot)' "$(value_of TELEGRAM_CHAT_ID)")"
+PLAYEROK_TOKEN="$(ask 'Токен Playerok (кука token с сайта)' "$(value_of PLAYEROK_COOKIES)")"
+
+if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+    echo "❌ Без токена бота и chat id он не запустится — прерываю." >&2
+    exit 1
+fi
+
+case "$PLAYEROK_TOKEN" in
+    token=*) ;;
+    "")      echo "  ⚠️  Токен Playerok пуст: /create и /delete работать не будут." ;;
+    *)       PLAYEROK_TOKEN="token=$PLAYEROK_TOKEN" ;;
+esac
+
+cat > "$ROOT/.env" <<ENV
+TELEGRAM_BOT_TOKEN=$BOT_TOKEN
+TELEGRAM_CHAT_ID=$CHAT_ID
+PLAYEROK_COOKIES=$PLAYEROK_TOKEN
+CREATE_MODE=api
+PLAYEROK_DISCOUNT=27
+# Xvfb ставить нечем, поэтому Chrome идёт headless.
+SELENIUM_HEADLESS=1
+CHROME_BINARY=$CHROME
+ENV
+chmod 600 "$ROOT/.env"
+echo "  .env записан (доступ только владельцу)"
+
+# ── Запуск ────────────────────────────────────────────────────────────────────
+say "Запуск"
+cat > "$ROOT/run.sh" <<RUN
+#!/usr/bin/env bash
+# Поднимает бота, если он ещё не работает. Вызывается из cron и вручную.
+cd "$ROOT"
+if pgrep -u "\$(id -u)" -f "$ROOT/venv/bin/python .*main.py" > /dev/null; then
+    exit 0
+fi
+export LD_LIBRARY_PATH="$LIBS\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "$ROOT/venv/bin/python" "$ROOT/main.py" >> "$ROOT/bot.log" 2>&1
+RUN
+chmod +x "$ROOT/run.sh"
+
+cat > "$ROOT/stop.sh" <<STOP
+#!/usr/bin/env bash
+pkill -u "\$(id -u)" -f "$ROOT/venv/bin/python .*main.py" && echo "Бот остановлен." \\
+    || echo "Бот и так не работал."
+STOP
+chmod +x "$ROOT/stop.sh"
+
+# systemd от пользователя тут обычно недоступен (для него нужен linger, а его
+# включает root), поэтому автозапуск вешаем на cron: он есть у пользователя.
+if command -v crontab > /dev/null 2>&1; then
+    ( crontab -l 2> /dev/null | grep -v "$ROOT/run.sh"
+      echo "@reboot $ROOT/run.sh"
+      echo "*/5 * * * * $ROOT/run.sh" ) | crontab - && \
+        echo "  cron: запуск при перезагрузке и проверка каждые 5 минут"
+else
+    echo "  ⚠️  crontab недоступен — бота придётся поднимать вручную: $ROOT/run.sh"
+fi
+
+"$ROOT/stop.sh" > /dev/null 2>&1 || true
+nohup "$ROOT/run.sh" > /dev/null 2>&1 &
+sleep 5
+
+echo
+if pgrep -u "$(id -u)" -f "$ROOT/venv/bin/python .*main.py" > /dev/null; then
+    echo "✅ Бот запущен. Напишите ему /start в Telegram."
+    [ "$CHROME_OK" = 0 ] && echo "   (Chrome не работает — /create пока не сможет наполнить каталог)"
+else
+    # Питон роняет длинную трассировку, а причина — в её последней строке.
+    # Показываем сначала её, иначе она теряется среди путей к файлам.
+    echo "❌ Бот не поднялся."
+    if [ -s "$ROOT/bot.log" ]; then
+        echo "   Причина: $(grep -v '^\s' "$ROOT/bot.log" | tail -n 1)"
+        echo
+        echo "   Подробнее — $ROOT/bot.log, последние строки:"
+        tail -n 15 "$ROOT/bot.log"
+    else
+        echo "   Журнал пуст — похоже, дело в самом запуске."
+    fi
+    exit 1
+fi
+
+echo
+echo "Полезное:"
+echo "  tail -f $ROOT/bot.log      — журнал"
+echo "  $ROOT/stop.sh              — остановить"
+echo "  $ROOT/run.sh               — запустить"
+echo "  bash $ROOT/deploy_home.sh  — обновить (заново спрашивать ничего не будет)"

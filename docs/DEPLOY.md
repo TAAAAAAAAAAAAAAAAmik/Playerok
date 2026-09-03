@@ -18,6 +18,35 @@ cd /opt/playerok-bot && bash deploy.sh
 что `git pull && bash deploy.sh` работает и как обновление. Каталог может быть
 любым — путь в юнит подставляется настоящий, не только `/opt/playerok-bot`.
 
+## Без прав root
+
+Если `sudo -ln` отвечает «Sorry, user … may not run sudo», ни `apt`, ни служба
+systemd недоступны. Тогда бот ставится целиком в домашнюю папку:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TAAAAAAAAAAAAAAAAmik/Playerok/claude/product-creation-lsfuo0/deploy_home.sh -o deploy_home.sh
+bash deploy_home.sh
+```
+
+Чем этот путь отличается от обычного:
+
+| | с root | без root |
+|---|---|---|
+| код | `git clone` | тарболл с GitHub (`curl`), git не нужен |
+| Chrome | `apt install` | `.deb` распаковывается `dpkg-deb -x` в `~/playerok-bot/sysroot`, библиотеки — `apt-get download` (root не требует) |
+| дисплей | Xvfb | его нечем поставить, поэтому `SELENIUM_HEADLESS=1` |
+| автозапуск | systemd | cron: `@reboot` плюс проверка каждые 5 минут |
+
+Управление: `~/playerok-bot/run.sh` — запустить, `stop.sh` — остановить,
+`tail -f ~/playerok-bot/bot.log` — журнал. Повторный запуск `deploy_home.sh`
+служит обновлением и ничего не переспрашивает.
+
+Две оговорки. DDoS-Guard строже к headless-браузеру, чем к обычному, поэтому
+обновление куки может срываться чаще — токен в `.env` тогда придётся обновлять
+руками. И если библиотек для Chrome в системе не окажется, скрипт скажет об
+этом прямо: бот запустится, мониторинг и `/delete` будут работать, а `/create`
+не сможет наполнить каталог с нуля.
+
 ## Установка по шагам
 
 ```bash
