@@ -97,31 +97,67 @@ if [ -z "$CHROME" ] && [ -x "$SYSROOT/opt/google/chrome/google-chrome" ]; then
     echo "  Уже распакован: $CHROME"
 fi
 
-# Отдельной функцией, чтобы её неудача не роняла установку: бот полезен и
-# без Chrome, а вызов под `if` отключает для неё выход по ошибке.
+# Отдельными функциями, чтобы их неудача не роняла установку: бот полезен и
+# без Chrome, а вызов под `if` отключает для них выход по ошибке.
 fetch_chrome() {
     mkdir -p "$SYSROOT" "$ROOT/.debs"
     cd "$ROOT/.debs"
     curl -fsSL -o chrome.deb \
         https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb || return 1
-    # Библиотеки Chrome: на «минимизированной» Ubuntu их нет, а поставить
-    # системно нечем. apt-get download работает от пользователя — он лишь
-    # скачивает файлы, ничего не устанавливая. Имена с t64 — Ubuntu 24.04,
-    # без него — более ранние выпуски; лишние просто не найдутся.
-    apt-get download \
-        libnss3 libnspr4 libgbm1 libdrm2 libxkbcommon0 libxcomposite1 \
-        libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2 \
-        libasound2t64 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
-        libatspi2.0-0t64 \
-        > /dev/null 2>&1 || true
-    apt-get download libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-        libatspi2.0-0 > /dev/null 2>&1 || true
-    for deb in *.deb; do
-        [ -e "$deb" ] && dpkg-deb -x "$deb" "$SYSROOT"
-    done
+    dpkg-deb -x chrome.deb "$SYSROOT"
     cd "$ROOT"
     rm -rf "$ROOT/.debs"
     [ -x "$SYSROOT/opt/google/chrome/google-chrome" ]
+}
+
+fetch_chrome_libs() {
+    mkdir -p "$SYSROOT" "$ROOT/.debs"
+    cd "$ROOT/.debs"
+    # Библиотеки Chrome: на «минимизированной» Ubuntu их нет, а поставить
+    # системно нечем. apt-get download работает от пользователя — он лишь
+    # скачивает файлы, ничего не устанавливая.
+    #
+    # Скачиваем по одному пакету: одно несуществующее имя валит всю команду,
+    # а имена разъезжаются между выпусками (в Ubuntu 24.04 многие получили
+    # суффикс t64). Лишние просто не найдутся, и это не беда.
+    #
+    # Ядро системы — libc6, libstdc++6, libgcc-s1 — намеренно не трогаем:
+    # подменять их своими копиями опаснее, чем оставить системные.
+    for pkg in \
+        libnss3 libnspr4 libgbm1 libdrm2 libxkbcommon0 \
+        libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxrender1 \
+        libx11-6 libx11-xcb1 libxcb1 libxext6 libxi6 libxtst6 libxcursor1 \
+        libxinerama1 libxshmfence1 libxcb-dri3-0 libxcb-present0 \
+        libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxau6 libxdmcp6 \
+        libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libcairo-gobject2 \
+        libpixman-1-0 libfontconfig1 libfreetype6 libharfbuzz0b \
+        libgraphite2-3 libthai0 libdatrie1 libfribidi0 libpng16-16 \
+        libgdk-pixbuf-2.0-0 libepoxy0 libexpat1 libdbus-1-3 \
+        libwayland-client0 libwayland-cursor0 libwayland-egl1 \
+        libbrotlidec1 libbrotlicommon1 \
+        libasound2t64 libasound2 libasound2-data \
+        libatk1.0-0t64 libatk1.0-0 libatk-bridge2.0-0t64 libatk-bridge2.0-0 \
+        libcups2t64 libcups2 libatspi2.0-0t64 libatspi2.0-0 \
+        libglib2.0-0t64 libglib2.0-0
+    do
+        apt-get download "$pkg" > /dev/null 2>&1 || true
+    done
+
+    local count=0
+    for deb in *.deb; do
+        [ -e "$deb" ] || continue
+        dpkg-deb -x "$deb" "$SYSROOT" && count=$((count + 1))
+    done
+    cd "$ROOT"
+    rm -rf "$ROOT/.debs"
+    echo "  Библиотек распаковано: $count"
+    [ "$count" -gt 0 ]
+}
+
+chrome_runs() {
+    [ -n "$CHROME" ] || return 1
+    LD_LIBRARY_PATH="$LIBS" "$CHROME" --headless=new --no-sandbox \
+        --disable-gpu --dump-dom about:blank > /dev/null 2>&1
 }
 
 if [ -z "$CHROME" ]; then
@@ -135,19 +171,40 @@ if [ -z "$CHROME" ]; then
     fi
 fi
 
-# Проверяем не наличие файла, а способность запуститься: библиотеки могли
-# и не собраться, и узнать об этом лучше сейчас, чем при первом /create.
+# Проверяем не наличие файла, а способность запуститься: библиотек может не
+# хватать, и узнать об этом лучше сейчас, чем при первом /create. Не пошёл —
+# доносим библиотеки и пробуем ещё раз: при повторном запуске скрипта Chrome
+# уже на месте, и без этого шага список библиотек никогда бы не обновился.
 CHROME_OK=0
-if [ -n "$CHROME" ] && LD_LIBRARY_PATH="$LIBS" "$CHROME" --headless=new \
-        --no-sandbox --disable-gpu --dump-dom about:blank > /dev/null 2>&1; then
+if chrome_runs; then
     CHROME_OK=1
     echo "  Chrome запускается: $CHROME"
-else
+elif [ -n "$CHROME" ] && [ "$CHROME" = "$SYSROOT/opt/google/chrome/google-chrome" ]; then
+    echo "  Не запустился — доношу библиотеки…"
+    fetch_chrome_libs || cd "$ROOT"
+    rm -rf "$ROOT/.debs"
+    if chrome_runs; then
+        CHROME_OK=1
+        echo "  Chrome запускается: $CHROME"
+    fi
+fi
+
+if [ "$CHROME_OK" = 0 ]; then
     echo "  ⚠️  Chrome не работает. Бот запустится, мониторинг и /delete будут"
     echo "      в порядке, а /create не сможет наполнить каталог с нуля."
-    if [ -n "$CHROME" ]; then
-        echo "      Чего не хватает, покажет:"
-        echo "      LD_LIBRARY_PATH=$LIBS ldd $CHROME | grep 'not found'"
+    if [ -x "$SYSROOT/opt/google/chrome/chrome" ]; then
+        # ldd натравливаем на сам бинарник: google-chrome рядом — это
+        # скрипт-обёртка, и про её зависимости ldd ничего не скажет.
+        echo "      Не хватает библиотек:"
+        LD_LIBRARY_PATH="$LIBS" ldd "$SYSROOT/opt/google/chrome/chrome" 2> /dev/null \
+            | sed -n 's/^\s*\(\S*\) => not found/        \1/p' | sort -u
+        echo "      Полный список — bash $ROOT/chrome_check.sh"
+        cat > "$ROOT/chrome_check.sh" <<CHECK
+#!/usr/bin/env bash
+# Показывает, каких библиотек не хватает Chrome.
+LD_LIBRARY_PATH="$LIBS" ldd "$SYSROOT/opt/google/chrome/chrome" | grep 'not found' | sort -u
+CHECK
+        chmod +x "$ROOT/chrome_check.sh"
     fi
 fi
 
