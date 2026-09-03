@@ -751,6 +751,7 @@ async def publish_item(
                 "transactionProviderId": transaction_provider_id,
             }
         },
+        operation="publishItem",
     )
     item = data.get("publishItem")
     if not item or not item.get("id"):

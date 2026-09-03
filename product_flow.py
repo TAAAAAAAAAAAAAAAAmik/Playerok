@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 (
     PICK_MODE,
     PICK_TEMPLATE,
+    PICK_COUNT,
     PICK_GAME,
     SEARCH_GAME,
     PICK_CATEGORY,
@@ -49,7 +50,11 @@ logger = logging.getLogger(__name__)
     ENTER_PRICE,
     ENTER_DATA_FIELD,
     CONFIRM,
-) = range(13)
+) = range(14)
+
+# Сколько копий предлагаем сделать за раз. Бесплатных объявлений на площадке
+# ограниченное число, поэтому большие числа — на случай платных размещений.
+COPY_COUNTS = (1, 2, 3, 5, 10)
 
 # Скидка, с которой выставляются товары по умолчанию.
 DEFAULT_DISCOUNT = int(os.getenv("PLAYEROK_DISCOUNT", "27"))
@@ -166,7 +171,8 @@ async def mode_copy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _edit(
         query,
         "📋 <b>Выберите товар для копии.</b>\n"
-        "Комментарий покупателю бот заменит на новый.",
+        "Дальше спрошу, сколько штук — и создам их сам, каждой свой "
+        "комментарий покупателю.",
         _keyboard([{"name": f"{t['name'][:40]} · {t['price']} ₽"} for t in saved],
                   "tpl", 0),
     )
@@ -405,17 +411,18 @@ def _index_of(items: list[dict], wanted: str) -> int:
     return -1
 
 
-async def _copy_via_api(query, ctx, template: dict, fields: dict) -> bool:
+def _draft_from_template(
+    template: dict, fields: dict, discount: int, placement: str = "later"
+) -> ProductDraft | None:
     """
-    Создаёт копию запросами. Идентификаторы берём из каталога — он
-    наполняется сам, пока бот ходит по мастеру. Нет данных в каталоге —
-    возвращаем False, и копия пойдёт через браузер.
+    Собирает черновик из шаблона, переводя названия в идентификаторы каталога.
+    None означает, что каталог этой связки не знает и нужен браузер.
     """
     ids = catalog.resolve(template["game"], template["category"],
                           template.get("obtaining", ""))
     if not ids.get("category_id") or not ids.get("obtaining_id"):
         logger.info("Каталог не знает связку — копирую через браузер")
-        return False
+        return None
 
     category_id, obtaining_id = ids["category_id"], ids["obtaining_id"]
 
@@ -430,7 +437,7 @@ async def _copy_via_api(query, ctx, template: dict, fields: dict) -> bool:
         )
         if not option or not option.get("field"):
             logger.info("Характеристика «%s» не в каталоге — иду браузером", wanted)
-            return False
+            return None
         attribute_values[option["field"]] = option.get("value")
 
     # Поля товара: подписи → fieldId.
@@ -445,10 +452,10 @@ async def _copy_via_api(query, ctx, template: dict, fields: dict) -> bool:
         )
         if not found:
             logger.info("Поле «%s» не в каталоге — иду браузером", label)
-            return False
+            return None
         data_field_values.append({"fieldId": found["id"], "value": value})
 
-    draft = ProductDraft(
+    return ProductDraft(
         game=template["game"],
         category=template["category"],
         obtaining_type=template.get("obtaining", ""),
@@ -456,42 +463,113 @@ async def _copy_via_api(query, ctx, template: dict, fields: dict) -> bool:
         description=template["description"],
         price=template["price"],
         images=template.get("images", []),
-        placement="later",  # окончательный выбор пользователь сделает кнопкой
+        placement=placement,
         game_id=ids.get("game_id", ""),
         category_id=category_id,
         obtaining_type_id=obtaining_id,
         attribute_values=attribute_values,
         data_field_values=data_field_values,
-        discount=ctx.user_data.get("discount", 0),
+        discount=discount,
     )
-
-    await _edit(query, "⚡ Создаю копию запросами…")
-    try:
-        item = await api_creator.create_product(draft)
-    except Exception as e:
-        logger.warning("Запросами не вышло (%s) — иду браузером", e)
-        return False
-
-    ctx.user_data["api_item"] = item
-    await _edit(
-        query,
-        _summary(ctx.user_data)
-        + "\n\n<i>Комментарий заменён на новый. Товар создан запросами "
-          "и лежит в черновиках.</i>\n\nВыставляем?",
-        InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚀 Выставить бесплатно", callback_data="place:free")],
-            [InlineKeyboardButton("📝 Оставить черновиком", callback_data="place:later")],
-        ]),
-    )
-    return True
 
 
 async def template_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Повторяет сохранённый товар: те же данные, новый комментарий."""
+    """
+    Шаблон выбран — спрашиваем, сколько копий сделать. Каталог знает связку,
+    значит вся пачка уйдёт запросами и выставится сама; не знает — придётся
+    вести по мастеру, а его копия делается только одна.
+    """
     query = update.callback_query
     await query.answer()
-    template = ctx.user_data["templates"][int(query.data.split(":")[1])]
+    index = int(query.data.split(":")[1])
+    template = ctx.user_data["templates"][index]
+    ctx.user_data["template_index"] = index
 
+    # Пробный черновик: он же и проверка, что каталог знает связку целиком —
+    # игру, категорию, способ передачи, характеристики и поля.
+    probe = _draft_from_template(
+        template,
+        template.get("data_fields", {}),
+        template.get("discount", DEFAULT_DISCOUNT),
+    )
+    if probe is None:
+        return await _copy_one(query, ctx, template)
+
+    await _edit(
+        query,
+        f"📋 <b>{template['name'][:40]}</b> · {template['price']} ₽\n\n"
+        "Сколько объявлений создать? Бот сделает их сам и сразу выставит, "
+        "каждому — свой комментарий покупателю.\n\n"
+        "<i>Бесплатных размещений на площадке ограниченное число: если они "
+        "кончатся, бот скажет, на какой копии остановился.</i>",
+        InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{n} шт.", callback_data=f"copies:{n}")
+             for n in COPY_COUNTS[:3]],
+            [InlineKeyboardButton(f"{n} шт.", callback_data=f"copies:{n}")
+             for n in COPY_COUNTS[3:]],
+            [InlineKeyboardButton("❌ Отмена", callback_data="cancel:1")],
+        ]),
+    )
+    return PICK_COUNT
+
+
+async def count_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Создаёт запрошенное число копий подряд и сразу выставляет каждую."""
+    query = update.callback_query
+    await query.answer()
+    count = int(query.data.split(":")[1])
+    template = ctx.user_data["templates"][ctx.user_data["template_index"]]
+    discount = template.get("discount", DEFAULT_DISCOUNT)
+
+    done: list[str] = []
+    failed: list[str] = []
+
+    for number in range(1, count + 1):
+        await _edit(
+            query,
+            f"⚡ Создаю {number} из {count}…\n\n"
+            + _batch_report(done, failed),
+        )
+
+        # Комментарий свой у каждой копии — иначе площадка сочтёт их дублями.
+        fields = templates.vary_data_fields(template.get("data_fields", {}))
+        draft = _draft_from_template(template, fields, discount, placement="free")
+        if draft is None:  # каталог не менялся с проверки — но пусть скажет, а не молчит
+            failed.append(f"{number}: каталог больше не знает эту связку")
+            break
+
+        try:
+            item = await api_creator.create_product(draft)
+            done.append(f"{number}: {draft.name[:30]} — {item.get('status', '?')}")
+        except Exception as e:
+            logger.warning("Копия %s из %s не удалась: %s", number, count, e)
+            # Если товар успели создать, а публикация сорвалась, он остался
+            # черновиком — про это надо сказать, иначе он потеряется.
+            hint = " (черновик остался — уберите его через /delete)" \
+                if "Публикация" in str(e) else ""
+            failed.append(f"{number}: {e}{hint}")
+            # Дальше почти наверняка та же ошибка — не плодим её пачкой.
+            break
+
+    # Шаблон пересохранять незачем: копии отличаются от него только
+    # комментарием, а тот генерируется заново при каждом создании.
+    ctx.user_data.clear()
+    await _edit(
+        query,
+        (f"🎉 <b>Готово: {len(done)} из {count}.</b>\n\n" if done
+         else "❌ <b>Ни одной копии создать не вышло.</b>\n\n")
+        + _batch_report(done, failed),
+    )
+    return ConversationHandler.END
+
+
+def _batch_report(done: list[str], failed: list[str]) -> str:
+    lines = [f"✅ {d}" for d in done] + [f"❌ {f}" for f in failed]
+    return "\n".join(lines) if lines else "<i>пока пусто</i>"
+
+
+async def _copy_one(query, ctx: ContextTypes.DEFAULT_TYPE, template: dict):
+    """Одна копия через мастер: каталог связки не знает, пакетом тут не выйдет."""
     fields = templates.vary_data_fields(template.get("data_fields", {}))
     ctx.user_data.update({
         "game": template["game"],
@@ -506,10 +584,6 @@ async def template_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "discount": template.get("discount", DEFAULT_DISCOUNT),
         "from_template": True,
     })
-
-    # Быстрый путь: если каталог знает эту связку — создаём запросами.
-    if await _copy_via_api(query, ctx, template, fields):
-        return CONFIRM
 
     session = WizardSession.get()
     try:
@@ -911,6 +985,10 @@ def build_create_conversation() -> ConversationHandler:
             PICK_TEMPLATE: [
                 CallbackQueryHandler(template_chosen, pattern=r"^tpl:\d+$"),
                 CallbackQueryHandler(template_page, pattern=r"^tplpage:\d+$"),
+                cancel_handler,
+            ],
+            PICK_COUNT: [
+                CallbackQueryHandler(count_chosen, pattern=r"^copies:\d+$"),
                 cancel_handler,
             ],
             PICK_GAME: [
