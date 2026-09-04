@@ -33,7 +33,11 @@ PROMPT = (
     "🔑 <b>Пришлите токен Playerok.</b>\n\n"
     "Где взять: откройте playerok.com в браузере → DevTools (F12) → "
     "Application → Cookies → <code>playerok.com</code> → значение <code>token</code>.\n\n"
-    "Можно прислать как есть или в виде <code>token=eyJ…</code> — разберусь.\n"
+    "Формат любой: само значение, <code>token=eyJ…</code>, строка Cookie "
+    "целиком или выгрузка расширения в JSON — возьму оттуда только "
+    "<code>token</code>.\n\n"
+    "<i>Остальные куки с вашего компьютера не нужны: <code>__ddg*</code> "
+    "привязана к IP, и на сервере она бы только мешала.</i>\n\n"
     "Сообщение с токеном я удалю сразу после проверки.\n\n"
     "Отменить — /cancel"
 )
@@ -63,16 +67,31 @@ async def got_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     raw = (update.message.text or "").strip()
+    chat = update.message.chat
 
     # Убираем сообщение сразу: даже если токен окажется негодным, светить его
-    # в истории незачем. Право на удаление есть не всегда — это не повод падать.
+    # в истории незачем. Право на удаление есть не всегда — это не повод падать,
+    # но и молчать нельзя: пользователь должен знать, что ключ остался в чате.
+    deleted = True
     try:
         await update.message.delete()
     except Exception as e:
+        deleted = False
         logger.debug("Не смог удалить сообщение с токеном: %s", e)
 
-    if len(raw) < 20:
-        await update.message.chat.send_message(
+    normalized = credentials.normalize(raw)
+    if not normalized:
+        await chat.send_message(
+            "❌ Не нашёл в присланном куку <code>token</code>.\n\n"
+            "Подойдёт: само значение куки, <code>token=eyJ…</code>, строка Cookie "
+            "целиком или выгрузка расширения в JSON.\n\n"
+            "Пришлите ещё раз или /cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+        return ASK_TOKEN
+
+    if len(normalized) < 26:  # «token=» плюс что-то осмысленное
+        await chat.send_message(
             "❌ Это не похоже на токен — он длинный и начинается с <code>eyJ</code>.\n"
             "Пришлите ещё раз или /cancel.",
             parse_mode=ParseMode.HTML,
@@ -105,7 +124,9 @@ async def got_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "✅ <b>Токен принят.</b>\n\n"
         f"👤 {viewer.get('username', '—')}\n"
         f"🆔 <code>{viewer.get('id', '—')}</code>\n\n"
-        "<i>Действует сразу, перезапускать бота не нужно.</i>",
+        "<i>Действует сразу, перезапускать бота не нужно.</i>"
+        + ("" if deleted else "\n\n⚠️ Удалите своё сообщение с токеном — "
+                             "у меня не хватило прав."),
         parse_mode=ParseMode.HTML,
     )
     return ConversationHandler.END

@@ -23,23 +23,73 @@ logger = logging.getLogger(__name__)
 COOKIE_FILE = os.getenv("PLAYEROK_COOKIE_FILE", ".playerok_cookie")
 
 
-def _normalize(raw: str) -> str:
+def _from_json(raw: str) -> str | None:
     """
-    Приводит присланное к виду «token=…». Из браузера копируют по-разному:
-    голое значение куки, пару `token=…`, целую строку Cookie с несколькими
-    парами — принимаем всё.
+    Значение куки `token` из выгрузки расширения вроде Cookie Editor: там
+    массив объектов с полями name и value, иногда объект имя→значение.
+    None означает, что это вообще не JSON.
     """
-    raw = " ".join(str(raw).split())
+    import json
+
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+
+    if isinstance(data, dict):
+        # Либо {"token": "..."}, либо один объект куки {"name": ..., "value": ...}
+        if data.get("name") and "value" in data:
+            data = [data]
+        else:
+            for key, value in data.items():
+                if str(key).strip().casefold() == "token":
+                    return str(value).strip()
+            return ""
+
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name", "")).strip().casefold() == "token":
+                return str(item.get("value", "")).strip()
+    return ""
+
+
+def normalize(raw: str) -> str:
+    """
+    Приводит присланное к виду «token=…». Копируют по-разному: голое значение
+    куки, пару `token=…`, целую строку Cookie, выгрузку расширения в JSON —
+    принимаем всё.
+
+    Из нескольких кук берём только `token`. Остальные с чужого компьютера не
+    просто бесполезны, а вредны: `__ddg*` привязана к IP и User-Agent, и с
+    сервера, у которого другой адрес, она сразу делает сессию недействительной.
+    Свою куку защиты сервер получает сам.
+    """
+    raw = str(raw).strip()
     if not raw:
         return ""
-    if "=" in raw:
-        return raw
-    return f"token={raw}"
+
+    from_json = _from_json(raw)
+    if from_json is not None:
+        return f"token={from_json}" if from_json else ""
+
+    raw = " ".join(raw.split())
+    if "=" not in raw:
+        return f"token={raw}"
+
+    for chunk in raw.split(";"):
+        name, _, value = chunk.partition("=")
+        if name.strip().casefold() == "token":
+            return f"token={value.strip()}"
+
+    # Пара вида «что-то=…», но не token — пусть решает вызывающий.
+    return ""
 
 
 def save(raw: str) -> str:
     """Запоминает куку. Возвращает то, что записано."""
-    value = _normalize(raw)
+    value = normalize(raw)
     with open(COOKIE_FILE, "w", encoding="utf-8") as f:
         f.write(value)
     os.chmod(COOKIE_FILE, 0o600)  # в файле сессия аккаунта — чужим не читать
