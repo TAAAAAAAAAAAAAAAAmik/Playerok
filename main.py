@@ -14,6 +14,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 import config
+import credentials
 import auth
 from database import init_db, is_seen, mark_seen, get_stats
 from playerok_client import (
@@ -25,6 +26,7 @@ from playerok_client import (
 from notifier import send, format_order, format_complaint
 from delete_flow import build_delete_conversation
 from product_flow import build_create_conversation
+from token_flow import build_token_conversation
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -170,6 +172,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/login — войти в аккаунт Playerok\n"
         "/create — создать товар (мастер из 9 шагов)\n"
         "/delete — удалить объявление\n"
+        "/token — прислать токен Playerok\n"
         "/status — статистика\n"
         "/check — проверить прямо сейчас\n"
         "/logout — выйти из аккаунта",
@@ -217,6 +220,19 @@ async def cmd_logout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_startup(app: Application):
     init_db()
     auth.load_token()
+
+    # Токен Playerok слетает со временем, и без него команды товаров молчат.
+    # Лучше сказать об этом сразу в чат, чем ждать непонятной ошибки на /create.
+    if not credentials.token() and config.TELEGRAM_CHAT_ID:
+        try:
+            await app.bot.send_message(
+                config.TELEGRAM_CHAT_ID,
+                "🔑 Токен Playerok не задан — /create и /delete работать не будут.\n"
+                "Пришлите его командой /token.",
+            )
+        except Exception as e:
+            logger.warning("Не смог позвать за токеном: %s", e)
+
     if auth.is_authenticated():
         logger.info("Token loaded from disk — starting polling")
         start_polling()
@@ -257,6 +273,7 @@ def main():
     app.add_handler(login_conv)
     app.add_handler(build_create_conversation())
     app.add_handler(build_delete_conversation())
+    app.add_handler(build_token_conversation())
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))

@@ -27,6 +27,7 @@ from typing import Optional
 from urllib.parse import urlencode
 
 import config
+import credentials
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +67,9 @@ def load_cookies() -> dict[str, str]:
         except (OSError, ValueError) as e:
             logger.warning("Не смог прочитать %s: %s", COOKIES_FILE, e)
 
-    # Токен из .env главнее: это то, что пользователь задал руками.
-    jar.update(_parse_cookie_string(config.PLAYEROK_COOKIES))
+    # Кука, заданная пользователем, главнее сохранённой: он мог прислать
+    # боту свежую взамен слетевшей.
+    jar.update(_parse_cookie_string(credentials.cookie_string()))
     return jar
 
 
@@ -136,7 +138,7 @@ def refresh_cookies() -> dict[str, str]:
         jar = {c["name"]: c["value"] for c in browser.driver.get_cookies()}
         user_agent = browser.driver.execute_script("return navigator.userAgent")
 
-    jar.update(_parse_cookie_string(config.PLAYEROK_COOKIES))
+    jar.update(_parse_cookie_string(credentials.cookie_string()))
     save_cookies(jar, user_agent)
     logger.info("Куки обновлены (UA %s): %s", user_agent[:40], ", ".join(sorted(jar)))
     return jar

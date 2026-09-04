@@ -54,6 +54,13 @@ ask() {
 }
 
 value_of() {
+    # Переменная окружения главнее: так установку можно пройти без вопросов,
+    # передав значения одной строкой, и не хранить их в репозитории.
+    local from_env="${!1:-}"
+    if [ -n "$from_env" ]; then
+        printf '%s' "$from_env"
+        return
+    fi
     [ -f "$ROOT/.env" ] || return 0
     sed -n "s/^$1=//p" "$ROOT/.env" | tail -1
 }
@@ -221,7 +228,9 @@ fi
 say "Настройки (.env)"
 BOT_TOKEN="$(ask 'Токен Telegram-бота (от @BotFather)' "$(value_of TELEGRAM_BOT_TOKEN)" 1)"
 CHAT_ID="$(ask 'Ваш Telegram chat id (скажет @userinfobot)' "$(value_of TELEGRAM_CHAT_ID)" 1)"
-PLAYEROK_TOKEN="$(ask 'Токен Playerok (кука token с сайта)' "$(value_of PLAYEROK_COOKIES)")"
+# Токен Playerok здесь не спрашиваем: его присылают боту командой /token,
+# он проверяется на живом аккаунте и подхватывается без перезапуска.
+PLAYEROK_TOKEN="$(value_of PLAYEROK_COOKIES)"
 
 if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
     echo "❌ Без токена бота и chat id он не запустится — прерываю." >&2
@@ -230,7 +239,7 @@ fi
 
 case "$PLAYEROK_TOKEN" in
     token=*) ;;
-    "")      echo "  ⚠️  Токен Playerok пуст: /create и /delete работать не будут." ;;
+    "")      echo "  Токен Playerok спросит сам бот — командой /token в чате." ;;
     *)       PLAYEROK_TOKEN="token=$PLAYEROK_TOKEN" ;;
 esac
 

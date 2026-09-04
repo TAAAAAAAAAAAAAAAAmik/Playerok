@@ -5,6 +5,7 @@ from typing import Optional
 from config import PLAYEROK_API_URL, PLAYEROK_BASE_URL
 import config
 import auth
+import credentials
 import transport
 
 logger = logging.getLogger(__name__)
@@ -307,11 +308,7 @@ def _user_id_from_token() -> str:
     """
     import base64
 
-    token = ""
-    for chunk in config.PLAYEROK_COOKIES.split(";"):
-        if chunk.strip().startswith("token="):
-            token = chunk.split("=", 1)[1].strip()
-    token = token or auth.get_token()
+    token = credentials.token() or auth.get_token()
     if not token or token.count(".") != 2:
         return ""
 

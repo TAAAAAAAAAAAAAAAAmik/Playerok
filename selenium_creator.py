@@ -50,6 +50,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 import config
+import credentials
 
 logger = logging.getLogger(__name__)
 
@@ -229,8 +230,9 @@ class PlayerokBrowser:
         self.driver.get(config.PLAYEROK_BASE_URL)
         self._sleep(2)
 
-        if config.PLAYEROK_COOKIES:
-            for chunk in config.PLAYEROK_COOKIES.split(";"):
+        cookie_string = credentials.cookie_string()
+        if cookie_string:
+            for chunk in cookie_string.split(";"):
                 if "=" not in chunk:
                     continue
                 key, value = chunk.split("=", 1)
