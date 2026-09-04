@@ -22,6 +22,24 @@ ROOT="${PLAYEROK_HOME:-$HOME/playerok-bot}"
 SYSROOT="$ROOT/sysroot"          # сюда распаковывается Chrome со своими библиотеками
 LIBS="$SYSROOT/usr/lib/x86_64-linux-gnu:$SYSROOT/usr/lib:$SYSROOT/lib/x86_64-linux-gnu"
 
+# Этот же скрипт лежит и в самом репозитории, поэтому обновление кода
+# перезапишет его прямо во время исполнения. Bash читает файл по мере
+# выполнения — он дочитал бы уже другой текст со старого смещения и сломался
+# посреди установки. Поэтому, если запущены изнутри папки бота, переносим
+# себя во временный файл и продолжаем оттуда.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+case "$SELF" in
+    "$ROOT"/*)
+        SAFE="$(mktemp)"
+        cat "$SELF" > "$SAFE"
+        chmod +x "$SAFE"
+        exec env PLAYEROK_SELF_MOVED=1 bash "$SAFE" "$@"
+        ;;
+esac
+if [ -n "${PLAYEROK_SELF_MOVED:-}" ]; then
+    trap 'rm -f "$0"' EXIT   # временную копию за собой убираем
+fi
+
 say() { printf '\n── %s %s\n' "$1" "$(printf '─%.0s' $(seq 1 $((56 - ${#1}))))"; }
 
 ask() {
