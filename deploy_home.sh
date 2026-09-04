@@ -25,7 +25,7 @@ LIBS="$SYSROOT/usr/lib/x86_64-linux-gnu:$SYSROOT/usr/lib:$SYSROOT/lib/x86_64-lin
 say() { printf '\n── %s %s\n' "$1" "$(printf '─%.0s' $(seq 1 $((56 - ${#1}))))"; }
 
 ask() {
-    local prompt="$1" current="${2:-}" answer=""
+    local prompt="$1" current="${2:-}" required="${3:-0}" answer=""
     if [ -n "$current" ]; then
         echo "  $prompt — уже задано, оставляю." >&2
         printf '%s' "$current"
@@ -34,13 +34,22 @@ ask() {
     # Спрашиваем терминал напрямую: скрипт могли запустить через конвейер, и
     # обычный read съел бы не ответ, а сам скрипт. Наличие терминала проверяем
     # попыткой открыть его — /dev/tty есть и там, где открыть его нельзя.
-    if (exec 3<>/dev/tty) 2>/dev/null; then
-        printf '  %s: ' "$prompt" > /dev/tty
-        read -r answer < /dev/tty
-    else
-        printf '  %s: ' "$prompt" >&2
-        read -r answer
-    fi
+    #
+    # Пустой ответ переспрашиваем: в мобильных клиентах ввод легко проскакивает
+    # мимо, и обиднее всего узнать об этом в самом конце установки.
+    local tries=0
+    while [ -z "$answer" ] && [ "$tries" -lt 5 ]; do
+        tries=$((tries + 1))
+        if (exec 3<>/dev/tty) 2>/dev/null; then
+            printf '  %s: ' "$prompt" > /dev/tty
+            read -r answer < /dev/tty || break
+        else
+            printf '  %s: ' "$prompt" >&2
+            read -r answer || break
+        fi
+        [ -z "$answer" ] && [ "$required" = 1 ] && echo "  (пусто — повторите)" >&2
+        [ "$required" = 1 ] || break
+    done
     printf '%s' "$answer"
 }
 
@@ -210,8 +219,8 @@ fi
 
 # ── Настройки ─────────────────────────────────────────────────────────────────
 say "Настройки (.env)"
-BOT_TOKEN="$(ask 'Токен Telegram-бота (от @BotFather)' "$(value_of TELEGRAM_BOT_TOKEN)")"
-CHAT_ID="$(ask 'Ваш Telegram chat id (скажет @userinfobot)' "$(value_of TELEGRAM_CHAT_ID)")"
+BOT_TOKEN="$(ask 'Токен Telegram-бота (от @BotFather)' "$(value_of TELEGRAM_BOT_TOKEN)" 1)"
+CHAT_ID="$(ask 'Ваш Telegram chat id (скажет @userinfobot)' "$(value_of TELEGRAM_CHAT_ID)" 1)"
 PLAYEROK_TOKEN="$(ask 'Токен Playerok (кука token с сайта)' "$(value_of PLAYEROK_COOKIES)")"
 
 if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
