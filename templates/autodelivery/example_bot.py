@@ -1,9 +1,14 @@
 """Минимальная сборка: как всё соединяется.
 
-Запускать не нужно — адаптер площадки не написан. Это образец проводки:
-видно, кто кого создаёт и что зовётся в цикле.
+Адаптер площадки уже написан (code/playerok.py), но каталог поставщика —
+ещё нет: метод Catalog.__call__ ниже возвращает пустой список. Пока он
+пуст, движок честно скажет «номинал не найден» и ничего не купит.
 
-    python3 example_bot.py     # честно скажет, что адаптера нет
+Это и есть последний шаг до боевого запуска: прочитать каталог AppRoute и
+привести его к Denomination. Формат ответа — в docs/03_SUPPLIER.md.
+
+Перед первым запуском обязательно прогнать watch.py: он показывает живые
+сделки и ничего не покупает.
 """
 from __future__ import annotations
 
@@ -14,9 +19,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
-from catalog import Card, Denomination            # noqa: E402
+from cards import CARDS                           # noqa: E402
+from catalog import Denomination                  # noqa: E402
 from delivery import DeliveryEngine               # noqa: E402
-from marketplace import PlayerokMarketplace       # noqa: E402
+from playerok import PlayerokMarketplace          # noqa: E402
 from store import JsonStore                       # noqa: E402
 from supplier import ApprouteSupplier             # noqa: E402
 
@@ -26,17 +32,6 @@ logging.basicConfig(level=logging.INFO,
 # Период опроса заказов. Выясняется у площадки, а не угадывается: слишком
 # часто — просьба сбавить темп, слишком редко — покупатель ждёт.
 PERIOD = 60.0
-
-# Какие товары умеем выдавать. Слова — по которым узнаём заказ в названии.
-CARDS = [
-    Card(slug="robux", title="Roblox", emoji="🎮",
-         keywords=("robux", "робукс", "роблокс"),
-         measure="робуксов",
-         activation="Активируйте код на roblox.com/redeem.",
-         services={"GL": "СЮДА-ID-УСЛУГИ-ГЛОБАЛ",
-                   "RU": "СЮДА-ID-УСЛУГИ-РОССИЯ"}),
-]
-
 
 class Catalog:
     """Каталог поставщика с кешем.
@@ -78,7 +73,11 @@ async def notify(text: str) -> None:
 
 
 async def main() -> None:
-    market = PlayerokMarketplace(token=os.environ.get("PLAYEROK_TOKEN", ""))
+    from playerokapi.account import Account
+
+    market = PlayerokMarketplace(
+        Account(token=os.environ["PLAYEROK_TOKEN"],
+                user_agent=os.environ["PLAYEROK_UA"]).get())
     supplier = ApprouteSupplier(
         api_key=os.environ["APPROUTE_KEY"],
         # Прокси с ПОСТОЯННЫМ адресом: у поставщика белый список IP, а адрес

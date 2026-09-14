@@ -1,0 +1,165 @@
+# Установка на сервер
+
+Порядок такой, что до первой траты денег всё уже проверено. Сокращать его
+не стоит: каждый шаг здесь стоил денег или дня на исходной площадке.
+
+---
+
+## Что понадобится
+
+| Что | Откуда взять |
+|---|---|
+| Куки продавца PlayerOK | из браузера, где вы вошли: строка `__ddg3=...;token=...` |
+| User-agent того же браузера | оттуда же — иначе площадка сочтёт вход чужим |
+| Ключ AppRoute | кабинет поставщика, **обязательно с правом `orders:write`** |
+| ID услуг у поставщика | `GET /services` в кабинете AppRoute |
+| Прокси с постоянным адресом | если у поставщика белый список IP |
+
+Про право `orders:write` отдельно: без него ключ покупает, но кода не
+отдаёт. Деньги списываются, код не приходит. Проверьте до запуска.
+
+---
+
+## 1. Положить код
+
+```bash
+sudo apt update && sudo apt install -y python3 python3-venv git
+sudo useradd -m -s /bin/bash autodelivery
+
+sudo -u autodelivery -i
+git clone https://github.com/TAAAAAAAAAAAAAAAAmik/Playerok.git app
+cd app/templates/autodelivery
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Проверка, что каркас цел:
+
+```bash
+.venv/bin/python -m unittest discover tests
+# 46 тестов, сети не требуют
+```
+
+---
+
+## 2. Завести настройки
+
+Секреты живут в файле окружения, а не в коде и не в командной строке:
+в командной строке их видно всем через `ps`.
+
+```bash
+sudo install -m 600 -o autodelivery -g autodelivery /dev/null /etc/autodelivery.env
+sudo -e /etc/autodelivery.env
+```
+
+```ini
+PLAYEROK_TOKEN=__ddg3=...;token=eyJhbGciOi...
+PLAYEROK_UA=Mozilla/5.0 (...) ваш браузер целиком
+APPROUTE_KEY=...
+APPROUTE_PROXY=http://user:pass@постоянный-адрес:port
+APPROUTE_SERVICE_ROBUX_GL=...
+APPROUTE_SERVICE_ROBUX_RU=...
+```
+
+Права `600` обязательны: в файле лежит доступ к кабинету продавца и к
+деньгам у поставщика.
+
+---
+
+## 3. Посмотреть, ничего не покупая
+
+Это главный шаг. Список статусов, означающих «оплачено», взят из исходников
+неофициальной библиотеки, а не с живого заказа — и ошибка в нём отдаёт коды
+бесплатно.
+
+```bash
+set -a && . /etc/autodelivery.env && set +a
+.venv/bin/python watch.py
+```
+
+Скрипт сходит в настоящий кабинет настоящими ключами, покажет реальные
+сделки и напишет, что сделал бы движок с каждой. Поставщика он не трогает
+вовсе — ни покупки, ни чтения заказов по ссылке.
+
+**Сверьте вывод с кабинетом.** Если в списке оказалась сделка, по которой
+товар уже отдан или деньги возвращены, — боевой цикл запускать нельзя:
+сначала исправить `PAID_STATUSES` в `code/playerok.py`.
+
+Если оплаченных сделок нет — оформите себе тестовый заказ на самом дешёвом
+номинале и повторите. Без живого заказа этот шаг ничего не проверяет.
+
+---
+
+## 4. Пробная выдача
+
+По чек-листу [`05_CHECKLIST.md`](../templates/autodelivery/docs/05_CHECKLIST.md):
+самый дешёвый номинал, свой тестовый заказ. Проверить, что код пришёл,
+журнал заполнен, а повторный проход **не покупает второй раз**.
+
+Отдельно — обрыв: убить процесс между покупкой и отправкой и поднять
+заново. Возобновление обязано дослать код и не купить второй раз. Это
+главная проверка: обрыв случается не от сбоя, а от обычного выката.
+
+---
+
+## 5. Служба
+
+Только после того, как прошли шаги 3 и 4.
+
+⚠️ **И после того, как дописан каталог поставщика.** Сейчас
+`Catalog.__call__` в `example_bot.py` возвращает пустой список — движок
+честно скажет «номинал не найден» и ничего не купит. Это последний
+незакрытый шаг до боевого запуска; формат ответа `GET /services` описан в
+[`03_SUPPLIER.md`](../templates/autodelivery/docs/03_SUPPLIER.md).
+
+```ini
+# /etc/systemd/system/autodelivery.service
+[Unit]
+Description=Playerok autodelivery
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=autodelivery
+WorkingDirectory=/home/autodelivery/app/templates/autodelivery
+EnvironmentFile=/etc/autodelivery.env
+ExecStart=/home/autodelivery/app/templates/autodelivery/.venv/bin/python example_bot.py
+Restart=always
+RestartSec=10
+
+# Журнал выдач переживает перезапуск — без него бот купит всё заново.
+StateDirectory=autodelivery
+ReadWritePaths=/var/lib/autodelivery
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now autodelivery
+journalctl -u autodelivery -f
+```
+
+`Restart=always` здесь не для красоты: перезапуск — обычное дело, и
+возобновление рассчитано именно на него.
+
+---
+
+## Чего не делать
+
+**Не хранить журнал выдач в репозитории.** В нём номера уже купленных
+заказов. Развернувшись из устаревшей копии, бот купит их второй раз за ваши
+деньги. В `.gitignore` он уже закрыт.
+
+**Не запускать две копии на один кабинет.** Защита от двойной покупки
+работает через общий журнал; две копии с разными журналами купят один заказ
+дважды.
+
+**Не поднимать частоту опроса наугад.** Что площадка отвечает при
+превышении темпа, мы пока не знаем. Начните с минуты и смотрите журнал.
