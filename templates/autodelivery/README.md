@@ -12,13 +12,15 @@
 
 ```
 code/
-  marketplace.py   порт площадки + ЗАГЛУШКА PlayerOK со списком вопросов
+  marketplace.py   порт площадки: протокол Order/Marketplace
+  playerok.py      адаптер PlayerOK поверх библиотеки playerokapi
   supplier.py      клиент поставщика кодов AppRoute — переносится как есть
   catalog.py       номинал из названия, регион из описания, подбор у поставщика
   store.py         состояние выдачи, атомарная запись, журнал
   delivery.py      движок: покупка, ожидание кода, отправка, возобновление
 tests/
-  test_delivery.py 20 тестов на поддельных площадке и поставщике
+  test_delivery.py 20 тестов движка на поддельных площадке и поставщике
+  test_playerok.py 26 тестов адаптера на поддельном аккаунте
 docs/
   01_ARCHITECTURE.md   конвейер, состояния, инварианты
   02_MARKETPLACE_PORT.md что именно писать под PlayerOK
@@ -32,7 +34,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 20 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 46 тестов, сети не требуют
 ```
 
 ---
