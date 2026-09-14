@@ -20,7 +20,7 @@ code/
   delivery.py      движок: покупка, ожидание кода, отправка, возобновление
 tests/
   test_delivery.py 20 тестов движка на поддельных площадке и поставщике
-  test_playerok.py 26 тестов адаптера на поддельном аккаунте
+  test_playerok.py 27 тестов адаптера на поддельном аккаунте
 docs/
   01_ARCHITECTURE.md   конвейер, состояния, инварианты
   02_MARKETPLACE_PORT.md что именно писать под PlayerOK
@@ -34,7 +34,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 46 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 47 тестов, сети не требуют
 ```
 
 ---

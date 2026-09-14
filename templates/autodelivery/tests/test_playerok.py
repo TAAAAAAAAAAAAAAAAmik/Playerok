@@ -95,10 +95,18 @@ class PaidStatusTest(unittest.TestCase):
     def setUp(self):
         self.market = PlayerokMarketplace(FakeAccount())
 
-    def test_money_received_states_are_paid(self):
+    def test_money_received_state_is_paid(self):
         # Деньги у продавца, товар ещё не отдан.
         self.assertTrue(self.market.is_paid("PAID"))
-        self.assertTrue(self.market.is_paid("PENDING"))
+
+    def test_pending_is_deliberately_not_paid(self):
+        """PENDING выглядит оплаченным, но достоверности нет.
+
+        Вторая независимая библиотека берёт только PAID. Пока живой заказ
+        не показал обратного, лишний статус здесь опаснее недостающего:
+        он отдаёт коды бесплатно и необратимо.
+        """
+        self.assertFalse(self.market.is_paid("PENDING"))
 
     def test_already_delivered_states_are_not_paid(self):
         # Товар уже отдан — выдавать второй раз нельзя.
@@ -130,12 +138,12 @@ class PaidOrdersTest(unittest.TestCase):
         account = FakeAccount([FakePage([
             FakeDeal("1", "PAID", chat_id="c1"),
             FakeDeal("2", "CONFIRMED", chat_id="c2"),
-            FakeDeal("3", "PENDING", chat_id="c3"),
+            FakeDeal("3", "PENDING", chat_id="c3"),   # не оплачен для нас
             FakeDeal("4", "ROLLED_BACK", chat_id="c4"),
         ])])
         orders = run(PlayerokMarketplace(account).paid_orders())
 
-        self.assertEqual([o.id for o in orders], ["1", "3"])
+        self.assertEqual([o.id for o in orders], ["1"])
 
     def test_all_pages_are_read(self):
         """Первая страница — это не «все»."""
