@@ -64,11 +64,19 @@ class FakeAccount:
         return []          # выставлять нечем — черновик и остаётся
 
 
+GAME = {"id": "g1", "name": "Roblox"}
+CATEGORY = {"id": "c1", "name": "Игровая валюта"}
+OBTAINING = {"id": "o1", "name": "Без входа в аккаунт"}
+
+
 def draft(name="80 Robux", price=149, region="GL", photos=(PNG,),
           description="Коды сразу.", comment="быстро"):
     d = wizard.Draft()
+    d.game, d.category, d.obtaining = GAME, CATEGORY, OBTAINING
     d.name, d.price, d.region = name, price, region
-    d.description, d.comment = description, comment
+    d.description = description
+    d.fields = [{"id": "f1", "label": "Комментарий", "required": False,
+                 "value": comment}]
     d.photos = list(photos)
     return d
 
@@ -98,16 +106,24 @@ class SendDraftTest(unittest.TestCase):
 
         self.assertIn("Мой текст.", account.created[0]["description"])
 
-    def test_comment_goes_into_the_data_field(self):
+    def test_chosen_category_is_used_not_a_hardcoded_one(self):
+        """Зашитый id уже приводил к товарам в чужой категории."""
+        account = FakeAccount()
+        item_bot.send_draft(FakeLink(), account, draft())
+
+        self.assertEqual(account.created[0]["game_category_id"], "c1")
+        self.assertEqual(account.created[0]["obtaining_type_id"], "o1")
+
+    def test_filled_field_goes_to_the_marketplace(self):
         account = FakeAccount()
         item_bot.send_draft(FakeLink(), account, draft(comment="пометка"))
         fields = account.created[0]["data_fields"]
 
         self.assertEqual(len(fields), 1)
         self.assertEqual(fields[0].value, "пометка")
-        self.assertEqual(fields[0].id, item_bot.COMMENT_FIELD_ID)
+        self.assertEqual(fields[0].id, "f1")
 
-    def test_no_comment_means_no_data_field(self):
+    def test_empty_field_is_not_sent(self):
         """Необязательное поле не надо слать пустым."""
         account = FakeAccount()
         item_bot.send_draft(FakeLink(), account, draft(comment=""))
@@ -148,19 +164,35 @@ class TemplateFlowTest(unittest.TestCase):
 
         self.assertEqual(self.store.all(), [])
 
-    def test_template_keeps_the_description_and_comment(self):
+    def test_template_keeps_everything_needed_to_repeat(self):
         item_bot.offer_template(FakeLink(["да"]),
                                 draft(description="Мой текст.",
                                       comment="пометка"))
         template = self.store.all()[0]
 
         self.assertEqual(template.description, "Мой текст.")
-        self.assertEqual(template.comment, "пометка")
+        self.assertEqual(template.category, CATEGORY)
+        self.assertEqual(template.obtaining, OBTAINING)
+        self.assertEqual(template.fields[0]["value"], "пометка")
+        self.assertTrue(template.complete())
+
+    def test_old_template_without_a_category_is_refused(self):
+        """Повторять его нечем: товар ушёл бы не туда."""
+        tid = self.store.save("старый", 1, "GL", [PNG])
+        link = FakeLink([item_bot.PICK + tid])
+        account = FakeAccount()
+        item_bot.from_template(link, account)
+
+        self.assertEqual(account.created, [])
+        self.assertTrue(any("категор" in t.lower() for t in link.said))
 
     def test_one_press_recreates_the_same_item(self):
         """То, ради чего всё это: нажал — и объявление такое же."""
         tid = self.store.save("80 Robux", 149, "GL", [PNG],
-                              description="Мой текст.", comment="пометка")
+                              description="Мой текст.", game=GAME,
+                              category=CATEGORY, obtaining=OBTAINING,
+                              fields=[{"id": "f1", "label": "Комментарий",
+                                       "required": False, "value": "пометка"}])
         account = FakeAccount()
         item_bot.from_template(FakeLink([item_bot.PICK + tid]), account)
 
@@ -171,6 +203,7 @@ class TemplateFlowTest(unittest.TestCase):
         self.assertIn("Регион кода: GL", sent["description"])
         self.assertIn("Мой текст.", sent["description"])
         self.assertEqual(sent["data_fields"][0].value, "пометка")
+        self.assertEqual(sent["game_category_id"], "c1")
 
     def test_no_templates_is_explained_not_silent(self):
         link = FakeLink()
@@ -181,7 +214,7 @@ class TemplateFlowTest(unittest.TestCase):
         self.assertTrue(any("шаблон" in t.lower() for t in link.said))
 
     def test_cancel_creates_nothing(self):
-        self.store.save("x", 1, "GL", [PNG])
+        self.store.save("x", 1, "GL", [PNG], category=CATEGORY, obtaining=OBTAINING)
         account = FakeAccount()
         item_bot.from_template(FakeLink(["отмена"]), account)
 
@@ -189,7 +222,7 @@ class TemplateFlowTest(unittest.TestCase):
 
     def test_foreign_id_creates_nothing(self):
         """Значение кнопки приходит снаружи."""
-        self.store.save("x", 1, "GL", [PNG])
+        self.store.save("x", 1, "GL", [PNG], category=CATEGORY, obtaining=OBTAINING)
         account = FakeAccount()
 
         for bad in ("tpl:../../etc", "tpl:", "tpl:deadbeef", "что попало"):
@@ -199,7 +232,8 @@ class TemplateFlowTest(unittest.TestCase):
 
     def test_template_without_pictures_is_refused(self):
         """Без картинок площадка товар не примет — лучше сказать сразу."""
-        tid = self.store.save("x", 1, "GL", [PNG])
+        tid = self.store.save("x", 1, "GL", [PNG], category=CATEGORY,
+                              obtaining=OBTAINING)
         template = self.store.get(tid)
         os.unlink(os.path.join(template.folder, template.files[0]))
 

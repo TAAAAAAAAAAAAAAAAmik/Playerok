@@ -16,10 +16,36 @@ import wizard                                                   # noqa: E402
 from item_bot import photo_id                                   # noqa: E402
 
 
+GAME = {"id": "g1", "name": "Roblox"}
+CATEGORY = {"id": "c1", "name": "Игровая валюта"}
+OBTAINING = {"id": "o1", "name": "Без входа"}
+
+
+def started() -> wizard.Draft:
+    """Черновик, у которого выбор на площадке уже сделан."""
+    draft = wizard.Draft()
+    draft.game, draft.category, draft.obtaining = GAME, CATEGORY, OBTAINING
+
+    return draft
+
+
 class StepsTest(unittest.TestCase):
+    def test_marketplace_choices_come_first(self):
+        """От категории зависят и способ получения, и поля. Спрашивать её
+        после названия значит однажды выбросить написанное."""
+        draft = wizard.Draft()
+
+        self.assertEqual(draft.step, "game")
+        draft.game = GAME
+        self.assertEqual(draft.step, "category")
+        draft.category = CATEGORY
+        self.assertEqual(draft.step, "obtaining")
+        draft.obtaining = OBTAINING
+        self.assertEqual(draft.step, "name")
+
     def test_order_puts_cheap_to_redo_first(self):
         """Передумал на названии — не потратил время на картинки."""
-        draft = wizard.Draft()
+        draft = started()
 
         self.assertEqual(draft.step, "name")
         draft.name = "80 Robux"
@@ -29,8 +55,6 @@ class StepsTest(unittest.TestCase):
         draft.region = "GL"
         self.assertEqual(draft.step, "description")
         draft.description = "Мои коды лучшие."
-        self.assertEqual(draft.step, "comment")
-        draft.comment = ""
         self.assertEqual(draft.step, "photos")
         draft.photos.append(b"png-bytes")
         self.assertEqual(draft.step, "")
@@ -41,16 +65,26 @@ class StepsTest(unittest.TestCase):
 
     def test_skipped_is_not_the_same_as_unanswered(self):
         """Иначе пропуск означал бы вечный повтор одного вопроса."""
-        draft = wizard.Draft()
+        draft = started()
         draft.name, draft.price, draft.region = "x", 1, "GL"
         draft.description = ""
 
-        self.assertEqual(draft.step, "comment")
+        self.assertEqual(draft.step, "photos")
+
+    def test_marketplace_fields_are_asked_after_description(self):
+        """Состав полей известен только после выбора способа получения."""
+        draft = started()
+        draft.name, draft.price, draft.region = "x", 1, "GL"
+        draft.description = ""
+        draft.fields = [{"id": "f1", "label": "Комментарий",
+                         "required": False, "value": None}]
+
+        self.assertEqual(draft.step, wizard.FIELD + "f1")
 
     def test_finished_draft_is_asked_nothing(self):
-        draft = wizard.Draft()
+        draft = started()
         draft.name, draft.price, draft.region = "x", 1, "GL"
-        draft.description, draft.comment = "текст", ""
+        draft.description = "текст"
         draft.photos.append(b"png")
 
         self.assertEqual(wizard.question_for(draft), "")
@@ -114,14 +148,14 @@ class RegionTest(unittest.TestCase):
 
 class ApplyTest(unittest.TestCase):
     def test_answer_moves_the_draft_forward(self):
-        draft = wizard.Draft()
+        draft = started()
 
         self.assertEqual(wizard.apply(draft, "80 Robux"), "")
         self.assertEqual(draft.name, "80 Robux")
         self.assertEqual(draft.step, "price")
 
     def test_bad_answer_keeps_the_step(self):
-        draft = wizard.Draft()
+        draft = started()
         draft.name = "x"
 
         self.assertTrue(wizard.apply(draft, "дорого"))
@@ -165,25 +199,57 @@ class DescriptionInputTest(unittest.TestCase):
         self.assertIn(str(wizard.DESCRIPTION_LIMIT), why)
 
 
-class CommentInputTest(unittest.TestCase):
-    def test_comment_is_optional(self):
-        self.assertEqual(wizard.accept_comment("пропустить"), ("", ""))
-        self.assertEqual(wizard.accept_comment("-"), ("", ""))
+class MarketplaceFieldTest(unittest.TestCase):
+    """Поля у разных категорий разные, и обязательность тоже."""
 
-    def test_text_is_tidied(self):
-        self.assertEqual(wizard.accept_comment("  быстрая   выдача ")[0],
-                         "быстрая выдача")
+    def field(self, required=False):
+        draft = started()
+        draft.name, draft.price, draft.region = "x", 1, "GL"
+        draft.description = ""
+        draft.fields = [{"id": "f1", "label": "Комментарий",
+                         "required": required, "value": None}]
 
-    def test_too_long_is_refused(self):
-        self.assertTrue(
-            wizard.accept_comment("я" * (wizard.COMMENT_LIMIT + 1))[1])
+        return draft
+
+    def test_optional_field_can_be_skipped(self):
+        draft = self.field()
+
+        self.assertEqual(wizard.apply(draft, "пропустить"), "")
+        self.assertEqual(draft.fields[0]["value"], "")
+        self.assertEqual(draft.step, "photos")
+
+    def test_required_field_cannot_be_skipped(self):
+        """Без него площадка товар не примет — лучше упереться здесь."""
+        draft = self.field(required=True)
+        why = wizard.apply(draft, "пропустить")
+
+        self.assertIn("обязательное", why)
+        self.assertEqual(draft.step, wizard.FIELD + "f1")
+
+    def test_value_is_tidied(self):
+        draft = self.field()
+        wizard.apply(draft, "  быстрая   выдача ")
+
+        self.assertEqual(draft.fields[0]["value"], "быстрая выдача")
+
+    def test_required_question_says_it_is_required(self):
+        self.assertIn("требует", wizard.question_for(self.field(True)))
+
+    def test_optional_question_offers_to_skip(self):
+        self.assertIn("пропустить", wizard.question_for(self.field()))
+
+    def test_only_filled_fields_are_sent(self):
+        draft = self.field()
+        wizard.apply(draft, "пропустить")
+
+        self.assertEqual(draft.filled_fields(), [])
 
 
 class FinalDescriptionTest(unittest.TestCase):
     """Собранное описание должен понять и покупатель, и движок."""
 
     def build(self, region, text):
-        draft = wizard.Draft()
+        draft = started()
         draft.region = region
         draft.description = text
 

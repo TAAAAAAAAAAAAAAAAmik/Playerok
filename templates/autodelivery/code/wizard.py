@@ -12,9 +12,23 @@ from __future__ import annotations
 import re
 
 # Сколько шагов и в каком порядке.
-STEPS = ("name", "price", "region", "description", "comment", "photos")
+# Выбор игры и категории идёт первым: от категории зависит и способ
+# получения, и какие поля площадка потребует заполнить. Спрашивать их
+# после названия значит однажды выбросить уже написанное.
+STEPS = ("game", "category", "obtaining", "name", "price", "region",
+         "description", "photos")
+
+# Приставка у шага, который спрашивает поле с данными. Полей у разных
+# категорий разное число, поэтому шаг не постоянный, а собирается из id.
+FIELD = "field:"
 
 QUESTIONS = {
+    "game": ("Для какой игры или приложения товар?\n\n"
+             "Напишите название или его часть — покажу, что нашлось."),
+    "category": "Какая категория?",
+    "obtaining": ("Как покупатель получает товар?\n\n"
+                  "Для кодов это «без входа в аккаунт»: вы отдаёте код, а "
+                  "в чужой аккаунт не заходите."),
     "name": ("Название товара.\n\n"
              "Так его увидит покупатель в списке. Номинал лучше писать "
              "числом — из него бот потом поймёт, сколько покупать."),
@@ -30,9 +44,6 @@ QUESTIONS = {
                     "Строку про регион дописывать не нужно — я поставлю её "
                     "сам, и по ней бот потом выберет, что покупать. Если "
                     "напишете свою, я её уберу, чтобы они не спорили."),
-    "comment": ("Комментарий к товару — необязательное поле площадки.\n\n"
-                "Короткая пометка для карточки. Если не нужен — "
-                "«пропустить»."),
     "photos": ("Пришлите фотографии товара. Можно несколько — по одной.\n\n"
                "Когда хватит, напишите «готово».\n"
                "Хотя бы одна обязательна: без картинок площадка товар не "
@@ -50,7 +61,7 @@ NAME_LIMIT = 120
 # Описание длиннее площадка тоже не примет целиком.
 DESCRIPTION_LIMIT = 2000
 
-COMMENT_LIMIT = 500
+FIELD_LIMIT = 500
 
 # Текст, которым описание заполняется, если продавец его пропустил.
 DEFAULT_TAIL = ("Код приходит в чат сразу после оплаты.\n"
@@ -69,18 +80,32 @@ class Draft:
     """Что уже собрано. Обычная копилка ответов."""
 
     def __init__(self):
+        # Выбранное на площадке: {"id": ..., "name": ...} или None.
+        self.game = None
+        self.category = None
+        self.obtaining = None
+        # Поля с данными выбранной категории: что спросить и что ответили.
+        self.fields: list = []
         self.name = ""
         self.price = 0
         self.region = ""
         # None — ещё не спрашивали, "" — спросили и пропустили. Разница
         # важна: иначе пропуск означал бы вечный повтор вопроса.
         self.description = None
-        self.comment = None
         self.photos: list = []
 
     @property
     def step(self) -> str:
         """Какой шаг сейчас. Пусто — значит всё собрано."""
+        if not self.game:
+            return "game"
+
+        if not self.category:
+            return "category"
+
+        if not self.obtaining:
+            return "obtaining"
+
         if not self.name:
             return "name"
 
@@ -93,20 +118,43 @@ class Draft:
         if self.description is None:
             return "description"
 
-        if self.comment is None:
-            return "comment"
+        # Поля площадки: их состав известен только после выбора способа
+        # получения, поэтому шаги на них появляются по ходу.
+        for field in self.fields:
+            if field.get("value") is None:
+                return FIELD + str(field.get("id"))
 
         if not self.photos:
             return "photos"
 
         return ""
 
+    def field(self, field_id: str):
+        """Описание поля по его id, или None."""
+        for field in self.fields:
+            if str(field.get("id")) == str(field_id):
+                return field
+
+        return None
+
+    def filled_fields(self) -> list:
+        """Поля, которые есть что отправлять."""
+        return [f for f in self.fields if f.get("value")]
+
     def summary(self) -> str:
-        return (f"Название: {self.name}\n"
-                f"Цена: {self.price} ₽\n"
-                f"Регион: {self.region}\n"
-                f"Комментарий: {self.comment or '—'}\n"
-                f"Фотографий: {len(self.photos)}")
+        lines = [f"Игра: {(self.game or {}).get('name', '')}",
+                 f"Категория: {(self.category or {}).get('name', '')}",
+                 f"Получение: {(self.obtaining or {}).get('name', '')}",
+                 f"Название: {self.name}",
+                 f"Цена: {self.price} ₽",
+                 f"Регион: {self.region}"]
+
+        for field in self.filled_fields():
+            lines.append(f"{field.get('label') or 'Поле'}: {field['value']}")
+
+        lines.append(f"Фотографий: {len(self.photos)}")
+
+        return "\n".join(lines)
 
 
 def cancelled(text: str) -> bool:
@@ -193,38 +241,43 @@ def accept_description(text: str) -> tuple[str, str]:
     return body, ""
 
 
-def accept_comment(text: str) -> tuple[str, str]:
-    """→ (комментарий, причина отказа). Поле необязательное."""
-    if skipped(text):
-        return "", ""
-
-    body = " ".join(str(text or "").split())
-
-    if len(body) > COMMENT_LIMIT:
-        return "", (f"Слишком длинно: {len(body)} знаков при "
-                    f"{COMMENT_LIMIT} допустимых.")
-
-    return body, ""
-
-
 ACCEPT = {"name": accept_name, "price": accept_price, "region": accept_region,
-          "description": accept_description, "comment": accept_comment}
+          "description": accept_description}
 
 
 def question_for(draft: Draft) -> str:
     """Что спросить сейчас. Пусто — спрашивать нечего."""
     step = draft.step
 
-    return QUESTIONS.get(step, "") if step else ""
+    if not step:
+        return ""
+
+    if step.startswith(FIELD):
+        field = draft.field(step[len(FIELD):]) or {}
+        label = field.get("label") or "Поле"
+
+        if field.get("required"):
+            return (f"{label}.\n\n"
+                    "Это поле площадка требует заполнить — без него товар "
+                    "не примут.")
+
+        return (f"{label}.\n\n"
+                "Поле необязательное. Если не нужно — «пропустить».")
+
+    return QUESTIONS.get(step, "")
 
 
 def apply(draft: Draft, text: str) -> str:
     """Принять текстовый ответ на текущий шаг. → причина отказа или пусто.
 
-    Шаг с фотографиями сюда не приходит: картинки принимает вызывающий,
-    ему же решать, что делать с присланным файлом.
+    Шаги с выбором на площадке и с фотографиями сюда не приходят: там
+    ответом служит нажатие или файл, и разбирает их вызывающий.
     """
     step = draft.step
+
+    if step.startswith(FIELD):
+        return apply_field(draft, step[len(FIELD):], text)
+
     accept = ACCEPT.get(step)
 
     if accept is None:
@@ -236,6 +289,39 @@ def apply(draft: Draft, text: str) -> str:
         return why
 
     setattr(draft, step, value)
+
+    return ""
+
+
+def apply_field(draft: Draft, field_id: str, text: str) -> str:
+    """Принять ответ на поле площадки. → причина отказа или пусто."""
+    field = draft.field(field_id)
+
+    if field is None:
+        return ""
+
+    if skipped(text):
+        if field.get("required"):
+            return ("Это поле обязательное — без него площадка товар не "
+                    "примет. Напишите значение.")
+
+        field["value"] = ""
+        return ""
+
+    value = " ".join(str(text or "").split())
+
+    if not value:
+        if field.get("required"):
+            return "Пусто. Это поле площадка требует заполнить."
+
+        field["value"] = ""
+        return ""
+
+    if len(value) > FIELD_LIMIT:
+        return (f"Слишком длинно: {len(value)} знаков при "
+                f"{FIELD_LIMIT} допустимых.")
+
+    field["value"] = value
 
     return ""
 

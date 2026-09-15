@@ -3,8 +3,9 @@
 Продавец выставляет одно и то же по многу раз. Собирать каждый раз
 название, цену, регион и фотографии заново — это минуты вместо секунд.
 
-Что лежит в шаблоне. Название, цена, регион, описание, комментарий и
-сами картинки файлами.
+Что лежит в шаблоне. Игра, категория, способ получения, название, цена,
+регион, описание, поля площадки и сами картинки файлами. Категория
+особенно важна: из-за неё шаблон и экономит больше всего нажатий.
 Картинки именно копией, а не ссылкой на товар: товар продадут, снимут или
 отклонят, а шаблон должен работать и через полгода.
 
@@ -66,7 +67,10 @@ class Template:
         self.price = int(card.get("price") or 0)
         self.region = str(card.get("region") or "")
         self.description = str(card.get("description") or "")
-        self.comment = str(card.get("comment") or "")
+        self.game = card.get("game") or None
+        self.category = card.get("category") or None
+        self.obtaining = card.get("obtaining") or None
+        self.fields = list(card.get("fields") or [])
         self.files = [str(f) for f in (card.get("photos") or [])]
         self.at = float(card.get("at") or 0)
 
@@ -88,7 +92,18 @@ class Template:
 
     def label(self) -> str:
         """Подпись для кнопки."""
-        return f"{self.name} — {self.price} ₽ ({self.region})"
+        where = (self.category or {}).get("name") or self.region
+
+        return f"{self.name} — {self.price} ₽ ({where})"
+
+    def complete(self) -> bool:
+        """Хватает ли шаблона, чтобы создать товар без вопросов.
+
+        Шаблоны, сохранённые до того, как бот научился спрашивать
+        категорию, её не содержат — и повторять их нечем.
+        """
+        return bool((self.category or {}).get("id")
+                    and (self.obtaining or {}).get("id"))
 
 
 class TemplateStore:
@@ -105,7 +120,8 @@ class TemplateStore:
         return os.path.join(self.folder, template_id)
 
     def save(self, name: str, price: int, region: str, photos: list,
-             description: str = "", comment: str = "") -> str:
+             description: str = "", game=None, category=None,
+             obtaining=None, fields=None) -> str:
         """Сохранить объявление шаблоном. → номер."""
         template_id = new_id()
         path = self._path(template_id)
@@ -124,8 +140,9 @@ class TemplateStore:
             files.append(file_name)
 
         card = {"name": name, "price": int(price), "region": region,
-                "description": description or "", "comment": comment or "",
-                "photos": files, "at": time.time()}
+                "description": description or "", "photos": files,
+                "game": game, "category": category, "obtaining": obtaining,
+                "fields": list(fields or []), "at": time.time()}
 
         with open(os.path.join(path, CARD), "w", encoding="utf-8") as f:
             json.dump(card, f, ensure_ascii=False)

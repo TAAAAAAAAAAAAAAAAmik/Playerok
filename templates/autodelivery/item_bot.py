@@ -6,6 +6,11 @@
 
     python3 item_bot.py
 
+ЧТО СПРАШИВАЕТСЯ. Игра, категория, способ получения, название, цена,
+регион, описание, поля площадки и фотографии. Ничего не зашито: категории
+у разных игр разные, а один зашитый id уже приводил к тому, что товары
+создавались не там, где нужно.
+
 ШАБЛОНЫ. Созданное объявление можно сохранить шаблоном, и тогда такой же
 товар создаётся одним нажатием: название, цена, регион и фотографии уже
 внутри. Картинки хранятся копией, а не ссылкой на товар — товар продадут
@@ -48,18 +53,13 @@ REGIONS = [("🌍 GL — глобальный", "GL"), ("🇷🇺 RU — рос�
 SKIP = [("⏭ Пропустить", "пропустить"), ("✖️ Отмена", "отмена")]
 PHOTOS_DONE = [("✅ Готово", wizard.DONE_WORD), ("✖️ Отмена", "отмена")]
 
-# Товар создаём в той категории, что разведана для кодов Roblox.
-CATEGORY_ID = os.environ.get(
-    "PLAYEROK_CATEGORY_ID", "1ecc48ce-53cd-6f00-70d9-f8db195c837a")
+# Ничего про категории здесь не зашито намеренно. Один зашитый id уже
+# привёл к тому, что все товары создавались в чужой категории, и заметить
+# это можно было только глазами в кабинете.
 
-# «Без входа в аккаунт»: мы выдаём код, а не заходим в чужой аккаунт.
-OBTAINING_TYPE_ID = os.environ.get(
-    "PLAYEROK_OBTAINING_TYPE_ID", "1f094822-b7a2-6590-385d-cadb2ec7b130")
-
-# Поле «Комментарий» этого способа получения. Необязательное, и если id
-# не тот — товар создастся без него, а не сломается.
-COMMENT_FIELD_ID = os.environ.get(
-    "PLAYEROK_COMMENT_FIELD_ID", "1f094823-0eb1-6f20-2dfc-d4772e02d700")
+# Сколько вариантов показывать кнопками за раз. Больше — и список
+# перестаёт помещаться на экране телефона.
+MAX_CHOICES = 12
 
 START_WORDS = ("новый товар", "новый", "/new", "/newitem")
 TEMPLATE_WORDS = ("шаблон", "шаблоны", "из шаблона", "/tpl")
@@ -71,6 +71,12 @@ TEMPLATE_DIR = os.environ.get("PLAYEROK_TEMPLATES", "state/templates")
 # Приставка у значения кнопки шаблона. Нужна, чтобы номер шаблона нельзя
 # было спутать с ответом на другой вопрос.
 PICK = "tpl:"
+
+# Приставки у кнопок выбора на площадке: чтобы нажатие нельзя было
+# спутать с ответом на другой вопрос.
+PICK_GAME = "game:"
+PICK_CATEGORY = "cat:"
+PICK_OBTAINING = "obt:"
 
 # Сколько ждать ответа на один вопрос. Полчаса: продавец может отвлечься,
 # и бот не должен ронять начатое из-за этого.
@@ -117,15 +123,161 @@ def buttons_for(step: str):
     if step == "photos":
         return [PHOTOS_DONE]
 
-    if step in ("description", "comment"):
-        # Оба поля можно не заполнять: описание тогда возьмётся типовое,
-        # а комментарий у площадки и так необязательный.
+    if step.startswith(wizard.FIELD) or step == "description":
+        # Описание можно не писать — возьмётся типовое. У поля площадки
+        # кнопка «пропустить» есть всегда, но обязательное поле её не
+        # примет и переспросит.
         return [SKIP]
 
     return [CANCEL]
 
 
-def collect(link, draft: wizard.Draft) -> bool:
+def choose(link, question, rows, prefix, wait=None):
+    """Показать варианты кнопками и вернуть выбранный. → (id, имя) или None.
+
+    Значение кнопки — приставка плюс id, чтобы нажатие нельзя было принять
+    за ответ на другой вопрос.
+    """
+    rows = list(rows)[:MAX_CHOICES]
+
+    if not rows:
+        return None
+
+    keys = [[(name, prefix + str(value))] for value, name in rows]
+    keys.append([("✖️ Отмена", "отмена")])
+    answer = link.ask(question, wait or ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(prefix):
+        return None
+
+    chosen = text[len(prefix):]
+
+    for value, name in rows:
+        if str(value) == chosen:
+            return {"id": str(value), "name": name}
+
+    return None
+
+
+def choose_game(link, account, draft) -> bool:
+    """Спросить игру и найти её у площадки. → продолжать ли."""
+    answer = link.ask(wizard.question_for(draft), ANSWER_WAIT, buttons=[CANCEL])
+    search = str(answer.get("text") or "").strip()
+
+    if not search or wizard.cancelled(search):
+        return False
+
+    try:
+        page = account.get_games(name=search, count=MAX_CHOICES)
+        games = list(getattr(page, "games", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.say(f"Поиск не удался: {e}")
+        return True
+
+    if not games:
+        link.say(f"По запросу «{search}» ничего не нашлось. Попробуйте "
+                 "короче.")
+        return True
+
+    chosen = choose(link, "Что из этого?",
+                    [(g.id, g.name) for g in games], PICK_GAME)
+
+    if chosen is None:
+        link.say("Отменил.", buttons=MENU)
+        return False
+
+    draft.game = chosen
+
+    return True
+
+
+def choose_category(link, account, draft) -> bool:
+    """Спросить категорию выбранной игры. → продолжать ли."""
+    try:
+        game = account.get_game(id=draft.game["id"])
+        rows = list(getattr(game, "categories", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.say(f"Категории прочитать не вышло: {e}")
+        return False
+
+    if not rows:
+        link.say("У этой игры нет категорий — товар создать негде.",
+                 buttons=MENU)
+        return False
+
+    chosen = choose(link, wizard.question_for(draft),
+                    [(c.id, c.name) for c in rows], PICK_CATEGORY)
+
+    if chosen is None:
+        link.say("Отменил.", buttons=MENU)
+        return False
+
+    draft.category = chosen
+
+    return True
+
+
+def choose_obtaining(link, account, draft) -> bool:
+    """Спросить способ получения и узнать поля категории."""
+    try:
+        page = account.get_game_category_obtaining_types(
+            draft.category["id"], count=MAX_CHOICES)
+        rows = list(getattr(page, "obtaining_types", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.say(f"Способы получения прочитать не вышло: {e}")
+        return False
+
+    if not rows:
+        link.say("У этой категории нет способов получения.", buttons=MENU)
+        return False
+
+    chosen = choose(link, wizard.question_for(draft),
+                    [(o.id, o.name) for o in rows], PICK_OBTAINING)
+
+    if chosen is None:
+        link.say("Отменил.", buttons=MENU)
+        return False
+
+    draft.obtaining = chosen
+    draft.fields = item_fields(account, draft.category["id"], chosen["id"])
+
+    return True
+
+
+def item_fields(account, category_id: str, obtaining_id: str) -> list:
+    """Поля, которые заполняет ПРОДАВЕЦ при создании товара.
+
+    Только ITEM_DATA. Поля OBTAINING_DATA вводит покупатель при оформлении,
+    и заполнять их за него — верный способ получить отказ.
+    """
+    try:
+        page = account.get_game_category_data_fields(
+            category_id, obtaining_id, count=24)
+        rows = list(getattr(page, "data_fields", None) or [])
+    except Exception:                                         # noqa: BLE001
+        return []
+
+    fields = []
+
+    for row in rows:
+        kind = str(getattr(getattr(row, "type", None), "name", "") or "")
+
+        if kind != "ITEM_DATA":
+            continue
+
+        fields.append({"id": str(row.id),
+                       "label": str(getattr(row, "label", "") or "Поле"),
+                       "required": bool(getattr(row, "required", False)),
+                       "value": None})
+
+    return fields
+
+
+CHOOSE = {}          # заполняется ниже, когда функции определены
+
+
+def collect(link, account, draft: wizard.Draft) -> bool:
     """Пройти опрос. → дошли ли до конца."""
     complaint = ""
 
@@ -138,6 +290,12 @@ def collect(link, draft: wizard.Draft) -> bool:
         # Замечание и вопрос — одним сообщением, а не двумя. Каждый лишний
         # обмен с Telegram это задержка на ровном месте, и в переписке от
         # них рябит.
+        if step in CHOOSE:
+            if not CHOOSE[step](link, account, draft):
+                return False
+
+            continue
+
         question = wizard.question_for(draft)
         message = link.ask(f"{complaint}\n\n{question}" if complaint
                            else question,
@@ -267,7 +425,7 @@ def make_item(link, account) -> None:
     draft = wizard.Draft()
     link.say("Создаём товар. В любой момент — «Отмена».")
 
-    if not collect(link, draft):
+    if not collect(link, account, draft):
         return
 
     link.say("Проверьте:\n\n" + draft.summary()
@@ -282,13 +440,12 @@ def make_item(link, account) -> None:
 
 def send_draft(link, account, draft: wizard.Draft) -> bool:
     """Создать черновик и спросить про выставление. → получилось ли."""
-    fields = ([Field(COMMENT_FIELD_ID, draft.comment)]
-              if draft.comment and COMMENT_FIELD_ID else [])
+    fields = [Field(f["id"], f["value"]) for f in draft.filled_fields()]
 
     try:
         item = account.create_item(
-            game_category_id=CATEGORY_ID,
-            obtaining_type_id=OBTAINING_TYPE_ID,
+            game_category_id=draft.category["id"],
+            obtaining_type_id=draft.obtaining["id"],
             name=draft.name,
             price=draft.price,
             description=wizard.description_for(draft),
@@ -325,7 +482,9 @@ def offer_template(link, draft: wizard.Draft) -> None:
 
     try:
         store.save(draft.name, draft.price, draft.region, draft.photos,
-                   description=draft.description, comment=draft.comment)
+                   description=draft.description,
+                   game=draft.game, category=draft.category,
+                   obtaining=draft.obtaining, fields=draft.fields)
     except Exception as e:                                    # noqa: BLE001
         link.say(f"Сохранить шаблон не вышло: {e}")
         return
@@ -359,6 +518,14 @@ def from_template(link, account) -> None:
         link.say("Такого шаблона больше нет.", buttons=MENU)
         return
 
+    if not template.complete():
+        # Шаблоны, сохранённые до того, как бот научился спрашивать
+        # категорию, повторять нечем: товар ушёл бы не туда.
+        link.say("Этот шаблон сохранён до того, как бот стал спрашивать "
+                 "категорию, и повторить его нечем — создайте товар заново "
+                 "и сохраните шаблон ещё раз.", buttons=MENU)
+        return
+
     photos = template.photos()
 
     if not photos:
@@ -371,7 +538,10 @@ def from_template(link, account) -> None:
     draft.price = template.price
     draft.region = template.region
     draft.description = template.description
-    draft.comment = template.comment
+    draft.game = template.game
+    draft.category = template.category
+    draft.obtaining = template.obtaining
+    draft.fields = template.fields
     draft.photos = photos
 
     link.say(f"Повторяю:\n\n{draft.summary()}\n\nСоздаю черновик…")
@@ -408,6 +578,10 @@ def main() -> None:
             link.say("Что делаем?", buttons=MENU)
 
         time.sleep(0.2)
+
+
+CHOOSE.update({"game": choose_game, "category": choose_category,
+               "obtaining": choose_obtaining})
 
 
 if __name__ == "__main__":
