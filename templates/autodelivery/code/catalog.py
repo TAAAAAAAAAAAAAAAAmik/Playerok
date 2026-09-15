@@ -186,3 +186,132 @@ def order_reference(prefix: str, card_slug: str, order_id: str) -> str:
     кабинета поставщика, а кабинет один на все площадки продавца.
     """
     return f"{prefix}-{card_slug}-{order_id}"[:40]
+
+
+# ---------------------------------------------------------------------------
+# Каталог поставщика → номиналы
+# ---------------------------------------------------------------------------
+
+# Где у услуги может лежать список номиналов. Имена разные у разных
+# поставщиков и меняются между версиями, а ошибиться здесь значит получить
+# «номинала нет» на полном каталоге.
+ITEM_FIELDS = ("items", "denominations", "nominals", "values")
+
+# Где лежит число, которое мы считаем номиналом. Если ни одного нет —
+# читаем его из названия, как делаем с товарами площадки.
+VALUE_FIELDS = ("value", "denomination", "nominal", "amount", "faceValue")
+
+NAME_FIELDS = ("name", "title", "label", "denominationName")
+STOCK_FIELDS = ("inStock", "stock", "quantity", "available", "count")
+PRICE_FIELDS = ("price", "cost", "amountUsd", "priceUsd")
+
+
+def _first(node: dict, fields, default=None):
+    for field in fields:
+        if field in node and node[field] not in (None, ""):
+            return node[field]
+
+    return default
+
+
+def _number(value):
+    try:
+        return float(str(value).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def items_of(service: dict) -> list:
+    """Номиналы услуги, как бы поставщик их ни назвал."""
+    if not isinstance(service, dict):
+        return []
+
+    found = _first(service, ITEM_FIELDS)
+
+    return [row for row in (found or []) if isinstance(row, dict)]
+
+
+def denominations_from(service: dict, service_id: str = "",
+                       region: str = "") -> list:
+    """Услуга поставщика → номиналы в терминах движка.
+
+    Номинал берётся из числового поля, а если его нет — из названия. Это
+    не роскошь: у части услуг число живёт только в названии вроде
+    «Roblox 1000 Robux (Global)», и без разбора названия такой номинал не
+    найдётся никогда.
+
+    Записи без номинала пропускаются молча: подставить догадку значило бы
+    купить не то на настоящие деньги.
+    """
+    service_id = str(service_id or _first(service, ("id", "serviceId"), ""))
+    rows = []
+
+    for item in items_of(service):
+        item_id = str(_first(item, ("id", "itemId", "denominationId"), ""))
+
+        if not item_id:
+            continue
+
+        title = str(_first(item, NAME_FIELDS, "") or "")
+        value = _number(_first(item, VALUE_FIELDS))
+
+        if value is None:
+            value = nominal_from_title(title)
+
+        if value is None:
+            continue
+
+        stock = _number(_first(item, STOCK_FIELDS, 0)) or 0
+
+        rows.append(Denomination(
+            service_id=service_id,
+            item_id=item_id,
+            value=value,
+            title=title or f"{value:g}",
+            price=_number(_first(item, PRICE_FIELDS)),
+            # Отрицательный остаток встречается: считаем его нулём, иначе
+            # такой номинал выглядел бы доступным.
+            in_stock=max(0, int(stock)),
+            region=region.upper(),
+        ))
+
+    return rows
+
+
+def find_service(catalog, service_id: str):
+    """Услуга по её номеру в каталоге поставщика, или None."""
+    wanted = str(service_id or "").strip()
+
+    if not wanted:
+        return None
+
+    for service in _services(catalog):
+        if str(_first(service, ("id", "serviceId"), "")) == wanted:
+            return service
+
+    return None
+
+
+def _services(catalog) -> list:
+    """Список услуг, как бы поставщик его ни завернул."""
+    if isinstance(catalog, list):
+        return [s for s in catalog if isinstance(s, dict)]
+
+    if not isinstance(catalog, dict):
+        return []
+
+    for key in ("services", "items", "data", "results"):
+        found = catalog.get(key)
+
+        if isinstance(found, list):
+            return [s for s in found if isinstance(s, dict)]
+
+        if isinstance(found, dict):
+            deeper = _services(found)
+
+            if deeper:
+                return deeper
+
+    page = catalog.get("page")
+
+    return _services(page) if isinstance(page, dict) else []

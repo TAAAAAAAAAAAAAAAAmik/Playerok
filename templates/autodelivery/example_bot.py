@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 from auth import (open_account, sign_in,           # noqa: E402
                   user_agent_from_env)
 from cards import CARDS                           # noqa: E402
-from catalog import Denomination                  # noqa: E402
+from catalog import (Card, Denomination,           # noqa: E402
+                     denominations_from, find_service)
 from delivery import DeliveryEngine               # noqa: E402
 from envfile import load_env_file                 # noqa: E402
 from owner import link_from_env, renew_cookies    # noqa: E402
@@ -44,6 +45,10 @@ class Catalog:
     Кеш не для скорости, а по необходимости: `GET /services` разрешён
     **2 раза в минуту**. Без кеша два оплаченных заказа подряд означают два
     тяжёлых чтения, и всё это время опрос заказов стоит.
+
+    Кешируется весь ответ, а не отдельные услуги: он приходит одним куском
+    на все услуги сразу, и просить его повторно ради второй карты — это
+    тот же тяжёлый вызов из того же лимита.
     """
 
     TTL = 120.0
@@ -51,25 +56,42 @@ class Catalog:
     def __init__(self, supplier: ApprouteSupplier):
         self.supplier = supplier
         self._at = 0.0
-        self._rows: dict[tuple[str, str], list[Denomination]] = {}
+        self._raw = None
+
+    def _catalog(self):
+        """Каталог целиком, не чаще чем раз в TTL."""
+        import time
+
+        if self._raw is not None and time.time() - self._at < self.TTL:
+            return self._raw
+
+        self._raw = self.supplier.services()
+        self._at = time.time()
+
+        return self._raw
 
     def __call__(self, card: Card, region: str) -> list[Denomination]:
-        import time
-        key = (card.slug, region.upper())
-        if time.time() - self._at < self.TTL and key in self._rows:
-            return self._rows[key]
-
         service_id = card.services.get(region.upper(), "")
+
         if not service_id:
+            # Услуга для этого региона не настроена. Молчим: движок скажет
+            # об этом понятнее, с названием карты и регионом.
             return []
 
-        # TODO: здесь читается каталог поставщика и приводится к Denomination.
-        #       Остаток и цену берём оттуда же — но перед покупкой движок
-        #       перечитает номинал отдельно, потому что кеш может устареть.
-        rows: list[Denomination] = []
-        self._rows[key] = rows
-        self._at = time.time()
-        return rows
+        try:
+            service = find_service(self._catalog(), service_id)
+        except Exception as e:                           # noqa: BLE001
+            logging.error("каталог поставщика не прочитался: %s", e)
+            # Пустой список честнее выдумки: движок остановится и скажет
+            # «номинал не найден», а не купит не то.
+            self._raw = None
+            return []
+
+        if service is None:
+            logging.error("услуги %s нет в каталоге поставщика", service_id)
+            return []
+
+        return denominations_from(service, service_id, region)
 
 
 async def main() -> None:
