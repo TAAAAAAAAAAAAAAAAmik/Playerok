@@ -123,6 +123,23 @@ class CookiesAreNotLeftInChatTest(unittest.TestCase):
         self.assertEqual(got, COOKIES)
         self.assertIn("сотрите", telegram.sent[-1].lower())
 
+    def test_failed_attempt_is_deleted_too(self):
+        """Неудачная попытка — это тоже кусок ключа в переписке."""
+        telegram = FakeTelegram([[], [update(3, "token=обрывок")],
+                                 [update(4, COOKIES, message_id=44)]])
+        link(telegram).ask_cookies("проверка")
+
+        self.assertEqual(telegram.deleted, [3, 44])
+
+    def test_reason_is_sent_before_the_message_disappears(self):
+        """Иначе сообщение просто исчезнет, и владелец не поймёт почему."""
+        telegram = FakeTelegram([[], [update(3, "ок")]])
+        link(telegram).ask_cookies("проверка", wait_seconds=0.2)
+
+        self.assertTrue(telegram.sent)
+        self.assertIn("не похоже", telegram.sent[-1].lower())
+        self.assertEqual(telegram.deleted, [3])
+
     def test_accepted_quietly_confirms_when_deleted(self):
         telegram = FakeTelegram([[], [update(7, COOKIES)]])
         link(telegram).ask_cookies("проверка")

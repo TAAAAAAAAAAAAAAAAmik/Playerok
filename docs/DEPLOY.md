@@ -37,7 +37,7 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/python -m unittest discover tests
-# 114 тестов, сети не требуют
+# 116 тестов, сети не требуют
 ```
 
 ---
