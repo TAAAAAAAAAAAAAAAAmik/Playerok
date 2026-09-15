@@ -10,6 +10,13 @@
 
 ID категории и способа получения берутся из catalog_ids.py.
 
+КАРТИНКА ОБЯЗАТЕЛЬНА, и не по требованию площадки, а из-за ошибки в
+библиотеке: без файлов она отправляет запрос обычным JSON вместо
+multipart, площадка не находит в нём текста запроса и отвечает
+«GraphQL operations must contain a non-empty query». Поэтому либо укажите
+файлы в attachments, либо скопируйте картинки с уже выставленного товара
+полем copy_images_from — так проще всего, загружать ничего не надо.
+
 ПРО ДЕНЬГИ. Создание черновика бесплатно. Выставление — платное, если
 выбрать платный статус приоритета: сумма списывается с баланса площадки.
 Поэтому бот показывает статусы с ценами и СПРАШИВАЕТ, а за платный
@@ -36,6 +43,7 @@ EXAMPLE = {
     "attributes": {},
     "data_fields": [],
     "attachments": [],
+    "copy_images_from": "ID уже выставленного товара — с него возьмём картинки",
 }
 
 REQUIRED = ("category_id", "obtaining_type_id", "name", "price")
@@ -82,11 +90,64 @@ def read_item(path: str) -> dict:
     return data
 
 
+def borrow_images(account, item_id: str) -> list:
+    """Картинки с уже выставленного товара → байты.
+
+    Так их проще всего добыть: ничего не надо загружать на сервер, а
+    оформление у однотипных товаров всё равно общее.
+    """
+    try:
+        source = account.get_item(id=str(item_id))
+    except Exception as e:                                    # noqa: BLE001
+        raise SystemExit(f"Товар {item_id} прочитать не вышло: {e}")
+
+    urls = [getattr(att, "url", "") for att in
+            (getattr(source, "attachments", None) or [])]
+    urls = [u for u in urls if u]
+
+    if not urls:
+        raise SystemExit(
+            f"У товара {item_id} нет картинок — копировать нечего.")
+
+    images = []
+
+    for url in urls:
+        try:
+            images.append(account.download_file(url))
+        except Exception as e:                                # noqa: BLE001
+            print(f"  картинку не забрал: {e}")
+
+    if not images:
+        raise SystemExit("Ни одной картинки скачать не вышло.")
+
+    print(f"Взял картинок с товара {item_id}: {len(images)}")
+
+    return images
+
+
 def create(account, item: dict):
     """Создать черновик. Денег не стоит."""
     fields = [Field(str(f.get("id")), f.get("value"))
               for f in (item.get("data_fields") or [])
               if isinstance(f, dict) and f.get("id")]
+
+    attachments = list(item.get("attachments") or [])
+    source = str(item.get("copy_images_from") or "").strip()
+
+    if not attachments and source:
+        attachments = borrow_images(account, source)
+
+    if not attachments:
+        raise SystemExit(
+            "Нет ни одной картинки, а без них создать товар не получится.\n"
+            "Причина — ошибка в библиотеке: без файлов она шлёт запрос "
+            "обычным JSON вместо multipart, и площадка не находит в нём "
+            "текста запроса.\n"
+            "Проще всего скопировать оформление с уже выставленного "
+            "товара — добавьте в описание строку:\n"
+            '    "copy_images_from": "ID вашего товара"')
+
+    item["attachments"] = attachments
 
     return account.create_item(
         game_category_id=str(item["category_id"]),
@@ -96,7 +157,7 @@ def create(account, item: dict):
         description=str(item.get("description") or ""),
         options=item.get("attributes") or {},
         data_fields=fields,
-        attachments=list(item.get("attachments") or []),
+        attachments=attachments,
     )
 
 
