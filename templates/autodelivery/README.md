@@ -52,6 +52,7 @@ new_item.py        создание товара: черновик, выстав
 my_items.py        мои товары на площадке: ID, названия, статусы
 item_bot.py        создание товара разговором в Telegram, с кнопками
                    и шаблонами
+update.sh          обновить код и перезапустить бота — одной командой
 run_bot.sh         поднять бота (запускает сторожа)
 keep_bot.sh        сторож: поднимает бота после падения
 stop_bot.sh        остановить бота
@@ -66,7 +67,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 426 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 434 теста, сети не требуют
 ```
 
 ---
