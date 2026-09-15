@@ -32,8 +32,18 @@ class FakeAccount:
 
 
 def install_fake_library():
-    """Подсунуть поддельную библиотеку площадки вместо настоящей."""
+    """Подсунуть поддельную библиотеку площадки вместо настоящей.
+
+    С настоящим __file__ и лежащим рядом cacert.pem: без первого код не
+    поймёт, куда класть файл, без второго полез бы его класть.
+    """
+    folder = tempfile.mkdtemp()
+
+    with open(os.path.join(folder, "cacert.pem"), "w", encoding="utf-8") as f:
+        f.write("-----BEGIN CERTIFICATE-----\n")
+
     package = types.ModuleType("playerokapi")
+    package.__file__ = os.path.join(folder, "__init__.py")
     module = types.ModuleType("playerokapi.account")
     module.Account = FakeAccount
     package.account = module
@@ -142,3 +152,59 @@ class SignInTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LibraryCertTest(unittest.TestCase):
+    """Заплатка чужой ошибки: playerokapi читает cacert.pem из своей папки,
+    но в setup.py не включает его в пакет — pip ставит только .py."""
+
+    def setUp(self):
+        sys.modules.pop("auth", None)
+        self.folder = tempfile.mkdtemp()
+        self.package = os.path.join(self.folder, "playerokapi")
+        os.makedirs(self.package)
+        self.bundle = os.path.join(self.folder, "certifi.pem")
+
+        with open(self.bundle, "w", encoding="utf-8") as f:
+            f.write("-----BEGIN CERTIFICATE-----\n")
+
+    def tearDown(self):
+        sys.modules.pop("auth", None)
+
+    def test_missing_file_is_put_in_place(self):
+        import auth
+
+        self.assertTrue(auth.ensure_library_cert(self.package, self.bundle))
+        self.assertTrue(os.path.exists(os.path.join(self.package, "cacert.pem")))
+
+    def test_existing_file_is_left_alone(self):
+        """Своя копия библиотеки может отличаться — не затираем."""
+        import auth
+        target = os.path.join(self.package, "cacert.pem")
+
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("их собственный набор")
+
+        self.assertTrue(auth.ensure_library_cert(self.package, self.bundle))
+
+        with open(target, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "их собственный набор")
+
+    def test_unwritable_place_is_reported_not_crashed(self):
+        import auth
+
+        self.assertFalse(auth.ensure_library_cert("/нет/такой/папки",
+                                                  self.bundle))
+
+    def test_library_without_a_location_is_not_a_crash(self):
+        """У модуля может не быть __file__ — это не повод падать."""
+        import auth
+        package = types.ModuleType("playerokapi")
+        saved = sys.modules.get("playerokapi")
+        sys.modules["playerokapi"] = package
+
+        try:
+            self.assertFalse(auth.ensure_library_cert())
+        finally:
+            if saved is not None:
+                sys.modules["playerokapi"] = saved

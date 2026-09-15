@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from typing import Any
 
 from owner import CookieStore, cookies_now, link_from_env
@@ -36,6 +37,54 @@ def user_agent_from_env() -> str:
             "которого взяты куки: иначе площадка сочтёт вход чужим.")
 
     return user_agent
+
+
+def ensure_library_cert(package_dir: str = "", bundle: str = "") -> bool:
+    """Положить набор корневых сертификатов туда, где библиотека его ищет.
+
+    Заплатка чужой ошибки. playerokapi читает cacert.pem из своей папки, но
+    в setup.py у неё нет ни package_data, ни include_package_data — pip
+    ставит только .py, и первый же вход падает с FileNotFoundError.
+
+    Файл этот не особенный: обычная копия набора certifi, просто более
+    старого выпуска (150 корней против нынешних 137). Берём certifi — он
+    приходит вместе с requests, поддерживается и не содержит просроченных
+    корней.
+
+    Возвращает True, если файл на месте или положен сейчас.
+    """
+    if not package_dir:
+        try:
+            import playerokapi
+        except ImportError:
+            return False
+
+        where = getattr(playerokapi, "__file__", None)
+
+        if not where:
+            return False
+
+        package_dir = os.path.dirname(os.path.abspath(where))
+
+    target = os.path.join(package_dir, "cacert.pem")
+
+    if os.path.exists(target):
+        return True
+
+    if not bundle:
+        try:
+            import certifi
+        except ImportError:
+            return False
+
+        bundle = certifi.where()
+
+    try:
+        shutil.copyfile(bundle, target)
+    except OSError:
+        return False
+
+    return True
 
 
 def open_account(cookies: str, user_agent: str):
@@ -66,6 +115,12 @@ def open_account(cookies: str, user_agent: str):
             f"Библиотека playerokapi установлена, но не загружается: {e}\n"
             "Полную причину покажет:\n"
             "    python3 -c \"import playerokapi\"")
+
+    if not ensure_library_cert():
+        raise SystemExit(
+            "Библиотеке playerokapi не хватает файла cacert.pem, и положить "
+            "его не вышло. Поставьте certifi:\n"
+            "    python3 -m pip install --user --break-system-packages certifi")
 
     # Передаём строку куки целиком: библиотека разберёт её на пары сама.
     # Отдельный параметр token ждёт только JWT, и подсунуть ему всю строку
