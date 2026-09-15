@@ -55,6 +55,7 @@
 """
 from __future__ import annotations
 
+import copy
 import os
 import sys
 import time
@@ -64,11 +65,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 from envfile import load_env_file                             # noqa: E402
 from owner import link_from_env                               # noqa: E402
 import listing                                                # noqa: E402
+import oneshot                                                # noqa: E402
+import series                                                 # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
 from cards import CARDS, card_by_slug                         # noqa: E402
-from catalog import card_for_title, render                    # noqa: E402
+from catalog import (card_for_title, nominal_from_title,      # noqa: E402
+                     render)
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
@@ -80,8 +84,10 @@ from templates import TemplateStore, folder_for               # noqa: E402
 # Кнопки, которые повторяются. Подписи для человека, значения — те же
 # слова, что понимает разбор ответов: нажатие и набранный текст должны
 # приходить в один и тот же разбор.
-MENU = [[("➕ Новый товар", "новый товар")],
-        [("⚡ Из шаблона", "шаблон")],
+MENU = [[("➕ Новый товар", "новый товар"),
+         ("📝 Одним сообщением", "бланк")],
+        [("⚡ Из шаблона", "шаблон"),
+         ("📊 Серия номиналов", "серия")],
         [("📄 Черновики", "черновики")],
         [("⚙️ Автовыдача", "настройки")],
         [("🔑 Проверить сессию", "проверить")],
@@ -92,7 +98,9 @@ MENU = [[("➕ Новый товар", "новый товар")],
 COMMANDS = [
     ("start", "Меню"),
     ("new", "Новый товар"),
+    ("blank", "Одним сообщением"),
     ("tpl", "Создать из шаблона"),
+    ("series", "Серия номиналов из шаблона"),
     ("drafts", "Черновики"),
     ("delivery", "Настройки автовыдачи"),
     ("check", "Проверить сессию"),
@@ -126,6 +134,8 @@ TEMPLATE_WORDS = ("шаблон", "шаблоны", "из шаблона", "/tpl
 ACCOUNT_WORDS = ("аккаунт", "аккаунты", "кабинет", "/account")
 DRAFT_WORDS = ("черновики", "черновик", "/drafts")
 SETTINGS_WORDS = ("настройки", "автовыдача", "/delivery")
+BLANK_WORDS = ("бланк", "одним сообщением", "одно сообщение", "/blank")
+SERIES_WORDS = ("серия", "серия номиналов", "номиналы", "/series")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -148,6 +158,7 @@ PICK_DRAFT = "drf:"
 PICK_WAY = "way:"
 PICK_CARD = "crd:"
 PICK_SET = "set:"
+PICK_SERIES = "ser:"
 
 # Где лежит состояние выдачи: и настройки, и журнал выданных заказов. На
 # кабинет: товары и слова-опознаватели у разных кабинетов разные, а
@@ -656,38 +667,168 @@ def apply_card_template(draft: wizard.Draft) -> None:
                         draft.region, draft.price)
 
 
+def make_blank(link, account) -> None:
+    """Товар одним сообщением: заготовка → ответ → картинки → черновик.
+
+    Выбор на площадке всё равно кнопками: игру и категорию надо искать в
+    её справочнике, а состав полей известен только после категории — из
+    неё и собирается заготовка. Зато дальше один обмен вместо шести.
+    """
+    draft = wizard.Draft()
+    link.screen("Создаём одним сообщением. Сначала — куда.")
+
+    for step in ("game", "category", "obtaining"):
+        if not CHOOSE[step](link, account, draft):
+            return
+
+    # Характеристики кнопками: площадка предлагает свой список, и вписать
+    # их текстом нельзя — она принимает только свои значения.
+    while draft.step.startswith(wizard.OPTION):
+        if not choose_option(link, account, draft):
+            return
+
+    labels = [str(f.get("label") or "") for f in draft.fields]
+    # Карту узнаём по игре, а не по категории: категория называется
+    # «Игровая валюта», и такое имя не скажет ничего.
+    card = card_for_title(CARDS, str(draft.game.get("name") or ""))
+    form = oneshot.blank(labels, card)
+
+    # Заготовка отдельным сообщением: её продавец копирует целиком, а
+    # экран под ней перепишется следующим вопросом.
+    link.forget_screen()
+    link.say(form)
+
+    answer = link.ask(
+        "Скопируйте это сообщение, впишите своё и пришлите одним ответом.\n\n"
+        "Порядок строк любой, лишние можно удалить. Описание можно в "
+        "несколько строк — всё, что ниже «Описание:», попадёт в него.",
+        ANSWER_WAIT, buttons=[CANCEL])
+    text = str(answer.get("text") or "")
+
+    if not text.strip() or wizard.cancelled(text):
+        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+        return
+
+    if not apply_blank(link, draft, text):
+        return
+
+    if not ask_photos(link, draft):
+        return
+
+    apply_card_template(draft)
+    link.screen("Проверьте:\n\n" + draft.summary()
+                + "\n\n— описание —\n" + wizard.description_for(draft)
+                + "\n\nСоздаю черновик…")
+
+    if send_draft(link, account, draft):
+        offer_template(link, draft)
+
+
+def apply_blank(link, draft: wizard.Draft, text: str) -> bool:
+    """Разложить присланное по черновику. → можно ли продолжать."""
+    labels = [str(f.get("label") or "") for f in draft.fields]
+    values = oneshot.parse(text, labels)
+    complaints = []
+
+    for key, value in values.items():
+        if key.startswith("field:"):
+            field = next((f for f in draft.fields
+                          if str(f.get("label") or "") == key[6:]), None)
+
+            if field is not None:
+                field["value"] = " ".join(str(value).split())
+
+            continue
+
+        why = wizard.accept_one(draft, key, value)
+
+        if why:
+            complaints.append(f"{oneshot.KEYS[key][0]}: {why}")
+
+    # Пустые необязательные поля надо закрыть, иначе мастер будет их ждать.
+    for field in draft.fields:
+        if field.get("value") is None and not field.get("required"):
+            field["value"] = ""
+
+    if draft.description is None:
+        draft.description = ""
+
+    gaps = oneshot.missing(values, draft.fields)
+
+    if gaps:
+        complaints.append("не хватает: " + ", ".join(gaps))
+
+    if not draft.nominal:
+        # Не отказ: номинал нужен выдаче, а не площадке. Но сказать надо —
+        # без него бот при оплате остановится, и узнает продавец об этом,
+        # когда покупатель уже заплатит.
+        complaints.append(
+            "номинала нет ни в названии, ни строкой «Номинал» — "
+            "автовыдача по такому товару работать не будет")
+
+    if complaints:
+        # Показываем всё разом, а не по одной: исправлять придётся в том же
+        # сообщении, и знать надо про все промахи сразу.
+        answer = link.ask(
+            "Прочитал так:\n\n" + draft.summary() + "\n\n⚠️ "
+            + "\n⚠️ ".join(complaints)
+            + "\n\nПришлите исправленное сообщение целиком — или "
+              "«продолжить», если так и задумано.",
+            ANSWER_WAIT,
+            buttons=[[("▶️ Продолжить", "продолжить")], CANCEL])
+        again = str(answer.get("text") or "")
+
+        if wizard.cancelled(again):
+            link.screen("Отменил. Ничего не создано.", buttons=MENU)
+            return False
+
+        if again.strip().lower() != "продолжить":
+            return apply_blank(link, draft, again)
+
+        if oneshot.missing(values, draft.fields):
+            link.screen("Без названия и цены товар не создать.", buttons=MENU)
+            return False
+
+    return True
+
+
+def ask_photos(link, draft: wizard.Draft) -> bool:
+    """Собрать картинки. → продолжать ли."""
+    message = link.ask(
+        "Теперь фотографии — по одной. Когда хватит, нажмите «Готово».\n\n"
+        "Хотя бы одна обязательна: без картинок площадка товар не "
+        "принимает.", ANSWER_WAIT, buttons=[PHOTOS_DONE])
+
+    if not message:
+        link.screen("Не дождался. Начнём заново, когда будете готовы.",
+                    buttons=MENU)
+        return False
+
+    return collect_photos(link, draft, message)
+
+
 def send_draft(link, account, draft: wizard.Draft) -> bool:
     """Создать черновик и спросить про выставление. → получилось ли."""
-    fields = [Field(f["id"], f["value"]) for f in draft.filled_fields()]
+    item_id, why = create_item(account, draft)
 
-    try:
-        item = account.create_item(
-            game_category_id=draft.category["id"],
-            obtaining_type_id=draft.obtaining["id"],
-            name=draft.name,
-            price=draft.price,
-            description=wizard.description_for(draft),
-            options=draft.attributes(),
-            data_fields=fields,
-            attachments=list(draft.photos),
-        )
-    except Exception as e:                                    # noqa: BLE001
+    if not item_id:
         # Отказ во входе лечится не повтором, а свежими куками — и сказать
         # об этом надо прямо здесь, иначе продавец будет жать «ещё раз».
-        if is_auth_error(e):
+        if is_auth_error_text(why):
             link.screen(f"Создать не вышло: площадка не приняла вход.\n\n"
-                     f"{COOKIES_ADVICE}", buttons=MENU)
+                        f"{COOKIES_ADVICE}", buttons=MENU)
         else:
-            link.screen(f"Создать не вышло: {e}\n"
-                     "Ничего не потрачено. Попробуем ещё раз.", buttons=MENU)
+            link.screen(f"Создать не вышло: {why}\n"
+                        "Ничего не потрачено. Попробуем ещё раз.",
+                        buttons=MENU)
 
         return False
 
     # Ссылка на товар остаётся в переписке отдельным сообщением: её
     # открывают потом, а экран к тому времени перепишется.
     link.forget_screen()
-    link.say(f"Черновик создан.\nhttps://playerok.com/products/{item.id}")
-    publish_step(link, account, item.id, draft.price)
+    link.say(f"Черновик создан.\nhttps://playerok.com/products/{item_id}")
+    publish_step(link, account, item_id, draft.price)
 
     return True
 
@@ -907,6 +1048,7 @@ def make_from_template(link, account, store, template_id: str) -> None:
     draft = wizard.Draft()
     draft.name = template.name
     draft.price = template.price
+    draft.nominal = nominal_from_title(template.name) or 0.0
     draft.region = template.region
     draft.description = template.description
     draft.game = template.game
@@ -918,6 +1060,190 @@ def make_from_template(link, account, store, template_id: str) -> None:
 
     link.screen(f"Повторяю:\n\n{draft.summary()}\n\nСоздаю черновик…")
     send_draft(link, account, draft)
+
+
+def series_menu(link, account) -> None:
+    """Серия объявлений из одного шаблона: остальные номиналы."""
+    store = templates_of()
+    saved = store.all()
+
+    if not saved:
+        link.screen(
+            "Шаблонов пока нет.\n\nСоздайте одно объявление на любой "
+            "номинал, сохраните его шаблоном — и отсюда я выставлю "
+            "остальные номиналы, меняя только число и цену.", buttons=MENU)
+        return
+
+    keys = [[(t.label(), PICK_SERIES + t.id)] for t in saved[:MAX_CHOICES]]
+    keys.append([("✖️ Назад", "отмена")])
+    answer = link.ask("С какого объявления делаем серию?", ANSWER_WAIT,
+                      buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_SERIES):
+        link.screen("Отменил.", buttons=MENU)
+        return
+
+    make_series(link, account, store, text[len(PICK_SERIES):])
+
+
+def make_series(link, account, store, template_id: str) -> None:
+    """Спросить номиналы с ценами, показать план, создать по согласию."""
+    template = store.get(template_id)
+
+    if template is None:
+        link.screen("Такого шаблона больше нет.", buttons=MENU)
+        return
+
+    if not template.complete():
+        link.screen("Этот шаблон сохранён до того, как бот стал спрашивать "
+                    "категорию, и повторить его нечем.", buttons=MENU)
+        return
+
+    photos = template.photos()
+
+    if not photos:
+        link.screen("У шаблона пропали картинки — без них товар не создать.",
+                    buttons=MENU)
+        return
+
+    old = nominal_from_title(template.name)
+
+    if not old:
+        link.screen(
+            f"В названии «{template.name}» нет числа, а серия строится "
+            f"заменой числа на новое. Переименуйте шаблон так, чтобы "
+            f"номинал был в названии.", buttons=MENU)
+        return
+
+    answer = link.ask(
+        f"Образец: «{template.name}» — номинал {old:g}, цена "
+        f"{template.price} ₽.\n\n"
+        f"Пришлите остальные номиналы с ценами, по одному в строке:\n\n"
+        f"200 = 140\n400 = 280\n800 = 560\n\n"
+        f"Всё остальное — категория, характеристики, картинки, описание — "
+        f"возьму из образца.", ANSWER_WAIT, buttons=[CANCEL])
+    text = str(answer.get("text") or "")
+
+    if not text.strip() or wizard.cancelled(text):
+        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+        return
+
+    rows, bad = series.parse(text)
+    jobs, refused = series.plan(template.name, template.description, old, rows)
+
+    if not jobs:
+        link.screen("Создавать нечего.\n\n"
+                    + "\n".join(bad + refused), buttons=MENU)
+        return
+
+    count = plural(len(jobs), "объявление", "объявления",
+                    "объявлений")
+    lines = [f"Создам {count}:", ""]
+    lines += [f"• {j['name']} — {j['price']} ₽" for j in jobs]
+
+    if bad or refused:
+        # Пропущенное показываем здесь же: молча пропустить строку значит
+        # оставить продавца без объявления, которого он ждал.
+        lines += ["", "Пропущу:"] + [f"• {b}" for b in bad + refused]
+
+    answer = link.ask("\n".join(lines) + "\n\nСоздаём?", ANSWER_WAIT,
+                      buttons=[[("✅ Да, создать", "да")], CANCEL])
+
+    if str(answer.get("text") or "").strip().lower() != "да":
+        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+        return
+
+    run_series(link, account, template, photos, jobs)
+
+
+def run_series(link, account, template, photos, jobs) -> None:
+    """Создать объявления по плану, показывая ход одним экраном."""
+    done, failed = [], []
+
+    for number, job in enumerate(jobs, start=1):
+        link.screen(f"Создаю {number} из {len(jobs)}: {job['name']}…")
+
+        draft = wizard.Draft()
+        draft.name = job["name"]
+        draft.price = job["price"]
+        draft.nominal = job["nominal"]
+        draft.region = template.region
+        draft.description = job["description"]
+        draft.game = template.game
+        draft.category = template.category
+        draft.obtaining = template.obtaining
+        # Своя копия полей и характеристик на каждое объявление: один
+        # список на все означал бы, что правка в третьем меняет первое.
+        draft.fields = copy.deepcopy(template.fields)
+        draft.options = copy.deepcopy(template.options)
+        draft.photos = list(photos)
+
+        item_id, why = create_item(account, draft)
+
+        if item_id:
+            done.append((job["name"], item_id))
+        else:
+            failed.append(f"{job['name']}: {why}")
+
+            if is_auth_error_text(why):
+                # Дальше пойдут те же отказы: площадка не приняла вход, и
+                # каждая следующая попытка — это минута ожидания впустую.
+                failed.append("остальные не пробовал — сначала вход")
+                break
+
+    lines = [f"Готово: {len(done)} из {len(jobs)}.", ""]
+    lines += [f"✅ {name}\nhttps://playerok.com/products/{item_id}"
+              for name, item_id in done]
+
+    if failed:
+        lines += ["", "Не получилось:"] + [f"⚠️ {f}" for f in failed]
+
+    # Ссылки отдельным сообщением: их открывают потом, а экран перепишется.
+    link.forget_screen()
+    link.say("\n".join(lines))
+    link.screen("Черновики созданы. Выставить их — «📄 Черновики».",
+                buttons=MENU)
+
+
+def plural(count: int, one: str, few: str, many: str) -> str:
+    """«1 объявление», «2 объявления», «5 объявлений»."""
+    tail, hundred = count % 10, count % 100
+
+    if tail == 1 and hundred != 11:
+        word = one
+    elif 2 <= tail <= 4 and not 12 <= hundred <= 14:
+        word = few
+    else:
+        word = many
+
+    return f"{count} {word}"
+
+
+def create_item(account, draft: wizard.Draft):
+    """Создать черновик → (номер товара, причина отказа)."""
+    fields = [Field(f["id"], f["value"]) for f in draft.filled_fields()]
+
+    try:
+        item = account.create_item(
+            game_category_id=draft.category["id"],
+            obtaining_type_id=draft.obtaining["id"],
+            name=draft.name,
+            price=draft.price,
+            description=wizard.description_for(draft),
+            options=draft.attributes(),
+            data_fields=fields,
+            attachments=list(draft.photos),
+        )
+    except Exception as e:                                    # noqa: BLE001
+        return "", str(e)
+
+    return str(item.id), ""
+
+
+def is_auth_error_text(why: str) -> bool:
+    """Отказ во входе, узнанный по тексту уже пойманной ошибки."""
+    return is_auth_error(Exception(str(why)))
 
 
 def settings_of() -> Settings:
@@ -1665,7 +1991,8 @@ def handle_command(link, account, text: str):
         return account
 
     if text in START_WORDS or text in TEMPLATE_WORDS \
-            or text in DRAFT_WORDS or text in CHECK_WORDS:
+            or text in DRAFT_WORDS or text in CHECK_WORDS \
+            or text in BLANK_WORDS or text in SERIES_WORDS:
         if account is None:
             link.screen("Сначала нужен рабочий кабинет: откройте "
                         "«Аккаунт».", buttons=MENU)
@@ -1673,6 +2000,12 @@ def handle_command(link, account, text: str):
 
     if text in START_WORDS:
         make_item(link, account)
+        link.screen("Готов к следующему.", buttons=MENU)
+    elif text in BLANK_WORDS:
+        make_blank(link, account)
+        link.screen("Готов к следующему.", buttons=MENU)
+    elif text in SERIES_WORDS:
+        series_menu(link, account)
         link.screen("Готов к следующему.", buttons=MENU)
     elif text in TEMPLATE_WORDS:
         from_template(link, account)

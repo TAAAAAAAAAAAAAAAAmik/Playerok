@@ -221,8 +221,14 @@ class Draft:
                              f"{option.get('chosen') or option['value']}")
 
         lines += [f"Название: {self.name}",
-                  f"Цена: {self.price} ₽",
-                  f"Регион: {self.region}"]
+                  f"Цена: {self.price} ₽"]
+
+        # Номинал показываем всегда, даже когда его нет: по нему бот
+        # покупает у поставщика, и пустое место здесь продавец должен
+        # заметить до того, как товар уйдёт на витрину.
+        lines.append(f"Номинал: {self.nominal:g}" if self.nominal
+                     else "Номинал: — не понял, автовыдача работать не будет")
+        lines.append(f"Регион: {self.region}")
 
         for field in self.filled_fields():
             lines.append(f"{field.get('label') or 'Поле'}: {field['value']}")
@@ -443,6 +449,35 @@ def apply(draft: Draft, text: str) -> str:
         # Номинал обычно виден прямо в названии — берём молча. Спрашивать
         # то, что уже знаешь, значит лишнее нажатие на каждом товаре;
         # шаг «nominal» появится, только если число не нашлось.
+        draft.nominal = nominal_from_title(value) or 0.0
+
+    return ""
+
+
+def accept_one(draft: Draft, field: str, text: str) -> str:
+    """Принять одно поле по имени, не глядя на текущий шаг.
+
+    Нужно разбору «одним сообщением»: там поля приходят все сразу и в
+    любом порядке, а `apply` умеет только следующий по очереди шаг.
+
+    Проверки те же самые — иначе через этот путь в товар попало бы то,
+    что пошаговый опрос отверг бы: цена с копейками, чужой регион.
+    """
+    accept = ACCEPT.get(field)
+
+    if accept is None:
+        return ""
+
+    value, why = accept(text)
+
+    if why:
+        return why
+
+    setattr(draft, field, value)
+
+    if field == "name" and not draft.nominal:
+        # Номинал из названия — как и в пошаговом опросе. «Не затирать
+        # заданное» важно: строка «Номинал» могла прийти раньше названия.
         draft.nominal = nominal_from_title(value) or 0.0
 
     return ""
