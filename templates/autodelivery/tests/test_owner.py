@@ -208,6 +208,32 @@ class NetworkTest(unittest.TestCase):
             OwnerLink("token", "")
 
 
+class WhoamiTest(unittest.TestCase):
+    """Самопроверка: токен живой и бот тот самый."""
+
+    def test_bot_identity_is_returned(self):
+        class Telegram(FakeTelegram):
+            def post(self, url, json=None, timeout=None):     # noqa: A002
+                if url.endswith("getMe"):
+                    return FakeResponse(
+                        {"ok": True, "result": {"username": "kinetix_bot"}})
+
+                return super().post(url, json=json, timeout=timeout)
+
+        self.assertEqual(link(Telegram()).whoami()["username"], "kinetix_bot")
+
+    def test_refused_token_is_raised_not_swallowed(self):
+        """В отличие от say(), здесь молчать нельзя: это и есть проверка."""
+        class Telegram(FakeTelegram):
+            def post(self, url, json=None, timeout=None):     # noqa: A002
+                return FakeResponse({"ok": False, "description": "Unauthorized"})
+
+        with self.assertRaises(RuntimeError) as failure:
+            link(Telegram()).whoami()
+
+        self.assertIn("Unauthorized", str(failure.exception))
+
+
 class CookieStoreTest(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.mkdtemp()
