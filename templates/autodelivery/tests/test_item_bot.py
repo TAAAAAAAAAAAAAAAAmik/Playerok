@@ -28,6 +28,7 @@ class FakeLink:
         self.answers = list(answers or [])
         self.said = []
         self.asked = []
+        self.screens = []
         self.deleted = []
 
     def _delete(self, message):
@@ -37,6 +38,16 @@ class FakeLink:
     def say(self, text, buttons=None):
         self.said.append(text)
         return True
+
+    def screen(self, text, buttons=None):
+        """Экран: в жизни переписывает одно сообщение, здесь — просто
+        запоминаем, чтобы тесты видели сказанное."""
+        self.said.append(text)
+        self.screens.append(text)
+        return True
+
+    def forget_screen(self):
+        self.screens.append(None)
 
     def ask(self, question, wait_seconds=0, buttons=None):
         self.asked.append((question, buttons))

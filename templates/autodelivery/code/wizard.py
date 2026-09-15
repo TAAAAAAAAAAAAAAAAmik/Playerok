@@ -280,6 +280,52 @@ ACCEPT = {"name": accept_name, "price": accept_price, "region": accept_region,
           "description": accept_description}
 
 
+def progress(draft: Draft) -> str:
+    """Что уже собрано — коротко, для экрана диалога.
+
+    Диалог живёт в одном переписываемом сообщении, и без этого списка
+    введённое исчезало бы с каждым новым вопросом: продавец не видел бы ни
+    что уже ответил, ни где ошибся.
+    """
+    lines = []
+
+    for label, value in (
+            ("Игра", (draft.game or {}).get("name")),
+            ("Категория", (draft.category or {}).get("name")),
+            ("Получение", (draft.obtaining or {}).get("name"))):
+        if value:
+            lines.append(f"✓ {label}: {value}")
+
+    for option in draft.options:
+        if option.get("value") not in (None, ""):
+            lines.append(f"✓ {option.get('group') or 'Характеристика'}: "
+                         f"{option.get('chosen') or option['value']}")
+
+    if draft.name:
+        lines.append(f"✓ Название: {draft.name}")
+
+    if draft.price:
+        lines.append(f"✓ Цена: {draft.price} ₽")
+
+    if draft.region:
+        lines.append(f"✓ Регион: {draft.region}")
+
+    if draft.description is not None:
+        first = (draft.description or DEFAULT_TAIL).splitlines()[0]
+        lines.append(f"✓ Описание: {first[:40]}"
+                     + ("…" if len(first) > 40 else ""))
+
+    for field in draft.fields:
+        if field.get("value") is not None:
+            shown = field["value"] or "—"
+            lines.append(f"✓ {field.get('label') or 'Поле'}: {shown}")
+
+    if draft.photos:
+        lines.append(f"✓ Фотографий: {len(draft.photos)}")
+
+    return "\n".join(lines)
+
+
 def question_for(draft: Draft) -> str:
     """Что спросить сейчас. Пусто — спрашивать нечего."""
     step = draft.step

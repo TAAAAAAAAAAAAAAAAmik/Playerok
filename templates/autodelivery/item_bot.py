@@ -140,6 +140,18 @@ def photo_id(message: dict) -> str:
     return ""
 
 
+def screen_text(draft, question: str, complaint: str = "") -> str:
+    """Экран диалога: что собрано, что не так и что спрашиваем.
+
+    Всё одним сообщением: диалог из десятка шагов, каждый из которых новое
+    сообщение, превращает переписку в простыню, где не найти ни меню, ни
+    собственных ответов.
+    """
+    done = wizard.progress(draft)
+
+    return "\n\n".join(p for p in (done, complaint, question) if p)
+
+
 def buttons_for(step: str):
     """Кнопки под вопрос. Там, где ответ свободный, кнопок нет.
 
@@ -191,7 +203,8 @@ def choose(link, question, rows, prefix, wait=None):
 
 def choose_game(link, account, draft) -> bool:
     """Спросить игру и найти её у площадки. → продолжать ли."""
-    answer = link.ask(wizard.question_for(draft), ANSWER_WAIT, buttons=[CANCEL])
+    answer = link.ask(screen_text(draft, wizard.question_for(draft)),
+                      ANSWER_WAIT, buttons=[CANCEL])
     search = str(answer.get("text") or "").strip()
 
     if not search or wizard.cancelled(search):
@@ -201,19 +214,19 @@ def choose_game(link, account, draft) -> bool:
         page = account.get_games(name=search, count=MAX_CHOICES)
         games = list(getattr(page, "games", None) or [])
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Поиск не удался: {e}")
+        link.screen(f"Поиск не удался: {e}")
         return True
 
     if not games:
-        link.say(f"По запросу «{search}» ничего не нашлось. Попробуйте "
+        link.screen(f"По запросу «{search}» ничего не нашлось. Попробуйте "
                  "короче.")
         return True
 
-    chosen = choose(link, "Что из этого?",
+    chosen = choose(link, screen_text(draft, "Что из этого?"),
                     [(g.id, g.name) for g in games], PICK_GAME)
 
     if chosen is None:
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return False
 
     draft.game = chosen
@@ -227,19 +240,19 @@ def choose_category(link, account, draft) -> bool:
         game = account.get_game(id=draft.game["id"])
         rows = list(getattr(game, "categories", None) or [])
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Категории прочитать не вышло: {e}")
+        link.screen(f"Категории прочитать не вышло: {e}")
         return False
 
     if not rows:
-        link.say("У этой игры нет категорий — товар создать негде.",
+        link.screen("У этой игры нет категорий — товар создать негде.",
                  buttons=MENU)
         return False
 
-    chosen = choose(link, wizard.question_for(draft),
+    chosen = choose(link, screen_text(draft, wizard.question_for(draft)),
                     [(c.id, c.name) for c in rows], PICK_CATEGORY)
 
     if chosen is None:
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return False
 
     draft.category = chosen
@@ -254,18 +267,18 @@ def choose_obtaining(link, account, draft) -> bool:
             draft.category["id"], count=MAX_CHOICES)
         rows = list(getattr(page, "obtaining_types", None) or [])
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Способы получения прочитать не вышло: {e}")
+        link.screen(f"Способы получения прочитать не вышло: {e}")
         return False
 
     if not rows:
-        link.say("У этой категории нет способов получения.", buttons=MENU)
+        link.screen("У этой категории нет способов получения.", buttons=MENU)
         return False
 
-    chosen = choose(link, wizard.question_for(draft),
+    chosen = choose(link, screen_text(draft, wizard.question_for(draft)),
                     [(o.id, o.name) for o in rows], PICK_OBTAINING)
 
     if chosen is None:
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return False
 
     draft.obtaining = chosen
@@ -332,18 +345,18 @@ def choose_option(link, account, draft) -> bool:
             for number, c in enumerate(choices[:MAX_CHOICES])]
     keys.append([("✖️ Отмена", "отмена")])
     title = option.get("group") or wizard.QUESTIONS["options"]
-    answer = link.ask(f"{title}?" if not title.endswith(".") else title,
-                      ANSWER_WAIT, buttons=keys)
+    answer = link.ask(screen_text(draft, f"{title}?" if not title.endswith(".")
+                                  else title), ANSWER_WAIT, buttons=keys)
     text = str(answer.get("text") or "").strip()
 
     if not text.startswith(PICK_OPTION):
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return False
 
     number = text[len(PICK_OPTION):]
 
     if not number.isdigit() or int(number) >= len(choices):
-        link.say("Не понял выбор.")
+        link.screen("Не понял выбор.")
         return True
 
     picked = choices[int(number)]
@@ -410,21 +423,20 @@ def collect(link, account, draft: wizard.Draft) -> bool:
 
             continue
 
-        question = wizard.question_for(draft)
-        message = link.ask(f"{complaint}\n\n{question}" if complaint
-                           else question,
-                           ANSWER_WAIT, buttons=buttons_for(step))
+        message = link.ask(
+            screen_text(draft, wizard.question_for(draft), complaint),
+            ANSWER_WAIT, buttons=buttons_for(step))
         complaint = ""
 
         if not message:
-            link.say("Не дождался ответа. Начнём заново, когда будете "
+            link.screen("Не дождался ответа. Начнём заново, когда будете "
                      "готовы.", buttons=MENU)
             return False
 
         text = str(message.get("text") or "")
 
         if wizard.cancelled(text):
-            link.say("Отменил. Ничего не создано.")
+            link.screen("Отменил. Ничего не создано.", buttons=MENU)
             return False
 
         if step != "photos":
@@ -441,40 +453,50 @@ def collect_photos(link, draft: wizard.Draft, message: dict) -> bool:
         text = str(message.get("text") or "")
 
         if wizard.cancelled(text):
-            link.say("Отменил. Ничего не создано.")
+            link.screen("Отменил. Ничего не создано.", buttons=MENU)
             return False
 
         if wizard.enough_photos(text):
             if draft.photos:
                 return True
 
-            link.say("Пока ни одной фотографии. Хотя бы одна обязательна — "
-                     "без картинок площадка товар не принимает.",
-                     buttons=[PHOTOS_DONE])
+            link.screen(screen_text(
+                draft, wizard.question_for(draft),
+                "Пока ни одной фотографии. Хотя бы одна обязательна — без "
+                "картинок площадка товар не принимает."),
+                buttons=[PHOTOS_DONE])
         else:
             file_id = photo_id(message)
 
             if not file_id:
-                link.say("Это не фотография. Пришлите картинку, а когда "
-                         "хватит — нажмите «Готово».",
-                         buttons=[PHOTOS_DONE])
+                link.screen(screen_text(
+                    draft, wizard.question_for(draft),
+                    "Это не фотография. Пришлите картинку, а когда хватит "
+                    "— нажмите «Готово»."), buttons=[PHOTOS_DONE])
             else:
                 data = link.download(file_id)
 
                 if not data:
-                    link.say("Забрать картинку не вышло. Пришлите ещё раз.",
-                             buttons=[PHOTOS_DONE])
+                    link.screen(screen_text(
+                        draft, wizard.question_for(draft),
+                        "Забрать картинку не вышло. Пришлите ещё раз."),
+                        buttons=[PHOTOS_DONE])
                 else:
                     draft.photos.append(data)
-                    link.say(f"Принял. Всего: {len(draft.photos)}. "
-                             f"Ещё одну или заканчиваем?",
-                             buttons=[PHOTOS_DONE])
+                    link.screen(screen_text(
+                        draft, "Ещё одну или заканчиваем?"),
+                        buttons=[PHOTOS_DONE])
 
         message = link.wait_answer(ANSWER_WAIT)
 
         if not message:
-            link.say("Не дождался. Начнём заново.", buttons=MENU)
+            link.screen("Не дождался. Начнём заново.", buttons=MENU)
             return False
+
+        if not message.get("from_button"):
+            # Присланная фотография тоже уезжает: экран должен оставаться
+            # последним, иначе кнопки теряются в середине переписки.
+            link._delete(message)
 
 
 def publish_step(link, account, item_id: str, price: int) -> None:
@@ -482,14 +504,14 @@ def publish_step(link, account, item_id: str, price: int) -> None:
     try:
         statuses = account.get_item_priority_statuses(item_id, price)
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Статусы приоритета прочитать не вышло: {e}\n"
+        link.screen(f"Статусы приоритета прочитать не вышло: {e}\n"
                  "Товар остался черновиком, выставьте его в кабинете.")
         return
 
     rows = listing.ordered(statuses or [])
 
     if not rows:
-        link.say("Статусов приоритета нет — выставить нечем. "
+        link.screen("Статусов приоритета нет — выставить нечем. "
                  "Товар остался черновиком.")
         return
 
@@ -504,7 +526,7 @@ def publish_step(link, account, item_id: str, price: int) -> None:
     chosen = listing.pick(rows, str(answer.get("text") or ""))
 
     if chosen is None:
-        link.say("Оставил черновиком. Выставить можно в кабинете.")
+        link.screen("Оставил черновиком. Выставить можно в кабинете.")
         return
 
     if listing.needs_confirmation(chosen):
@@ -521,28 +543,29 @@ def publish_step(link, account, item_id: str, price: int) -> None:
                      [("✖️ Нет, оставить черновиком", "нет")]])
 
         if not listing.confirmed(str(again.get("text") or "")):
-            link.say("Не подтверждено. Оставил черновиком.")
+            link.screen("Не подтверждено. Оставил черновиком.")
             return
 
     try:
         account.publish_item(item_id, chosen.id)
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Выставить не вышло: {e}\n"
+        link.screen(f"Выставить не вышло: {e}\n"
                  "Черновик при этом цел и виден в кабинете.")
         return
 
+    link.forget_screen()
     link.say(f"Выставлено: {listing.describe(chosen)}")
 
 
 def make_item(link, account) -> None:
     """Один проход: опрос, черновик, выставление."""
     draft = wizard.Draft()
-    link.say("Создаём товар. В любой момент — «Отмена».")
+    link.screen("Создаём товар. В любой момент — «Отмена».")
 
     if not collect(link, account, draft):
         return
 
-    link.say("Проверьте:\n\n" + draft.summary()
+    link.screen("Проверьте:\n\n" + draft.summary()
              + "\n\n— описание —\n" + wizard.description_for(draft)
              + "\n\nСоздаю черновик…")
 
@@ -571,14 +594,17 @@ def send_draft(link, account, draft: wizard.Draft) -> bool:
         # Отказ во входе лечится не повтором, а свежими куками — и сказать
         # об этом надо прямо здесь, иначе продавец будет жать «ещё раз».
         if is_auth_error(e):
-            link.say(f"Создать не вышло: площадка не приняла вход.\n\n"
+            link.screen(f"Создать не вышло: площадка не приняла вход.\n\n"
                      f"{COOKIES_ADVICE}", buttons=MENU)
         else:
-            link.say(f"Создать не вышло: {e}\n"
+            link.screen(f"Создать не вышло: {e}\n"
                      "Ничего не потрачено. Попробуем ещё раз.", buttons=MENU)
 
         return False
 
+    # Ссылка на товар остаётся в переписке отдельным сообщением: её
+    # открывают потом, а экран к тому времени перепишется.
+    link.forget_screen()
     link.say(f"Черновик создан.\nhttps://playerok.com/products/{item.id}")
     publish_step(link, account, item.id, draft.price)
 
@@ -621,10 +647,10 @@ def offer_template(link, draft: wizard.Draft) -> None:
                    obtaining=draft.obtaining, fields=draft.fields,
                    options=draft.options)
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Сохранить шаблон не вышло: {e}")
+        link.screen(f"Сохранить шаблон не вышло: {e}")
         return
 
-    link.say("Шаблон сохранён.")
+    link.screen("Шаблон сохранён.")
 
 
 def from_template(link, account) -> None:
@@ -633,7 +659,7 @@ def from_template(link, account) -> None:
     saved = store.all()
 
     if not saved:
-        link.say("У этого кабинета шаблонов пока нет. Создайте товар и "
+        link.screen("У этого кабинета шаблонов пока нет. Создайте товар и "
                  "сохраните его шаблоном — дальше он будет создаваться "
                  "одним нажатием.", buttons=MENU)
         return
@@ -644,14 +670,14 @@ def from_template(link, account) -> None:
     text = str(answer.get("text") or "").strip()
 
     if not text.startswith(PICK):
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return
 
     template_id = text[len(PICK):]
     template = store.get(template_id)
 
     if template is None:
-        link.say("Такого шаблона больше нет.", buttons=MENU)
+        link.screen("Такого шаблона больше нет.", buttons=MENU)
         return
 
     answer = link.ask(
@@ -663,7 +689,7 @@ def from_template(link, account) -> None:
     what = str(answer.get("text") or "")
 
     if not what.startswith(PICK_ACT):
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return
 
     what = what[len(PICK_ACT):]
@@ -687,13 +713,13 @@ def drop_template(link, store, template) -> None:
         buttons=[[("🗑 Да, удалить", "да")], [("✖️ Нет", "отмена")]])
 
     if str(answer.get("text") or "").strip().lower() != "да":
-        link.say("Оставил.", buttons=MENU)
+        link.screen("Оставил.", buttons=MENU)
         return
 
     if store.remove(template.id):
-        link.say("Удалил.", buttons=MENU)
+        link.screen("Удалил.", buttons=MENU)
     else:
-        link.say("Удалить не вышло.", buttons=MENU)
+        link.screen("Удалить не вышло.", buttons=MENU)
 
 
 def edit_template(link, store, template_id: str) -> None:
@@ -701,7 +727,7 @@ def edit_template(link, store, template_id: str) -> None:
     template = store.get(template_id)
 
     if template is None:
-        link.say("Такого шаблона больше нет.", buttons=MENU)
+        link.screen("Такого шаблона больше нет.", buttons=MENU)
         return
 
     answer = link.ask(
@@ -715,7 +741,7 @@ def edit_template(link, store, template_id: str) -> None:
     what = str(answer.get("text") or "")
 
     if not what.startswith(PICK_ACT):
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return
 
     what = what[len(PICK_ACT):]
@@ -739,38 +765,38 @@ def edit_template(link, store, template_id: str) -> None:
         value, why = wizard.accept_description(str(answer.get("text") or ""))
 
     if wizard.cancelled(str(answer.get("text") or "")):
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return
 
     if why:
-        link.say(why + "\n\nОставил как было.", buttons=MENU)
+        link.screen(why + "\n\nОставил как было.", buttons=MENU)
         return
 
     if store.update(template_id, **{what: value}):
-        link.say("Поправил.", buttons=MENU)
+        link.screen("Поправил.", buttons=MENU)
     else:
-        link.say("Сохранить не вышло.", buttons=MENU)
+        link.screen("Сохранить не вышло.", buttons=MENU)
 
 
 def edit_photos(link, store, template_id: str) -> None:
     """Заменить картинки шаблона целиком."""
     draft = wizard.Draft()
-    link.say("Пришлите новые фотографии — они заменят прежние целиком.",
+    link.screen("Пришлите новые фотографии — они заменят прежние целиком.",
              buttons=[PHOTOS_DONE])
     message = link.wait_answer(ANSWER_WAIT)
 
     if not message:
-        link.say("Не дождался.", buttons=MENU)
+        link.screen("Не дождался.", buttons=MENU)
         return
 
     if not collect_photos(link, draft, message):
         return
 
     if store.set_photos(template_id, draft.photos):
-        link.say(f"Заменил. Теперь фотографий: {len(draft.photos)}.",
+        link.screen(f"Заменил. Теперь фотографий: {len(draft.photos)}.",
                  buttons=MENU)
     else:
-        link.say("Сохранить не вышло.", buttons=MENU)
+        link.screen("Сохранить не вышло.", buttons=MENU)
 
 
 def make_from_template(link, account, store, template_id: str) -> None:
@@ -778,13 +804,13 @@ def make_from_template(link, account, store, template_id: str) -> None:
     template = store.get(template_id)
 
     if template is None:
-        link.say("Такого шаблона больше нет.", buttons=MENU)
+        link.screen("Такого шаблона больше нет.", buttons=MENU)
         return
 
     if not template.complete():
         # Шаблоны, сохранённые до того, как бот научился спрашивать
         # категорию, повторять нечем: товар ушёл бы не туда.
-        link.say("Этот шаблон сохранён до того, как бот стал спрашивать "
+        link.screen("Этот шаблон сохранён до того, как бот стал спрашивать "
                  "категорию, и повторить его нечем — создайте товар заново "
                  "и сохраните шаблон ещё раз.", buttons=MENU)
         return
@@ -792,7 +818,7 @@ def make_from_template(link, account, store, template_id: str) -> None:
     photos = template.photos()
 
     if not photos:
-        link.say("У шаблона пропали картинки — без них товар не создать. "
+        link.screen("У шаблона пропали картинки — без них товар не создать. "
                  "Соберите объявление заново.", buttons=MENU)
         return
 
@@ -808,7 +834,7 @@ def make_from_template(link, account, store, template_id: str) -> None:
     draft.options = template.options
     draft.photos = photos
 
-    link.say(f"Повторяю:\n\n{draft.summary()}\n\nСоздаю черновик…")
+    link.screen(f"Повторяю:\n\n{draft.summary()}\n\nСоздаю черновик…")
     send_draft(link, account, draft)
 
 
@@ -822,18 +848,18 @@ def drafts_menu(link, account) -> None:
     try:
         from playerokapi.enums import ItemStatuses
     except ImportError:
-        link.say("Не установлена библиотека playerokapi.", buttons=MENU)
+        link.screen("Не установлена библиотека playerokapi.", buttons=MENU)
         return
 
     try:
         page = account.get_my_items(statuses=[ItemStatuses.DRAFT], count=24)
         drafts = list(getattr(page, "items", None) or [])
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Черновики прочитать не вышло: {e}", buttons=MENU)
+        link.screen(f"Черновики прочитать не вышло: {e}", buttons=MENU)
         return
 
     if not drafts:
-        link.say("Черновиков нет.", buttons=MENU)
+        link.screen("Черновиков нет.", buttons=MENU)
         return
 
     keys = [[(f"{d.name} — {getattr(d, 'price', '?')} ₽",
@@ -843,14 +869,14 @@ def drafts_menu(link, account) -> None:
     text = str(answer.get("text") or "").strip()
 
     if not text.startswith(PICK_DRAFT):
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return
 
     draft_id = text[len(PICK_DRAFT):]
     chosen = next((d for d in drafts if str(d.id) == draft_id), None)
 
     if chosen is None:
-        link.say("Такого черновика больше нет.", buttons=MENU)
+        link.screen("Такого черновика больше нет.", buttons=MENU)
         return
 
     price = getattr(chosen, "raw_price", None) or getattr(chosen, "price", 0)
@@ -890,7 +916,7 @@ def switch_account(link, store, account_id: str, account):
     saved = store.get(account_id)
 
     if saved is None:
-        link.say("Такого кабинета больше нет.", buttons=MENU)
+        link.screen("Такого кабинета больше нет.", buttons=MENU)
         return account
 
     try:
@@ -904,7 +930,7 @@ def switch_account(link, store, account_id: str, account):
         return offer_new_cookies(link, store, saved, account, e)
 
     store.set_current(account_id)
-    link.say(f"Переключился: {saved.name}", buttons=MENU)
+    link.screen(f"Переключился: {saved.name}", buttons=MENU)
 
     return fresh
 
@@ -923,7 +949,7 @@ def offer_new_cookies(link, store, saved, account, why):
                  [("✖️ Не сейчас", "отмена")]])
 
     if not str(answer.get("text") or "").startswith(PICK_FIX):
-        link.say("Оставил как есть.", buttons=MENU)
+        link.screen("Оставил как есть.", buttons=MENU)
         return account
 
     answer = link.ask(
@@ -933,7 +959,7 @@ def offer_new_cookies(link, store, saved, account, why):
     cookies = normalize_cookies(str(answer.get("text") or ""))
 
     if not cookies:
-        link.say("Это не похоже на куки. Оставил как есть.", buttons=MENU)
+        link.screen("Это не похоже на куки. Оставил как есть.", buttons=MENU)
         return account
 
     if not answer.get("from_button"):
@@ -945,13 +971,13 @@ def offer_new_cookies(link, store, saved, account, why):
         fresh = open_account(cookies, saved.user_agent
                              or os.environ.get("PLAYEROK_UA", ""))
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"И эти не подошли: {e}\n"
+        link.screen(f"И эти не подошли: {e}\n"
                  "Проверьте, что куки из того же браузера, чей user-agent "
                  "указан у кабинета.", buttons=MENU)
         return account
 
     store.set_current(saved.id)
-    link.say(f"Готово, кабинет «{saved.name}» снова работает.", buttons=MENU)
+    link.screen(f"Готово, кабинет «{saved.name}» снова работает.", buttons=MENU)
 
     return fresh
 
@@ -963,7 +989,7 @@ def add_account(link, store, account):
     name = " ".join(str(answer.get("text") or "").split())
 
     if not name or wizard.cancelled(name):
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return account
 
     answer = link.ask(
@@ -973,13 +999,13 @@ def add_account(link, store, account):
     raw = str(answer.get("text") or "")
 
     if wizard.cancelled(raw):
-        link.say("Отменил.", buttons=MENU)
+        link.screen("Отменил.", buttons=MENU)
         return account
 
     cookies = normalize_cookies(raw)
 
     if not cookies:
-        link.say("Это не похоже на куки. Начнём заново.", buttons=MENU)
+        link.screen("Это не похоже на куки. Начнём заново.", buttons=MENU)
         return account
 
     # Стираем сразу: в переписке остался бы доступ к кабинету.
@@ -997,7 +1023,7 @@ def add_account(link, store, account):
 
     account_id = store.add(name, cookies,
                            user_agent or os.environ.get("PLAYEROK_UA", ""))
-    link.say(f"Кабинет «{name}» добавлен.")
+    link.screen(f"Кабинет «{name}» добавлен.")
 
     return switch_account(link, store, account_id, account)
 
@@ -1014,13 +1040,13 @@ def try_sign_in(link):
         account, _store, _link = sign_in()
         return account
     except SystemExit as e:
-        link.say(f"Войти в кабинет не вышло.\n\n{e}", buttons=MENU)
+        link.screen(f"Войти в кабинет не вышло.\n\n{e}", buttons=MENU)
     except Exception as e:                                    # noqa: BLE001
         if is_auth_error(e):
-            link.say(f"🔴 Вход в кабинет не принят.\n\n{COOKIES_ADVICE}",
+            link.screen(f"🔴 Вход в кабинет не принят.\n\n{COOKIES_ADVICE}",
                      buttons=MENU)
         else:
-            link.say(f"Войти в кабинет не вышло: {e}\n\n"
+            link.screen(f"Войти в кабинет не вышло: {e}\n\n"
                      "Откройте «Аккаунт», чтобы прислать свежие куки или "
                      "переключиться на другой кабинет.", buttons=MENU)
 
@@ -1040,12 +1066,12 @@ def main() -> None:
     where = AccountStore(ACCOUNTS_DIR).current()
 
     if account is not None and where is not None:
-        link.say(f"Кабинет: {where.name}")
+        link.screen(f"Кабинет: {where.name}")
 
     print("Жду в телеграме. Напишите боту «новый товар».")
 
     if account is not None:
-        link.say("Готов.", buttons=MENU)
+        link.screen("Готов.", buttons=MENU)
 
     while True:
         message = link.wait_answer(3600)
@@ -1057,24 +1083,24 @@ def main() -> None:
         if text in START_WORDS or text in TEMPLATE_WORDS \
                 or text in DRAFT_WORDS:
             if account is None:
-                link.say("Сначала нужен рабочий кабинет: откройте "
+                link.screen("Сначала нужен рабочий кабинет: откройте "
                          "«Аккаунт».", buttons=MENU)
                 continue
 
         if text in START_WORDS:
             make_item(link, account)
-            link.say("Готов к следующему.", buttons=MENU)
+            link.screen("Готов к следующему.", buttons=MENU)
         elif text in TEMPLATE_WORDS:
             from_template(link, account)
-            link.say("Готов к следующему.", buttons=MENU)
+            link.screen("Готов к следующему.", buttons=MENU)
         elif text in DRAFT_WORDS:
             drafts_menu(link, account)
-            link.say("Готов к следующему.", buttons=MENU)
+            link.screen("Готов к следующему.", buttons=MENU)
         elif text in ACCOUNT_WORDS:
             account = accounts_menu(link, account)
         elif not wizard.cancelled(text):
             # Молчать нельзя: продавец решит, что бот умер.
-            link.say("Что делаем?", buttons=MENU)
+            link.screen("Что делаем?", buttons=MENU)
 
         time.sleep(0.2)
 

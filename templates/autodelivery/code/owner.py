@@ -65,6 +65,9 @@ class OwnerLink:
         # брали первое и теряли остальные: два быстрых нажатия подряд — и
         # второе пропадало, а бот выглядел зависшим.
         self._pending: list[dict] = []
+        # Номер «экрана» — единственного сообщения диалога, которое
+        # переписывается вместо того, чтобы слать новое на каждый шаг.
+        self._screen: int | None = None
 
     def _call(self, method: str, wait: int = 0, **params) -> Any:
         """Вызов Telegram. `wait` — сколько метод сам будет держать ответ.
@@ -181,6 +184,54 @@ class OwnerLink:
 
         return messages
 
+    def screen(self, text: str, buttons=None) -> bool:
+        """Показать «экран»: переписать прежнее сообщение или создать его.
+
+        Диалог из десятка шагов, каждый из которых — новое сообщение,
+        превращает переписку в простыню, где не найти ни меню, ни ответа.
+        Поэтому у диалога одно сообщение, и оно меняется.
+
+        Уведомления сюда не идут: каждая покупка — отдельный факт, и
+        переписывать их поверх друг друга значит стирать историю.
+        """
+        if self._screen is not None and self._edit(self._screen, text, buttons):
+            return True
+
+        # Переписать не вышло — сообщение удалили, оно слишком старое или
+        # площадка Telegram не в духе. Тогда просто новое: диалог важнее
+        # опрятности.
+        self._screen = self._send(text, buttons)
+
+        return self._screen is not None
+
+    def forget_screen(self) -> None:
+        """Забыть экран: следующий будет новым сообщением.
+
+        Нужно, когда между шагами в переписке появилось что-то чужое —
+        уведомление о покупке например, — и дописывать поверх уже нельзя.
+        """
+        self._screen = None
+
+    def _send(self, text: str, buttons=None):
+        try:
+            got = self._call("sendMessage", chat_id=self.owner_id, text=text,
+                             reply_markup=keyboard(buttons))
+            return got.get("message_id") if isinstance(got, dict) else None
+        except Exception:                                  # noqa: BLE001
+            return None
+
+    def _edit(self, message_id: int, text: str, buttons=None) -> bool:
+        try:
+            self._call("editMessageText", chat_id=self.owner_id,
+                       message_id=message_id, text=text,
+                       reply_markup=keyboard(buttons))
+            return True
+        except Exception as e:                             # noqa: BLE001
+            # «Не изменилось» — не поломка: текст тот же, экран на месте.
+            # Считать это неудачей значило бы слать дубль на каждом
+            # повторном показе одного и того же.
+            return "not modified" in str(e).lower()
+
     def ask(self, question: str, wait_seconds: float = WAIT_SECONDS,
             buttons=None) -> dict:
         """Спросить и дождаться ответа. → сообщение целиком или {}.
@@ -189,10 +240,18 @@ class OwnerLink:
         текста нет вовсе. Нажатие кнопки приходит сюда же и выглядит как
         обычный текст — иначе разбор ответов пришлось бы держать в двух
         видах, и они бы разошлись.
-        """
-        self.say(question, buttons)
 
-        return self.wait_answer(wait_seconds)
+        Вопрос показывается экраном: одно сообщение на весь диалог.
+        Напечатанный ответ удаляется — иначе экран уезжает вверх, и
+        кнопки оказываются в середине переписки.
+        """
+        self.screen(question, buttons)
+        answer = self.wait_answer(wait_seconds)
+
+        if answer and not answer.get("from_button"):
+            self._delete(answer)
+
+        return answer
 
     def wait_answer(self, wait_seconds: float = WAIT_SECONDS) -> dict:
         """Дождаться следующего сообщения владельца. → сообщение или {}.

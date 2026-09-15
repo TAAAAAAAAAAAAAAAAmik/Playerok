@@ -379,6 +379,98 @@ class ButtonPressTest(unittest.TestCase):
         self.assertIn("inline_keyboard", sent.get("reply_markup") or {})
 
 
+class ScreenTest(unittest.TestCase):
+    """Диалог живёт в одном сообщении: десяток шагов по сообщению на
+    каждый превращает переписку в простыню."""
+
+    def telegram(self, edit_ok=True, description=""):
+        class Telegram(FakeTelegram):
+            def post(self, url, json=None, timeout=None):     # noqa: A002
+                method = url.rsplit("/", 1)[-1]
+                self.calls.append((method, json or {}, timeout))
+
+                if method == "sendMessage":
+                    return FakeResponse({"ok": True,
+                                         "result": {"message_id": 42}})
+
+                if method == "editMessageText":
+                    if edit_ok:
+                        return FakeResponse({"ok": True, "result": {}})
+
+                    return FakeResponse({"ok": False,
+                                         "description": description})
+
+                return FakeResponse({"ok": True, "result": []})
+
+        return Telegram()
+
+    def methods(self, telegram):
+        return [c[0] for c in telegram.calls]
+
+    def test_first_screen_is_sent(self):
+        telegram = self.telegram()
+        link(telegram).screen("первый вопрос")
+
+        self.assertEqual(self.methods(telegram), ["sendMessage"])
+
+    def test_next_screens_are_edits_not_new_messages(self):
+        telegram = self.telegram()
+        bot = link(telegram)
+        bot.screen("первый вопрос")
+        bot.screen("второй вопрос")
+        bot.screen("третий вопрос")
+
+        self.assertEqual(self.methods(telegram),
+                         ["sendMessage", "editMessageText", "editMessageText"])
+
+    def test_unchanged_text_is_not_a_failure(self):
+        """Иначе на каждом повторном показе одного и того же летел бы
+        дубль."""
+        telegram = self.telegram(edit_ok=False,
+                                 description="Bad Request: message is not "
+                                             "modified")
+        bot = link(telegram)
+        bot.screen("вопрос")
+        bot.screen("вопрос")
+
+        self.assertEqual(self.methods(telegram),
+                         ["sendMessage", "editMessageText"])
+
+    def test_lost_message_falls_back_to_a_new_one(self):
+        """Экран удалили или он слишком стар — диалог важнее опрятности."""
+        telegram = self.telegram(edit_ok=False,
+                                 description="message to edit not found")
+        bot = link(telegram)
+        bot.screen("первый")
+        bot.screen("второй")
+
+        self.assertEqual(self.methods(telegram),
+                         ["sendMessage", "editMessageText", "sendMessage"])
+
+    def test_forgetting_starts_a_new_message(self):
+        telegram = self.telegram()
+        bot = link(telegram)
+        bot.screen("первый")
+        bot.forget_screen()
+        bot.screen("второй")
+
+        self.assertEqual(self.methods(telegram),
+                         ["sendMessage", "sendMessage"])
+
+    def test_typed_answer_is_deleted_so_the_screen_stays_last(self):
+        """Иначе экран уезжает вверх, и кнопки теряются в переписке."""
+        telegram = FakeTelegram([[], [update(5, "80 Robux", message_id=55)]])
+        link(telegram).ask("Название?")
+
+        self.assertEqual(telegram.deleted, [55])
+
+    def test_button_press_leaves_nothing_to_delete(self):
+        telegram = FakeTelegram([[], [press(6, "GL")]])
+        link(telegram).ask("Регион?")
+
+        self.assertEqual(telegram.deleted, [])
+
+
 class SpeedTest(unittest.TestCase):
     """Быстрота здесь — это не роскошь: бот, который «думает» секунды на
     каждый вопрос, кажется сломанным."""
