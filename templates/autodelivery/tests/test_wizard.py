@@ -51,6 +51,8 @@ class StepsTest(unittest.TestCase):
         draft.name = "80 Robux"
         self.assertEqual(draft.step, "price")
         draft.price = 100
+        self.assertEqual(draft.step, "nominal")
+        draft.nominal = 80
         self.assertEqual(draft.step, "region")
         draft.region = "GL"
         self.assertEqual(draft.step, "description")
@@ -67,6 +69,7 @@ class StepsTest(unittest.TestCase):
         """Иначе пропуск означал бы вечный повтор одного вопроса."""
         draft = started()
         draft.name, draft.price, draft.region = "x", 1, "GL"
+        draft.nominal = 10
         draft.description = ""
 
         self.assertEqual(draft.step, "photos")
@@ -75,6 +78,7 @@ class StepsTest(unittest.TestCase):
         """Состав полей известен только после выбора способа получения."""
         draft = started()
         draft.name, draft.price, draft.region = "x", 1, "GL"
+        draft.nominal = 10
         draft.description = ""
         draft.fields = [{"id": "f1", "label": "Комментарий",
                          "required": False, "value": None}]
@@ -84,6 +88,7 @@ class StepsTest(unittest.TestCase):
     def test_finished_draft_is_asked_nothing(self):
         draft = started()
         draft.name, draft.price, draft.region = "x", 1, "GL"
+        draft.nominal = 10
         draft.description = "текст"
         draft.photos.append(b"png")
 
@@ -169,6 +174,30 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(draft.name, "80 Robux")
         self.assertEqual(draft.step, "price")
 
+    def test_the_nominal_is_taken_from_the_name_without_asking(self):
+        """Спрашивать то, что уже знаешь, — лишнее нажатие на каждом
+        товаре."""
+        draft = started()
+        wizard.apply(draft, "Roblox 1000 Robux")
+        wizard.apply(draft, "700")
+
+        self.assertEqual(draft.nominal, 1000)
+        self.assertEqual(draft.step, "region")
+
+    def test_a_name_without_a_number_is_asked_about(self):
+        """Иначе такое объявление молча нельзя было бы выдать: движок
+        остановится на «в названии нет числа», когда уже заплачено."""
+        draft = started()
+        wizard.apply(draft, "Робуксы дёшево")
+        wizard.apply(draft, "700")
+
+        self.assertEqual(draft.step, "nominal")
+
+        self.assertTrue(wizard.apply(draft, "сколько-то"))
+        self.assertEqual(wizard.apply(draft, "1000"), "")
+        self.assertEqual(draft.nominal, 1000)
+        self.assertEqual(draft.step, "region")
+
     def test_bad_answer_keeps_the_step(self):
         draft = started()
         draft.name = "x"
@@ -246,6 +275,7 @@ class MarketplaceFieldTest(unittest.TestCase):
     def field(self, required=False):
         draft = started()
         draft.name, draft.price, draft.region = "x", 1, "GL"
+        draft.nominal = 10
         draft.description = ""
         draft.fields = [{"id": "f1", "label": "Комментарий",
                          "required": required, "value": None}]

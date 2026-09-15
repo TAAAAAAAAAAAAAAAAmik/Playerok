@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 from catalog import (Card, denominations_for,                   # noqa: E402
                      denominations_from, find_service, items_of,
                      is_card_order, match_denomination, matches_service,
+                     nominal_for, nominal_from_description,
                      region_of_service, services_for)
 
 
@@ -395,6 +396,71 @@ class TwoRegionsTest(unittest.TestCase):
             denominations_for(XBOX, mixed), "RU", 1000)
 
         self.assertEqual(got.item_id, "ru-1000")
+
+
+class NominalFromDescriptionTest(unittest.TestCase):
+    """Номинал берётся из описания — там он сказан, а не угадан.
+
+    Строку «Номинал: …» пишет в описание сам бот при создании товара, как
+    и строку региона. Из названия номинал приходится угадывать по самому
+    крупному числу, и на «Roblox Gift Card 10 USD (1000 Robux)» такая
+    догадка ошибается.
+    """
+
+    def test_a_marked_line_is_read(self):
+        self.assertEqual(
+            nominal_from_description("Регион кода: GL\nНоминал: 1000"), 1000)
+
+    def test_other_wordings_are_understood(self):
+        for line in ("Количество: 800", "Кол-во: 800", "Сумма: 800",
+                     "amount 800", "НОМИНАЛ — 800"):
+            self.assertEqual(nominal_from_description(line), 800, line)
+
+    def test_stray_numbers_are_not_mistaken_for_it(self):
+        """В описании чисел полно: срок действия, год, размер скидки. Взяв
+        самое крупное, бот потратил бы деньги на случайность."""
+        text = ("Код действует до 2030 года. Скидка 5%. "
+                "Поддержка 24/7, отвечаем за 15 минут.")
+
+        self.assertIsNone(nominal_from_description(text))
+
+    def test_the_description_answers_when_the_title_is_silent(self):
+        got, why = nominal_for("Робуксы недорого", "Номинал: 1000")
+
+        self.assertEqual(why, "")
+        self.assertEqual(got, 1000)
+
+    def test_a_stray_year_in_the_title_stops_the_bot_instead_of_buying_it(self):
+        """«Роблокс код 2024» раньше означало попытку купить номинал 2024.
+        Теперь описание с ним спорит, и бот останавливается, а не тратит."""
+        got, why = nominal_for("Роблокс код 2024", "Номинал: 1000")
+
+        self.assertIsNone(got)
+        self.assertIn("2024", why)
+
+    def test_the_title_still_works_when_the_description_is_silent(self):
+        self.assertEqual(nominal_for("Roblox 1000 Robux", "просто текст")[0],
+                         1000)
+
+    def test_a_disagreement_is_refused_not_resolved(self):
+        """Бывает от копии соседнего объявления. Купить по описанию значит
+        недодать, купить по названию — переплатить за продавца. Ни то ни
+        другое не наше решение."""
+        got, why = nominal_for("Roblox 1000 Robux", "Номинал: 800")
+
+        self.assertIsNone(got)
+        self.assertIn("1000", why)
+        self.assertIn("800", why)
+
+    def test_agreement_is_not_a_disagreement(self):
+        self.assertEqual(nominal_for("Roblox 1000 Robux", "Номинал: 1000"),
+                         (1000, ""))
+
+    def test_neither_source_says_it(self):
+        got, why = nominal_for("Робуксы дёшево", "Активация: roblox.com")
+
+        self.assertIsNone(got)
+        self.assertIn("Номинал", why)
 
 
 if __name__ == "__main__":

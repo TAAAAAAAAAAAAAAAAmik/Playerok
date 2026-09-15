@@ -11,14 +11,15 @@ from __future__ import annotations
 
 import re
 
-from catalog import REGION_ALIASES, normalize_region
+from catalog import (REGION_ALIASES, nominal_from_title,
+                     normalize_region)
 
 # Сколько шагов и в каком порядке.
 # Выбор игры и категории идёт первым: от категории зависит и способ
 # получения, и какие поля площадка потребует заполнить. Спрашивать их
 # после названия значит однажды выбросить уже написанное.
 STEPS = ("game", "category", "obtaining", "options", "name", "price",
-         "region", "description", "photos")
+         "nominal", "region", "description", "photos")
 
 # Приставка у шага, который спрашивает поле с данными. Полей у разных
 # категорий разное число, поэтому шаг не постоянный, а собирается из id.
@@ -44,6 +45,12 @@ QUESTIONS = {
              "числом — из него бот потом поймёт, сколько покупать."),
     "price": ("Цена в рублях. Только число.\n\n"
               "Это то, что заплатит покупатель."),
+    "nominal": ("Сколько покупатель получит? Только число.\n\n"
+                "Для робуксов — их количество, для гифт-карты — номинал.\n\n"
+                "В названии товара числа не нашлось, поэтому спрашиваю: по "
+                "нему бот выберет, что покупать у поставщика. Впишу его в "
+                "описание строкой «Номинал: …», и дальше буду читать "
+                "оттуда."),
     "region": ("Регион кода.\n\n"
                "GL — глобальный, RU — российский, дальше кнопками или "
                "текстом: US, TR, EU, AR, BR, AE…\n\n"
@@ -53,9 +60,10 @@ QUESTIONS = {
     "description": ("Описание товара.\n\n"
                     "Что покупатель прочитает на странице: что он получит, "
                     "как быстро, как активировать.\n\n"
-                    "Строку про регион дописывать не нужно — я поставлю её "
-                    "сам, и по ней бот потом выберет, что покупать. Если "
-                    "напишете свою, я её уберу, чтобы они не спорили."),
+                    "Строки про регион и номинал дописывать не нужно — я "
+                    "поставлю их сам, и по ним бот потом выберет, что "
+                    "покупать. Если напишете свои, я их уберу, чтобы они не "
+                    "спорили."),
     "photos": ("Пришлите фотографии товара. Можно несколько — по одной.\n\n"
                "Когда хватит, напишите «готово».\n"
                "Хотя бы одна обязательна: без картинок площадка товар не "
@@ -84,6 +92,12 @@ DEFAULT_TAIL = ("Код приходит в чат сразу после опл�
 # денежная — купится не тот товар.
 REGION_LINE = re.compile(r"^\s*(?:регион|region)\b.*$",
                          re.IGNORECASE | re.MULTILINE)
+
+# То же и для номинала: две строки в одном описании — тихая денежная
+# ошибка, движок прочитает не ту и купит не то.
+NOMINAL_LINE = re.compile(
+    r"^\s*(?:номинал|количество|кол-во|сумма|nominal|amount)\b.*$",
+    re.IGNORECASE | re.MULTILINE)
 
 # Регионы, которые бот понимает в описании товара. Не «GL или RU»: у
 # гифт-карт регионов много, и продавец, торгующий и глобальными кодами, и
@@ -114,6 +128,10 @@ class Draft:
         self.name = ""
         self.price = 0
         self.region = ""
+        # Сколько покупать. Обычно берётся из названия молча — спрашивать
+        # то, что уже знаешь, значит лишнее нажатие на каждом товаре. Ноль
+        # означает «в названии числа не нашлось», и тогда спросим.
+        self.nominal = 0.0
         # None — ещё не спрашивали, "" — спросили и пропустили. Разница
         # важна: иначе пропуск означал бы вечный повтор вопроса.
         self.description = None
@@ -146,6 +164,9 @@ class Draft:
 
         if not self.price:
             return "price"
+
+        if not self.nominal:
+            return "nominal"
 
         if not self.region:
             return "region"
@@ -262,6 +283,23 @@ def accept_price(text: str) -> tuple[int, str]:
     return value, ""
 
 
+def accept_nominal(text: str) -> tuple[float, str]:
+    """→ (номинал, причина отказа)."""
+    clean = " ".join(str(text or "").strip().split())
+    clean = clean.replace("\u00a0", "").replace(" ", "").replace(",", ".")
+
+    try:
+        value = float(clean)
+    except ValueError:
+        return 0.0, ("Не понял. Напишите только число — сколько покупатель "
+                     "получит: 1000, 800, 10.")
+
+    if value <= 0:
+        return 0.0, "Номинал должен быть больше нуля."
+
+    return value, ""
+
+
 def accept_region(text: str) -> tuple[str, str]:
     """→ (регион, причина отказа).
 
@@ -288,7 +326,8 @@ def accept_description(text: str) -> tuple[str, str]:
     if skipped(text):
         return "", ""
 
-    body = REGION_LINE.sub("", str(text or "")).strip()
+    body = REGION_LINE.sub("", str(text or ""))
+    body = NOMINAL_LINE.sub("", body).strip()
     body = re.sub(r"\n{3,}", "\n\n", body)
 
     if not body:
@@ -302,7 +341,7 @@ def accept_description(text: str) -> tuple[str, str]:
 
 
 ACCEPT = {"name": accept_name, "price": accept_price, "region": accept_region,
-          "description": accept_description}
+          "nominal": accept_nominal, "description": accept_description}
 
 
 def progress(draft: Draft) -> str:
@@ -331,6 +370,9 @@ def progress(draft: Draft) -> str:
 
     if draft.price:
         lines.append(f"✓ Цена: {draft.price} ₽")
+
+    if draft.nominal:
+        lines.append(f"✓ Номинал: {draft.nominal:g}")
 
     if draft.region:
         lines.append(f"✓ Регион: {draft.region}")
@@ -397,6 +439,12 @@ def apply(draft: Draft, text: str) -> str:
 
     setattr(draft, step, value)
 
+    if step == "name":
+        # Номинал обычно виден прямо в названии — берём молча. Спрашивать
+        # то, что уже знаешь, значит лишнее нажатие на каждом товаре;
+        # шаг «nominal» появится, только если число не нашлось.
+        draft.nominal = nominal_from_title(value) or 0.0
+
     return ""
 
 
@@ -436,10 +484,19 @@ def apply_field(draft: Draft, field_id: str, text: str) -> str:
 def description_for(draft: Draft) -> str:
     """Описание товара для площадки.
 
-    Первая строка — не оформление: из неё движок выдачи читает регион.
-    Уберёте её — бот при оплате остановится и код не купит. Поэтому её
-    ставим мы, а не продавец, и в его тексте такие строки вырезаны.
+    Первые строки — не оформление: из них движок выдачи читает регион и
+    номинал. Уберёте их — бот при оплате остановится и код не купит.
+    Поэтому ставим их мы, а не продавец, и в его тексте такие строки
+    вырезаны: две разные строки номинала в одном описании — это тихая
+    денежная ошибка.
+
+    Номинал в описании надёжнее номинала в названии: здесь он СКАЗАН, а в
+    названии его приходится угадывать по самому крупному числу.
     """
     tail = draft.description or draft.tail or DEFAULT_TAIL
+    head = [f"Регион кода: {draft.region}"]
 
-    return f"Регион кода: {draft.region}\n\n{tail}"
+    if draft.nominal:
+        head.append(f"Номинал: {draft.nominal:g}")
+
+    return "\n".join(head) + f"\n\n{tail}"

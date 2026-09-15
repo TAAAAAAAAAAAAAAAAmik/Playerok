@@ -68,8 +68,7 @@ import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
 from cards import CARDS, card_by_slug                         # noqa: E402
-from catalog import (card_for_title, nominal_from_title,      # noqa: E402
-                     render)
+from catalog import card_for_title, render                    # noqa: E402
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
@@ -653,7 +652,7 @@ def apply_card_template(draft: wizard.Draft) -> None:
     saved = settings_of().card(card.slug)
     template = saved.get("ad_text") or card.ad_text or card.activation
 
-    draft.tail = render(template, card, nominal_from_title(draft.name),
+    draft.tail = render(template, card, draft.nominal,
                         draft.region, draft.price)
 
 

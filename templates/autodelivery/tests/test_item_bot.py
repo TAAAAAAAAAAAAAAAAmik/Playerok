@@ -923,11 +923,12 @@ class CardTemplateTest(unittest.TestCase):
         item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
         item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
 
-    def draft(self, name, region="US", price=900):
+    def draft(self, name, region="US", price=900, nominal=10):
         d = wizard.Draft()
         d.name = name
         d.region = region
         d.price = price
+        d.nominal = nominal
         d.description = ""
         return d
 

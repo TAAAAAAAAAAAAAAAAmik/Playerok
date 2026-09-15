@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
 from auth import open_account, sign_in, user_agent_from_env  # noqa: E402
 from envfile import load_env_file                             # noqa: E402
-from catalog import (nominal_from_title, pick_card,           # noqa: E402
+from catalog import (nominal_for, pick_card,                  # noqa: E402
                      region_from_description)
 from owner import renew_cookies                              # noqa: E402
 from playerok import (PAID_STATUSES, PlayerokMarketplace,     # noqa: E402
@@ -108,10 +108,10 @@ async def main() -> None:
         log.info("  наш товар: %s", card.title)
 
         region = region_from_description(order.description)
-        value = nominal_from_title(order.title)
+        value, why_value = nominal_for(order.title, order.description)
 
         log.info("  регион из описания: %s", region or "НЕ ПРОЧИТАН")
-        log.info("  номинал из названия: %s", value if value else "НЕ ПРОЧИТАН")
+        log.info("  номинал: %s", f"{value:g}" if value else "НЕ ПРОЧИТАН")
 
         if not region:
             log.warning(
@@ -119,8 +119,7 @@ async def main() -> None:
                 "дописать в описание строку вида «Регион кода: US»")
 
         if not value:
-            log.warning(
-                "  ⚠ номинал не прочитан из названия — движок остановится")
+            log.warning("  ⚠ %s — движок остановится", why_value)
 
         if region and value:
             log.info("  → движок купил бы %s %s (%s) и отправил код в чат %s",

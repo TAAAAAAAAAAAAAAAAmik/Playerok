@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass
 
 from catalog import (Card, Denomination, match_denomination,
-                     nominal_from_title, order_reference, pick_card,
+                     nominal_for, order_reference, pick_card,
                      region_from_description)
 from marketplace import Marketplace, Order
 from store import (STATE_BUYING, STATE_DONE, STATE_NEW, STATE_SEND_FAILED,
@@ -162,8 +162,13 @@ class DeliveryEngine:
                 "в описании товара не сказано, какой это регион, и запасной "
                 "не задан. Допиши в описание строку вида «Регион кода: US»")
 
-        # 5. Номинал.
-        want = nominal_from_title(order.title)
+        # 5. Номинал: из описания, где он сказан, иначе из названия, где
+        #    его приходится угадывать по самому крупному числу.
+        want, why = nominal_for(order.title, order.description)
+
+        if want is None:
+            return await self._stop(card, order.id, why)
+
         try:
             rows = await self._catalog(card, region)
         except Exception as e:                       # noqa: BLE001
