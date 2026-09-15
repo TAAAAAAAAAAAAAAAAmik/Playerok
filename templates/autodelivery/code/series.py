@@ -74,6 +74,11 @@ def parse(text: str) -> tuple[list, list]:
     return rows, bad
 
 
+# Место номинала в названии-образце. Продавец ставит его руками, когда в
+# названии числа нет: «{номинал} Robux 🥳ПРОМОКОДОМ🥳».
+SLOT = "{номинал}"
+
+
 def retitle(name: str, old: float, new: float) -> str:
     """Название под новый номинал. Пусто — подставить не смогли.
 
@@ -81,51 +86,77 @@ def retitle(name: str, old: float, new: float) -> str:
     превратило бы «1000 Robux» в «2000 Robux» при переходе со ста на две
     сотни.
     """
-    text = str(name or "")
-    pattern = re.compile(rf"(?<!\d){_shown(old)}(?!\d)")
+    pattern = pattern_from(name, old)
 
-    if not pattern.search(text):
+    return render(pattern, new) if pattern else ""
+
+
+def pattern_from(name: str, old: float) -> str:
+    """Название → образец с местом под номинал. Пусто — числа в нём нет."""
+    text = str(name or "")
+    found = re.compile(rf"(?<!\d){_shown(old)}(?!\d)")
+
+    if not found.search(text):
         return ""
 
-    return pattern.sub(_shown(new), text)
+    return found.sub(SLOT, text)
+
+
+def render(pattern: str, nominal: float) -> str:
+    """Образец + номинал → название."""
+    return str(pattern or "").replace(SLOT, _shown(nominal))
+
+
+def suggest_pattern(name: str) -> str:
+    """Образец для названия без числа: номинал спереди.
+
+    Предложение, а не решение: продавец поправит, если место другое. Но
+    чаще всего номинал и правда стоит первым — «1000 Robux …», — и одно
+    нажатие лучше, чем набирать всё название заново с телефона.
+    """
+    name = " ".join(str(name or "").split())
+
+    return f"{SLOT} {name}".strip()
+
+
+def usable(pattern: str) -> bool:
+    """Годится ли образец. Без места под номинал все названия совпадут."""
+    return SLOT in str(pattern or "")
 
 
 def _shown(value: float) -> str:
     return f"{value:g}"
 
 
-def plan(name: str, description: str, old: float,
-         rows: list) -> tuple[list, list]:
+def plan(pattern: str, description: str, old, rows: list) -> tuple[list, list]:
     """Что именно создадим → (задания, отказы).
 
+    `pattern` — название с местом под номинал. `old` — номинал образца или
+    None, если его в названии не было: тогда повторять нечего и пропускать
+    нечего, все строки новые.
+
     Задание — словарь с готовыми названием, описанием, номиналом и ценой.
-    Отказ — номинал, для которого название собрать не вышло: создавать
-    объявление с чужим названием нельзя, а молча пропускать — тем более.
     """
     jobs: list = []
     refused: list = []
 
+    if not usable(pattern):
+        return [], [f"в образце названия нет места под номинал ({SLOT})"]
+
     for nominal, price in rows:
-        if abs(nominal - old) < 1e-9:
+        if old is not None and abs(nominal - float(old)) < 1e-9:
             # Это и есть исходное объявление. Повторять его не надо:
             # получилось бы два одинаковых товара на витрине.
-            continue
-
-        title = retitle(name, old, nominal)
-
-        if not title:
-            refused.append(
-                f"{nominal:g} — в названии «{name}» нет числа {old:g}, "
-                f"подставить новое некуда")
             continue
 
         jobs.append({
             "nominal": nominal,
             "price": price,
-            "name": title,
-            # В описании то же число меняем так же. Не нашли — не беда:
-            # строку «Номинал: …» бот всё равно поставит свою.
-            "description": retitle(description, old, nominal) or description,
+            "name": render(pattern, nominal),
+            # В описании число меняем так же, если оно там было. Не нашли —
+            # не беда: строку «Номинал: …» бот всё равно поставит свою.
+            "description": (retitle(description, float(old), nominal)
+                            if old is not None else "") or description,
         })
 
     return jobs, refused

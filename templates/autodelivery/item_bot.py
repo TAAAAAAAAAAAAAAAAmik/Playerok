@@ -1177,13 +1177,17 @@ def make_series(link, account, store, template_id: str) -> None:
         return
 
     old = nominal_from_title(template.name)
+    pattern = series.pattern_from(template.name, old) if old else ""
 
-    if not old:
-        link.screen(
-            f"В названии «{template.name}» нет числа, а серия строится "
-            f"заменой числа на новое. Переименуйте шаблон так, чтобы "
-            f"номинал был в названии.", buttons=MENU)
-        return
+    if not pattern:
+        # Числа в названии нет — значит подставлять номинал некуда. Это не
+        # повод отказывать: у продавца названия бывают какие угодно
+        # («🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА»), и спросить образец дешевле, чем
+        # заставлять его переименовывать товар ради нашего разбора.
+        pattern = ask_pattern(link, template)
+
+        if pattern is None:
+            return
 
     card = card_for_title(CARDS, template.name) \
         or card_for_title(CARDS, str((template.game or {}).get("name") or ""))
@@ -1194,7 +1198,7 @@ def make_series(link, account, store, template_id: str) -> None:
         return
 
     rows, bad = series.parse(text)
-    jobs, refused = series.plan(template.name, template.description, old, rows)
+    jobs, refused = series.plan(pattern, template.description, old, rows)
 
     if not jobs:
         link.screen("Создавать нечего.\n\n"
@@ -1220,14 +1224,49 @@ def make_series(link, account, store, template_id: str) -> None:
     run_series(link, account, template, photos, jobs)
 
 
+def ask_pattern(link, template):
+    """Название-образец с местом под номинал. → образец или None.
+
+    Спрашиваем, а не выдумываем: номинал бывает и в начале, и в середине,
+    и создать десяток объявлений с неверным названием дороже, чем задать
+    один вопрос.
+    """
+    guess = series.suggest_pattern(template.name)
+    answer = link.ask(
+        f"В названии «{template.name}» числа нет — подставлять номинал "
+        f"некуда.\n\n"
+        f"Пришлите название-образец, поставив {series.SLOT} туда, где "
+        f"должно быть число. Например:\n\n{guess}\n\n"
+        f"Или нажмите «Так и сделать» — возьму этот вариант.",
+        ANSWER_WAIT,
+        buttons=[[("🏷 Так и сделать", "так")], CANCEL])
+    text = str(answer.get("text") or "").strip()
+
+    if not text or wizard.cancelled(text):
+        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+        return None
+
+    pattern = guess if text.lower() == "так" else text
+
+    if not series.usable(pattern):
+        link.screen(
+            f"В образце «{pattern}» нет места под номинал. Поставьте "
+            f"{series.SLOT} туда, где должно стоять число — иначе все "
+            f"объявления получат одно и то же название.", buttons=MENU)
+        return None
+
+    return pattern
+
+
 def ask_series_rows(link, template, card, old: float):
     """Получить строки «номинал = цена». → текст или None, если отменили.
 
     Номиналы у поставщика уже перечислены — переписывать их руками
     незачем. Решает продавец только цену, её одну и вводит.
     """
-    head = (f"Образец: «{template.name}» — номинал {old:g}, цена "
-            f"{template.price} ₽.\n\n")
+    head = f"Образец: «{template.name}»"
+    head += f" — номинал {old:g}" if old else ""
+    head += f", цена {template.price} ₽.\n\n"
     keys = [[("📥 Взять номиналы у поставщика", "взять")],
             [("✍️ Вписать самому", "сам")], CANCEL]
 

@@ -57,14 +57,42 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
+class PatternTest(unittest.TestCase):
+    """Название-образец: место под номинал вместо числа."""
+
+    def test_the_number_becomes_a_slot(self):
+        self.assertEqual(series.pattern_from("100 Robux (Global)", 100),
+                         "{номинал} Robux (Global)")
+
+    def test_a_number_inside_a_bigger_one_is_left_alone(self):
+        """Иначе «1000 Robux» при переходе со ста на двести стало бы
+        «2000 Robux» — и покупатель получил бы вдвое меньше обещанного."""
+        self.assertEqual(series.pattern_from("1000 Robux", 100), "")
+
+    def test_a_name_without_the_number_has_no_pattern(self):
+        self.assertEqual(series.pattern_from("Робуксы дёшево", 100), "")
+
+    def test_the_suggested_pattern_puts_the_nominal_first(self):
+        """Чаще всего номинал и правда стоит первым, а одно нажатие лучше,
+        чем набирать всё название заново с телефона."""
+        self.assertEqual(series.suggest_pattern("🥳ПРОМОКОДОМ🥳"),
+                         "{номинал} 🥳ПРОМОКОДОМ🥳")
+
+    def test_a_pattern_without_a_slot_is_not_usable(self):
+        """Иначе все объявления серии получат одно название."""
+        self.assertFalse(series.usable("Просто название"))
+        self.assertTrue(series.usable("{номинал} Robux"))
+
+    def test_rendering_puts_the_number_back(self):
+        self.assertEqual(series.render("{номинал} Robux", 400), "400 Robux")
+
+
 class RetitleTest(unittest.TestCase):
     def test_the_number_is_replaced(self):
         self.assertEqual(series.retitle("100 Robux (Global)", 100, 200),
                          "200 Robux (Global)")
 
     def test_a_number_inside_a_bigger_one_is_left_alone(self):
-        """Иначе «1000 Robux» при переходе со ста на двести стало бы
-        «2000 Robux» — и покупатель получил бы вдвое меньше обещанного."""
         self.assertEqual(series.retitle("1000 Robux", 100, 200), "")
 
     def test_without_the_number_there_is_nothing_to_replace(self):
@@ -74,7 +102,7 @@ class RetitleTest(unittest.TestCase):
 class PlanTest(unittest.TestCase):
     def test_each_row_becomes_a_job(self):
         jobs, refused = series.plan(
-            "100 Robux", "Выдаём 100 робуксов сразу", 100,
+            "{номинал} Robux", "Выдаём 100 робуксов сразу", 100,
             [(200, 140), (400, 280)])
 
         self.assertEqual([j["name"] for j in jobs],
@@ -84,28 +112,39 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(refused, [])
 
     def test_the_description_follows_the_number(self):
-        jobs, _ = series.plan("100 Robux", "Выдаём 100 робуксов", 100,
+        jobs, _ = series.plan("{номинал} Robux", "Выдаём 100 робуксов", 100,
                               [(200, 140)])
 
         self.assertEqual(jobs[0]["description"], "Выдаём 200 робуксов")
 
     def test_a_description_without_the_number_is_kept_as_is(self):
-        jobs, _ = series.plan("100 Robux", "Коды сразу", 100, [(200, 140)])
+        jobs, _ = series.plan("{номинал} Robux", "Коды сразу", 100,
+                              [(200, 140)])
 
         self.assertEqual(jobs[0]["description"], "Коды сразу")
 
     def test_the_original_nominal_is_not_repeated(self):
         """Иначе на витрине оказалось бы два одинаковых товара."""
-        jobs, _ = series.plan("100 Robux", "", 100, [(100, 70), (200, 140)])
+        jobs, _ = series.plan("{номинал} Robux", "", 100,
+                              [(100, 70), (200, 140)])
 
         self.assertEqual([j["nominal"] for j in jobs], [200])
 
-    def test_a_name_we_cannot_rebuild_is_refused_not_guessed(self):
-        """Объявление с чужим названием хуже, чем несозданное."""
-        jobs, refused = series.plan("Робуксы дёшево", "", 100, [(200, 140)])
+    def test_without_an_original_nominal_every_row_is_new(self):
+        """Название образца числа не содержало — значит и повторять
+        нечего: продавец сам решил, какие номиналы выставить."""
+        jobs, _ = series.plan("{номинал} Robux 🥳", "", None,
+                              [(100, 70), (200, 140)])
+
+        self.assertEqual([j["nominal"] for j in jobs], [100, 200])
+
+    def test_a_pattern_without_a_slot_creates_nothing(self):
+        """Десяток объявлений с одинаковым названием — это мусор на
+        витрине, который потом снимать руками."""
+        jobs, refused = series.plan("Просто название", "", None, [(200, 140)])
 
         self.assertEqual(jobs, [])
-        self.assertIn("200", refused[0])
+        self.assertIn("номинал", refused[0])
 
 
 if __name__ == "__main__":

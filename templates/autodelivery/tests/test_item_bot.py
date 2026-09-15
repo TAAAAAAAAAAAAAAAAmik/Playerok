@@ -1094,6 +1094,38 @@ class SeriesFromSupplierTest(unittest.TestCase):
 
         self.assertIn("APPROUTE_KEY", link.said[-1])
 
+    def test_a_name_without_a_number_is_asked_about_not_refused(self):
+        """У продавца названия бывают какие угодно — «🥳ПРОМОКОДОМ🥳
+        АВТОВЫДАЧА». Заставлять его переименовывать товар ради нашего
+        разбора дороже, чем задать один вопрос."""
+        tid = self.template("🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА")
+        link = FakeLink([item_bot.PICK_SERIES + tid, "так",
+                         "взять", "сам", "отмена"])
+        item_bot.series_menu(link, "кабинет")
+
+        self.assertTrue(any("подставлять номинал некуда" in t
+                            for t in link.said))
+        self.assertTrue(any(t.startswith("100 =") for t in link.said))
+
+    def test_the_offered_pattern_builds_real_names(self):
+        tid = self.template("🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА")
+        link = FakeLink([item_bot.PICK_SERIES + tid, "так", "сам",
+                         "400 = 540", "отмена"])
+        item_bot.series_menu(link, "кабинет")
+
+        self.assertTrue(any("400 🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА" in t
+                            for t in link.said))
+
+    def test_a_pattern_without_a_place_for_the_nominal_is_refused(self):
+        """Десяток объявлений с одинаковым названием — мусор на витрине,
+        который потом снимать руками."""
+        tid = self.template("🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА")
+        link = FakeLink([item_bot.PICK_SERIES + tid, "Просто название"])
+        item_bot.series_menu(link, "кабинет")
+
+        self.assertIn("нет места под номинал", link.said[-1])
+        self.assertEqual(link.last_buttons, item_bot.MENU)
+
     def test_the_card_is_recognised_by_the_game_when_the_name_is_odd(self):
         """Продавец назвал товар по-своему — но игра в шаблоне записана, и
         по ней карта узнаётся."""

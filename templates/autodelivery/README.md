@@ -68,7 +68,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 548 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 558 тестов, сети не требуют
 ```
 
 ---
