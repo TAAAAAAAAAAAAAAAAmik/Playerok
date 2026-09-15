@@ -14,9 +14,11 @@
 * На диск куки ложатся с правами 600 — их читает только владелец файла.
 * Токен самого бота и номер владельца берутся из окружения, а не из кода.
 
-Чего здесь нет намеренно: приёма любых команд. Этот модуль умеет ровно
-две вещи — сообщить владельцу и получить от него куки. Чем меньше бот
-принимает снаружи, тем меньше у него поверхности.
+Модуль умеет три вещи: сообщить владельцу, получить от него куки и
+дождаться ответа на вопрос. Разбора команд здесь нет — кто и о чём
+спрашивает, решает вызывающий, а сюда приходят только сообщения от
+владельца. Чем меньше бот принимает снаружи, тем меньше у него
+поверхности.
 """
 from __future__ import annotations
 
@@ -112,14 +114,7 @@ class OwnerLink:
         deadline = time.time() + wait_seconds
 
         while time.time() < deadline:
-            messages = self._updates()
-
-            if not messages:
-                # Настоящий Telegram держит опрос LONG_POLL секунд и сам
-                # задаёт темп. Но если он ответит сразу — пустой цикл
-                # выжрал бы процессор на все полчаса ожидания.
-                time.sleep(max(0.0, min(1.0, deadline - time.time())))
-                continue
+            messages = self._wait(deadline)
 
             for message in messages:
                 text = str(message.get("text") or "").strip()
@@ -150,6 +145,62 @@ class OwnerLink:
                 return cookies
 
         return ""
+
+    def _wait(self, deadline: float) -> list[dict]:
+        """Сообщения от владельца, не крутя пустой цикл.
+
+        Настоящий Telegram держит опрос LONG_POLL секунд и сам задаёт темп.
+        Но если он ответит сразу, цикл без паузы выжрал бы процессор на всё
+        время ожидания.
+        """
+        messages = self._updates()
+
+        if not messages:
+            time.sleep(max(0.0, min(1.0, deadline - time.time())))
+
+        return messages
+
+    def ask(self, question: str, wait_seconds: float = WAIT_SECONDS) -> dict:
+        """Спросить и дождаться ответа. → сообщение целиком или {}.
+
+        Сообщение, а не текст: в ответ может прийти фотография, а у неё
+        текста нет вовсе.
+        """
+        self.say(question)
+
+        return self.wait_answer(wait_seconds)
+
+    def wait_answer(self, wait_seconds: float = WAIT_SECONDS) -> dict:
+        """Дождаться следующего сообщения владельца. → сообщение или {}."""
+        deadline = time.time() + wait_seconds
+
+        while time.time() < deadline:
+            for message in self._wait(deadline):
+                return message
+
+        return {}
+
+    def download(self, file_id: str) -> bytes:
+        """Забрать файл, присланный владельцем. → байты или пусто.
+
+        Двумя шагами: сначала у Telegram спрашивается путь, потом файл
+        берётся по другому адресу — не тому, по которому идут вызовы API.
+        """
+        try:
+            path = str((self._call("getFile", file_id=file_id) or {})
+                       .get("file_path") or "")
+        except Exception:                                  # noqa: BLE001
+            return b""
+
+        if not path:
+            return b""
+
+        try:
+            response = self.session.get(
+                f"{API}/file/bot{self.bot_token}/{path}", timeout=TIMEOUT * 3)
+            return response.content or b""
+        except Exception:                                  # noqa: BLE001
+            return b""
 
     def _updates(self) -> list[dict]:
         """Новые сообщения от владельца. Чужие отбрасываются молча."""
