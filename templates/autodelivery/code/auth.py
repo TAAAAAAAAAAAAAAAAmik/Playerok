@@ -46,10 +46,26 @@ def open_account(cookies: str, user_agent: str):
     """
     try:
         from playerokapi.account import Account
-    except ImportError:
+    except ModuleNotFoundError as e:
+        # Различаем два случая: библиотеки нет вовсе и она есть, но
+        # разваливается при загрузке. Лечатся они по-разному, а свалить их
+        # в одно «не установлена» значит отправить ставить уже стоящее.
+        if (e.name or "").split(".")[0] != "playerokapi":
+            raise SystemExit(
+                f"Библиотека playerokapi установлена, но ей не хватает "
+                f"зависимости: {e.name}. Поставьте заново:\n"
+                "    python3 -m pip install --user --break-system-packages "
+                "-r requirements.txt")
+
         raise SystemExit(
-            "Не установлена библиотека playerokapi. "
-            "Поставьте: pip install -r requirements.txt")
+            "Не установлена библиотека playerokapi. Поставьте:\n"
+            "    python3 -m pip install --user --break-system-packages "
+            "-r requirements.txt")
+    except ImportError as e:
+        raise SystemExit(
+            f"Библиотека playerokapi установлена, но не загружается: {e}\n"
+            "Полную причину покажет:\n"
+            "    python3 -c \"import playerokapi\"")
 
     # Передаём строку куки целиком: библиотека разберёт её на пары сама.
     # Отдельный параметр token ждёт только JWT, и подсунуть ему всю строку
