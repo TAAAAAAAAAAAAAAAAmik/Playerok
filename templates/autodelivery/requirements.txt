@@ -8,5 +8,17 @@
 # названию playerok-requests-api — ДРУГАЯ библиотека с другим API.
 https://codeload.github.com/alleexxeeyy/PlayerokAPI/tar.gz/refs/heads/main
 
-# Клиент поставщика кодов ходит обычными HTTP-запросами.
+# Клиент поставщика кодов ходит обычными HTTP-запросами. Заодно это
+# незаявленная зависимость wrapper-tls-requests (см. ниже), вместе с idna,
+# который приходит с requests.
 requests>=2.31,<3
+
+# Заплатка чужой ошибки. playerokapi тянет wrapper-tls-requests==1.1.4, а та
+# не объявляет зависимостей ВООБЩЕ НИ ОДНОЙ, хотя импортирует tqdm, requests
+# и idna. Установка «по-честному» проходит, а импорт падает на
+# ModuleNotFoundError: No module named 'tqdm' — и выглядит это как будто не
+# установлена сама playerokapi.
+#
+# Проверено разбором колеса 1.1.4: Requires-Dist в метаданных нет ни строчки,
+# а tls_requests/models/libraries.py импортирует tqdm.
+tqdm>=4.66
