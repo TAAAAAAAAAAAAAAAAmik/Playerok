@@ -471,6 +471,27 @@ class ScreenTest(unittest.TestCase):
         self.assertEqual(telegram.deleted, [])
 
 
+class CommandsTest(unittest.TestCase):
+    """Команды в меню Telegram: без них их надо помнить и набирать вслепую."""
+
+    def test_commands_reach_telegram_without_the_slash(self):
+        telegram = FakeTelegram()
+        link(telegram).set_commands([("/start", "Меню"), ("new", "Товар")])
+
+        sent = [c for c in telegram.calls if c[0] == "setMyCommands"][0][1]
+        names = [c["command"] for c in sent["commands"]]
+
+        self.assertEqual(names, ["start", "new"])
+
+    def test_failure_is_not_fatal(self):
+        """Бот без списка команд работает, просто менее удобно."""
+        class Broken:
+            def post(self, *a, **kw):
+                raise OSError("нет сети")
+
+        self.assertFalse(link(Broken()).set_commands([("start", "Меню")]))
+
+
 class SpeedTest(unittest.TestCase):
     """Быстрота здесь — это не роскошь: бот, который «думает» секунды на
     каждый вопрос, кажется сломанным."""

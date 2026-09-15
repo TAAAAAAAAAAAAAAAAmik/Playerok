@@ -353,6 +353,86 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(self.store.all()[0].cookies, "token=" + "j" * 60)
 
 
+class CheckSessionTest(unittest.TestCase):
+    """Проверка сессии должна отвечать на «почему бот не работает» — и
+    заодно на то, о чём площадка молчит до худшего момента."""
+
+    class Me:
+        def __init__(self, **kw):
+            self.username = kw.get("username", "tamik")
+            self.is_blocked = kw.get("is_blocked", False)
+            self.is_blocked_for = kw.get("is_blocked_for", "")
+            self.can_publish_items = kw.get("can_publish_items", True)
+            self.unread_chats_counter = kw.get("unread", 0)
+
+    class Acc:
+        def __init__(self, me=None, error=None):
+            self.me, self.error = me, error
+
+        def get(self):
+            if self.error:
+                raise self.error
+
+            return self.me
+
+    class Unauthorized(Exception):
+        def __str__(self):
+            return "Не удалось подключиться к аккаунту Playerok."
+
+    def setUp(self):
+        item_bot.ACCOUNTS_DIR = os.path.join(tempfile.mkdtemp(), "кабинеты")
+
+    def test_live_session_is_reported(self):
+        link = FakeLink()
+        item_bot.check_session(link, self.Acc(self.Me()))
+
+        self.assertIn("живая", link.said[-1])
+        self.assertIn("tamik", link.said[-1])
+
+    def test_expired_session_explains_what_to_do(self):
+        link = FakeLink()
+        item_bot.check_session(link, self.Acc(error=self.Unauthorized()))
+
+        self.assertIn("не действует", link.said[-1])
+        self.assertIn("Аккаунт", link.said[-1])
+
+    def test_network_trouble_is_not_blamed_on_cookies(self):
+        """Иначе продавец пойдёт доставать куки там, где просто оборвалась
+        связь."""
+        link = FakeLink()
+        item_bot.check_session(link, self.Acc(error=OSError("сеть упала")))
+
+        self.assertIn("обрыв связи", link.said[-1])
+
+    def test_blocked_cabinet_is_shown(self):
+        """Иначе это выглядит как «бот сломался»."""
+        link = FakeLink()
+        item_bot.check_session(link, self.Acc(
+            self.Me(is_blocked=True, is_blocked_for="жалобы")))
+
+        self.assertIn("заблокирован", link.said[-1])
+        self.assertIn("жалобы", link.said[-1])
+
+    def test_publishing_ban_is_shown(self):
+        link = FakeLink()
+        item_bot.check_session(link, self.Acc(
+            self.Me(can_publish_items=False)))
+
+        self.assertIn("не разрешает выставлять", link.said[-1])
+
+    def test_unread_chats_are_mentioned(self):
+        link = FakeLink()
+        item_bot.check_session(link, self.Acc(self.Me(unread=3)))
+
+        self.assertIn("3", link.said[-1])
+
+    def test_without_a_cabinet_it_says_so(self):
+        link = FakeLink()
+        item_bot.check_session(link, None)
+
+        self.assertIn("не выбран", link.said[-1])
+
+
 class TemplateFlowTest(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()

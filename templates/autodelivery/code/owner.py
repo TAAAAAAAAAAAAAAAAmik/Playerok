@@ -91,6 +91,24 @@ class OwnerLink:
 
         return result if result is not None else {}
 
+    def set_commands(self, commands) -> bool:
+        """Прописать команды в меню Telegram.
+
+        Это та кнопка слева от поля ввода: без неё команды надо помнить и
+        набирать вслепую, а с ней они видны списком.
+
+        Ошибка не поднимается: бот без списка команд работает, просто
+        менее удобно.
+        """
+        try:
+            self._call("setMyCommands", commands=[
+                {"command": str(name).lstrip("/"), "description": str(about)}
+                for name, about in commands
+            ])
+            return True
+        except Exception:                                  # noqa: BLE001
+            return False
+
     def whoami(self) -> dict:
         """Кто этот бот по мнению Telegram.
 

@@ -12,6 +12,10 @@
 у разных игр разные, а один зашитый id уже приводил к тому, что товары
 создавались не там, где нужно.
 
+ПРОВЕРКА СЕССИИ. Кнопка «Проверить сессию» спрашивает у площадки, кто мы:
+этот вызов первым и падает, когда куки протухли. Заодно показывает, не
+заблокирован ли кабинет и разрешено ли выставлять товары.
+
 ЧЕРНОВИКИ. Кнопка «Черновики» показывает несозданные объявления кабинета
 и выставляет выбранное — с тем же вопросом про платный статус.
 
@@ -66,7 +70,19 @@ from templates import TemplateStore, folder_for               # noqa: E402
 MENU = [[("➕ Новый товар", "новый товар")],
         [("⚡ Из шаблона", "шаблон")],
         [("📄 Черновики", "черновики")],
+        [("🔑 Проверить сессию", "проверить")],
         [("👤 Аккаунт", "аккаунт")]]
+
+# Команды в меню Telegram — та кнопка слева от поля ввода. Без неё их
+# надо помнить и набирать вслепую.
+COMMANDS = [
+    ("start", "Меню"),
+    ("new", "Новый товар"),
+    ("tpl", "Создать из шаблона"),
+    ("drafts", "Черновики"),
+    ("check", "Проверить сессию"),
+    ("account", "Кабинеты"),
+]
 CANCEL = [("✖️ Отмена", "отмена")]
 REGIONS = [("🌍 GL — глобальный", "GL"), ("🇷🇺 RU — российский", "RU")]
 SKIP = [("⏭ Пропустить", "пропустить"), ("✖️ Отмена", "отмена")]
@@ -81,6 +97,8 @@ PHOTOS_DONE = [("✅ Готово", wizard.DONE_WORD), ("✖️ Отмена", "
 MAX_CHOICES = 12
 
 START_WORDS = ("новый товар", "новый", "/new", "/newitem")
+MENU_WORDS = ("/start", "старт", "меню", "/menu")
+CHECK_WORDS = ("проверить", "проверить сессию", "/check", "сессия")
 TEMPLATE_WORDS = ("шаблон", "шаблоны", "из шаблона", "/tpl")
 ACCOUNT_WORDS = ("аккаунт", "аккаунты", "кабинет", "/account")
 DRAFT_WORDS = ("черновики", "черновик", "/drafts")
@@ -883,6 +901,59 @@ def drafts_menu(link, account) -> None:
     publish_step(link, account, draft_id, price)
 
 
+def check_session(link, account) -> None:
+    """Проверить, жива ли сессия кабинета.
+
+    Спрашиваем у площадки, кто мы: этот вызов и падает первым, когда куки
+    протухли. Заодно он говорит то, что иначе выясняется в худший момент —
+    не заблокирован ли кабинет и разрешено ли выставлять товары.
+    """
+    if account is None:
+        link.screen("Кабинет не выбран. Откройте «👤 Аккаунт».", buttons=MENU)
+        return
+
+    link.screen("Спрашиваю площадку…")
+
+    try:
+        me = account.get()
+    except Exception as e:                                    # noqa: BLE001
+        if is_auth_error(e):
+            link.screen(f"🔴 Сессия не действует.\n\n{COOKIES_ADVICE}",
+                        buttons=MENU)
+        else:
+            link.screen(f"Проверить не вышло: {e}\n\n"
+                        "Похоже на обрыв связи, а не на протухшие куки — "
+                        "попробуйте ещё раз.", buttons=MENU)
+
+        return
+
+    where = AccountStore(ACCOUNTS_DIR).current()
+    lines = ["🟢 Сессия живая."]
+
+    if where is not None:
+        lines.append(f"Кабинет: {where.name}")
+
+    if getattr(me, "username", ""):
+        lines.append(f"Продавец: {me.username}")
+
+    # Про это молчат, пока не упрёшься: заблокированный кабинет и запрет
+    # публикации выглядят как «бот сломался».
+    if getattr(me, "is_blocked", False):
+        lines.append("⛔ Кабинет заблокирован"
+                     + (f": {me.is_blocked_for}"
+                        if getattr(me, "is_blocked_for", "") else ""))
+
+    if getattr(me, "can_publish_items", None) is False:
+        lines.append("⚠️ Площадка сейчас не разрешает выставлять товары")
+
+    unread = getattr(me, "unread_chats_counter", 0) or 0
+
+    if unread:
+        lines.append(f"💬 Непрочитанных чатов: {unread}")
+
+    link.screen("\n".join(lines), buttons=MENU)
+
+
 def accounts_menu(link, account):
     """Показать кабинеты и переключить. → аккаунт для дальнейшей работы.
 
@@ -1062,6 +1133,7 @@ def main() -> None:
             "Не заданы TELEGRAM_BOT_TOKEN и TELEGRAM_OWNER_ID — "
             "разговаривать не с кем.")
 
+    link.set_commands(COMMANDS)
     account = try_sign_in(link)
     where = AccountStore(ACCOUNTS_DIR).current()
 
@@ -1080,8 +1152,15 @@ def main() -> None:
         if not text:
             continue
 
+        if text in MENU_WORDS:
+            # «Меню» должно открываться всегда — даже когда кабинета нет и
+            # делать больше нечего.
+            link.forget_screen()
+            link.screen("Что делаем?", buttons=MENU)
+            continue
+
         if text in START_WORDS or text in TEMPLATE_WORDS \
-                or text in DRAFT_WORDS:
+                or text in DRAFT_WORDS or text in CHECK_WORDS:
             if account is None:
                 link.screen("Сначала нужен рабочий кабинет: откройте "
                          "«Аккаунт».", buttons=MENU)
@@ -1096,6 +1175,8 @@ def main() -> None:
         elif text in DRAFT_WORDS:
             drafts_menu(link, account)
             link.screen("Готов к следующему.", buttons=MENU)
+        elif text in CHECK_WORDS:
+            check_session(link, account)
         elif text in ACCOUNT_WORDS:
             account = accounts_menu(link, account)
         elif not wizard.cancelled(text):
