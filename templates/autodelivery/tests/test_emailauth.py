@@ -98,6 +98,42 @@ class SendTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("нет", why)
 
+    def test_html_page_is_not_called_success(self):
+        """Сказать «код отправлен», когда его не отправляли, — отправить
+        человека ждать письма, которого не будет."""
+        platform = Platform(Response(200, None, text="<html>проверка</html>"))
+        ok, why = emailauth.send_code(GOOD, UA, platform)
+
+        self.assertFalse(ok)
+        self.assertIn("защит", why)
+
+    def test_error_in_the_body_is_not_success(self):
+        """Площадка может отказать двухсотым ответом."""
+        platform = Platform(Response(200, {"error": "too many attempts"}))
+        ok, why = emailauth.send_code(GOOD, UA, platform)
+
+        self.assertFalse(ok)
+        self.assertIn("too many attempts", why)
+
+    def test_explicit_false_is_not_success(self):
+        platform = Platform(Response(200, {"success": False}))
+        ok, _ = emailauth.send_code(GOOD, UA, platform)
+
+        self.assertFalse(ok)
+
+    def test_unknown_but_quiet_body_is_accepted(self):
+        """Иначе бот откажется работать при малейшем изменении формата."""
+        platform = Platform(Response(200, {"requestId": "abc"}))
+        ok, why = emailauth.send_code(GOOD, UA, platform)
+
+        self.assertTrue(ok)
+        self.assertEqual(why, "")
+
+    def test_empty_json_object_is_accepted(self):
+        platform = Platform(Response(200, {}))
+
+        self.assertTrue(emailauth.send_code(GOOD, UA, platform)[0])
+
     def test_network_trouble_is_not_blamed_on_the_email(self):
         class Broken:
             def post(self, *a, **kw):

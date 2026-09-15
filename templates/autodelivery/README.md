@@ -45,6 +45,7 @@ docs/
 check_telegram.py  проверка связи с владельцем: живой ли токен, дойдёт ли
                    сообщение
 catalog_ids.py     разведка каталога площадки: ID для создания товара
+try_login.py       проба входа по почте: что площадка отвечает на самом деле
 supplier_ids.py    разведка каталога поставщика: ID услуг и номиналов
 new_item.py        создание товара: черновик, выставление по согласию
 my_items.py        мои товары на площадке: ID, названия, статусы
@@ -64,7 +65,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 381 тест, сети не требуют
+python3 -m unittest discover tests -v      # 386 тестов, сети не требуют
 ```
 
 ---

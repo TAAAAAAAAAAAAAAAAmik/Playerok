@@ -118,6 +118,38 @@ def send_code(email: str, user_agent: str, session=None) -> tuple[bool, str]:
     if getattr(response, "status_code", 0) >= 400:
         return False, _explain(response)
 
+    # Двухсотый ответ ещё не значит, что письмо ушло. Площадка может
+    # ответить страницей защиты от ботов или своей ошибкой в теле — и
+    # сказать «код отправлен», когда его не отправляли, значит отправить
+    # человека ждать письма, которого не будет.
+    body = _json(response)
+
+    if body is None:
+        return False, ("площадка ответила не по делу — похоже на защиту от "
+                       "ботов. Попробуйте позже или войдите куками")
+
+    return _accepted(body)
+
+
+def _accepted(body) -> tuple[bool, str]:
+    """Признала ли площадка запрос по телу ответа.
+
+    Тело у этой ручки не описано нигде, поэтому разбираем терпимо: явный
+    отказ ищем по known полям, а всё остальное считаем согласием — иначе
+    бот отказывался бы работать при малейшем изменении формата.
+    """
+    if not isinstance(body, dict):
+        return True, ""
+
+    for field in ("error", "message", "detail", "errorMessage"):
+        value = body.get(field)
+
+        if isinstance(value, str) and value.strip():
+            return False, f"площадка ответила: {value.strip()[:150]}"
+
+    if body.get("success") is False or body.get("ok") is False:
+        return False, "площадка не приняла запрос, но не сказала почему"
+
     return True, ""
 
 
