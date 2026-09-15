@@ -11,7 +11,7 @@ set -u
 HERE=$(CD=$(dirname "$0"); cd "$CD" && pwd)
 NOW=$(date +%s)
 
-for WHAT in item_bot restore_bot notify_bot; do
+for WHAT in item_bot delivery_bot notify_bot restore_bot; do
     FILE="$HERE/$WHAT.py"
     PIDS=$(pgrep -f "python3 -u $WHAT.py" 2>/dev/null || true)
     HAND=$(pgrep -f "python3 $WHAT.py" 2>/dev/null || true)

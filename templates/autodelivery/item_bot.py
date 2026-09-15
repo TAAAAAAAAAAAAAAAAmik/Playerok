@@ -69,6 +69,7 @@ import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
 import vary                                                   # noqa: E402
+from bump import LIMIT, Ledger                                # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
@@ -571,8 +572,14 @@ def collect_photos(link, draft: wizard.Draft, message: dict) -> bool:
             link._delete(message)
 
 
-def publish_step(link, account, item_id: str, price: int) -> None:
-    """Спросить про выставление и выставить, если согласились."""
+def publish_step(link, account, item_id: str, price: int,
+                 nominal: float = 0.0) -> None:
+    """Спросить про выставление и выставить, если согласились.
+
+    `nominal` нужен счёту бесплатных объявлений: платное продавец оплатил
+    сам, и в лимит одинаковых оно не идёт — иначе мы тратили бы его деньги
+    и следом сдвигали цену.
+    """
     try:
         statuses = account.get_item_priority_statuses(item_id, price)
     except Exception as e:                                    # noqa: BLE001
@@ -620,6 +627,10 @@ def publish_step(link, account, item_id: str, price: int) -> None:
             link.screen("Не подтверждено. Оставил черновиком.",
                         buttons=MENU)
             return
+
+    if nominal and listing.needs_confirmation(chosen):
+        # Платное — значит не бесплатное: из счёта убираем.
+        ledger_of().forget(nominal, price)
 
     try:
         account.publish_item(item_id, chosen.id)
@@ -838,7 +849,7 @@ def send_draft(link, account, draft: wizard.Draft) -> bool:
     # открывают потом, а экран к тому времени перепишется.
     link.forget_screen()
     link.say(f"Черновик создан.\nhttps://playerok.com/products/{item_id}")
-    publish_step(link, account, item_id, draft.price)
+    publish_step(link, account, item_id, draft.price, draft.nominal)
 
     return True
 
@@ -1084,8 +1095,17 @@ def make_from_template(link, account, store, template_id: str) -> None:
     # избегаем.
     vary.apply(draft.fields, ROTATION)
 
-    link.screen(f"Повторяю:\n\n{draft.summary()}\n\nСоздаю черновик…")
-    send_draft(link, account, draft)
+    # Четвёртая копия по той же цене — уже не ассортимент. Поднимаем на
+    # рубль и говорим об этом: молча изменить цену продавца нельзя.
+    ledger = ledger_of()
+    draft.price, up = ledger.price_for(draft.nominal, draft.price)
+    note = (f"\n\nЦена поднята на {up} ₽: бесплатных по {template.price} ₽ "
+            f"уже {LIMIT}." if up else "")
+
+    link.screen(f"Повторяю:\n\n{draft.summary()}{note}\n\nСоздаю черновик…")
+
+    if send_draft(link, account, draft):
+        ledger.remember(draft.nominal, draft.price)
 
 
 def series_menu(link, account) -> None:
@@ -1222,9 +1242,18 @@ def make_series(link, account, store, template_id: str) -> None:
                     + "\n".join(bad + refused), buttons=MENU)
         return
 
+    raised = apply_bump(jobs)
     count = plural(len(jobs), "объявление", "объявления", "объявлений")
     lines = [f"Создам {count}:", ""]
-    lines += [f"• {j['name']} — {j['price']} ₽" for j in jobs]
+    lines += [f"• {j['name']} — {j['price']} ₽"
+              + (f" (+{j['bump']} — таких уже {LIMIT})" if j.get("bump")
+                 else "")
+              for j in jobs]
+
+    if raised:
+        many = plural(raised, "объявления", "объявлений", "объявлений")
+        lines += ["", f"Цена поднята у {many}: столько же бесплатных "
+                      f"с той же ценой уже висит."]
 
     if bad or refused:
         # Пропущенное показываем здесь же: молча пропустить строку значит
@@ -1400,6 +1429,26 @@ def _series_text(link, answer):
     return text
 
 
+def apply_bump(jobs) -> int:
+    """Поднять цену там, где одинаковых объявлений уже предел. → сколько.
+
+    Считаем ВСЮ партию сразу, а не по одному при создании: продавец должен
+    увидеть настоящие цены до того, как согласится, а не узнать о них из
+    готовых объявлений.
+    """
+    ledger = ledger_of()
+    raised = 0
+
+    for job in jobs:
+        price, up = ledger.price_for(job["nominal"], job["price"])
+        job["price"], job["bump"] = price, up
+
+        if up:
+            raised += 1
+
+    return raised
+
+
 def run_series(link, account, template, photos, jobs) -> None:
     """Создать объявления по плану, показывая ход одним экраном."""
     done, failed = [], []
@@ -1430,6 +1479,9 @@ def run_series(link, account, template, photos, jobs) -> None:
 
         if item_id:
             done.append((job["name"], item_id))
+            # Записываем сразу: партия идёт подряд, и без этого все её
+            # объявления получили бы одну цену.
+            ledger_of().remember(job["nominal"], job["price"])
         else:
             failed.append(f"{job['name']}: {why}")
 
@@ -1491,6 +1543,15 @@ def create_item(account, draft: wizard.Draft):
 def is_auth_error_text(why: str) -> bool:
     """Отказ во входе, узнанный по тексту уже пойманной ошибки."""
     return is_auth_error(Exception(str(why)))
+
+
+def ledger_of() -> Ledger:
+    """Счёт бесплатных объявлений текущего кабинета.
+
+    В том же хранилище, что настройки выдачи: отдельный файл стал бы
+    вторым источником правды о том же кабинете.
+    """
+    return Ledger(settings_of().store)
 
 
 def settings_of() -> Settings:

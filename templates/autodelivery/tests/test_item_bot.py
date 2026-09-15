@@ -1298,5 +1298,63 @@ class VariedFieldsTest(unittest.TestCase):
         self.assertEqual(fields[0]["value"].count(once), 1)
 
 
+class PriceBumpTest(unittest.TestCase):
+    """Четвёртая копия по той же цене — уже не ассортимент."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        self.tid = item_bot.templates_of().save(
+            "1000 Robux", 1320, "GL", [PNG], description="Коды",
+            game=GAME, category=CATEGORY, obtaining=OBTAINING)
+
+    def press(self, times):
+        account = FakeAccount()
+        screens = []
+
+        for _ in range(times):
+            link = FakeLink([item_bot.PICK + self.tid,
+                             item_bot.PICK_ACT + "make"])
+            item_bot.from_template(link, account)
+            screens.append(next(t for t in link.said if "Повторяю" in t))
+
+        return account.created, screens
+
+    def test_the_first_three_keep_the_price(self):
+        created, _ = self.press(3)
+
+        self.assertEqual([c["price"] for c in created], [1320] * 3)
+
+    def test_the_fourth_costs_a_rouble_more(self):
+        created, _ = self.press(4)
+
+        self.assertEqual(created[-1]["price"], 1321)
+
+    def test_the_seller_is_told_the_price_changed(self):
+        """Молча изменить цену продавца нельзя: он её назначил сам."""
+        _, screens = self.press(4)
+
+        self.assertIn("поднята", screens[-1])
+        self.assertNotIn("поднята", screens[0])
+
+    def test_the_series_shows_raised_prices_before_creating(self):
+        """Продавец должен увидеть настоящие цены до того, как согласится,
+        а не узнать о них из готовых объявлений."""
+        ledger = item_bot.ledger_of()
+
+        for _ in range(3):
+            ledger.remember(400, 540)
+
+        link = FakeLink([item_bot.PICK_SERIES + self.tid, "сам",
+                         "400 = 540", "отмена"])
+        item_bot.series_menu(link, FakeAccount())
+        plan = next(t for t in link.said if "Создам" in t)
+
+        self.assertIn("541", plan)
+        self.assertIn("поднята", plan)
+
+
 if __name__ == "__main__":
     unittest.main()
