@@ -76,7 +76,7 @@ async def main() -> None:
     from playerokapi.account import Account
 
     market = PlayerokMarketplace(
-        Account(token=os.environ["PLAYEROK_TOKEN"],
+        Account(cookies=os.environ["PLAYEROK_COOKIES"],
                 user_agent=os.environ["PLAYEROK_UA"]).get())
     supplier = ApprouteSupplier(
         api_key=os.environ["APPROUTE_KEY"],

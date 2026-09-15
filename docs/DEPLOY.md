@@ -9,7 +9,7 @@
 
 | Что | Откуда взять |
 |---|---|
-| Куки продавца PlayerOK | из браузера, где вы вошли: строка `__ddg3=...;token=...` |
+| Куки продавца PlayerOK | из браузера, где вы вошли, — строка целиком |
 | User-agent того же браузера | оттуда же — иначе площадка сочтёт вход чужим |
 | Ключ AppRoute | кабинет поставщика, **обязательно с правом `orders:write`** |
 | ID услуг у поставщика | `GET /services` в кабинете AppRoute |
@@ -37,7 +37,7 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/python -m unittest discover tests
-# 46 тестов, сети не требуют
+# 47 тестов, сети не требуют
 ```
 
 ---
@@ -53,7 +53,7 @@ sudo -e /etc/autodelivery.env
 ```
 
 ```ini
-PLAYEROK_TOKEN=__ddg3=...;token=eyJhbGciOi...
+PLAYEROK_COOKIES=строка куки из браузера целиком
 PLAYEROK_UA=Mozilla/5.0 (...) ваш браузер целиком
 APPROUTE_KEY=...
 APPROUTE_PROXY=http://user:pass@постоянный-адрес:port

@@ -11,7 +11,7 @@
 чтения заказов по ссылке (у последнего есть побочное действие: поставщик
 помечает коды полученными).
 
-    PLAYEROK_TOKEN=... PLAYEROK_UA=... python3 watch.py
+    PLAYEROK_COOKIES=... PLAYEROK_UA=... python3 watch.py
 
 Когда увиденное совпадёт с ожидаемым — можно запускать боевой цикл.
 """
@@ -42,13 +42,14 @@ def account_from_env():
     Куки и user-agent живут только в окружении: положить их в код значило бы
     выложить доступ к кабинету продавца в репозиторий.
     """
-    token = os.environ.get("PLAYEROK_TOKEN", "").strip()
+    cookies = os.environ.get("PLAYEROK_COOKIES", "").strip()
     user_agent = os.environ.get("PLAYEROK_UA", "").strip()
 
-    if not token:
+    if not cookies:
         raise SystemExit(
-            "Нет PLAYEROK_TOKEN. Это строка куки из браузера, где вы вошли "
-            "продавцом: «__ddg3=...;token=...». Без неё площадка не пустит.")
+            "Нет PLAYEROK_COOKIES. Это строка куки целиком из браузера, где "
+            "вы вошли продавцом — со всем содержимым, включая token и куку "
+            "защиты от DDoS-Guard. Библиотека разберёт её сама.")
 
     if not user_agent:
         raise SystemExit(
@@ -62,7 +63,10 @@ def account_from_env():
             "Не установлена библиотека playerokapi. "
             "Поставьте: pip install -r requirements.txt")
 
-    return Account(token=token, user_agent=user_agent).get()
+    # Передаём строку куки целиком: библиотека разберёт её на пары сама.
+    # Отдельный параметр token ждёт только JWT, и подсунуть ему всю строку
+    # значит молча остаться неавторизованным.
+    return Account(cookies=cookies, user_agent=user_agent).get()
 
 
 async def main() -> None:
