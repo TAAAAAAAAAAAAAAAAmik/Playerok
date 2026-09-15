@@ -57,6 +57,13 @@ def main() -> None:
 
     email = sys.argv[1].strip()
     code = sys.argv[2].strip() if len(sys.argv) > 2 else ""
+
+    # «123456» стоит в примерах, и подставить его целиком вместо цифр из
+    # письма проще простого — на этом уже спотыкались.
+    if code == "123456":
+        raise SystemExit(
+            "123456 — это пример из подсказки, а не ваш код.\n"
+            "Возьмите шесть цифр из письма и подставьте их.")
     user_agent = os.environ.get(
         "PLAYEROK_UA",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

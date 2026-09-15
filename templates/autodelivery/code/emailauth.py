@@ -60,6 +60,25 @@ def _headers(user_agent: str) -> dict:
     }
 
 
+# Что площадка говорит своими словами и что это значит. Показывать
+# продавцу «otp_code_mismatch» — всё равно что не сказать ничего.
+SAID = {
+    "otp_code_mismatch": "код не совпал",
+    "otp_code_expired": "код истёк, запросите новый",
+    "otp_code_not_found": "для этой почты код не запрашивали",
+    "too_many_requests": "слишком часто, подождите",
+    "user_not_found": "аккаунта с такой почтой нет",
+    "email_not_confirmed": "почта на площадке не подтверждена",
+}
+
+
+def translate(said: str) -> str:
+    """Слова площадки по-человечески, если знаем их."""
+    key = str(said or "").strip().lower()
+
+    return SAID.get(key, said)
+
+
 def _reason(response) -> str:
     """Что площадка сказала в теле — её словами.
 
@@ -74,10 +93,10 @@ def _reason(response) -> str:
             value = body.get(field)
 
             if isinstance(value, str) and value.strip():
-                return value.strip()[:200]
+                return translate(value.strip())[:200]
 
             if isinstance(value, list) and value:
-                return str(value[0])[:200]
+                return translate(str(value[0]))[:200]
 
     return str(getattr(response, "text", "") or "").strip()[:200]
 
@@ -99,11 +118,17 @@ def _explain(response, step: str = "") -> str:
                 + (f", подождите {wait} с" if wait else ", подождите минуту"))
 
     if code in (400, 422):
-        what = ("код не подошёл — проверьте, что ввели все шесть цифр из "
-                "последнего письма" if step == "confirm"
-                else "площадка не приняла запрос: проверьте почту")
+        if step == "confirm":
+            # Площадка различает «не тот код» и «неверный запрос». Первое
+            # чинится вводом настоящих цифр, второе — нашим кодом, и
+            # смешивать их значит искать не там.
+            if said and "не совпал" in said:
+                return ("код не совпал. Введите цифры из ПОСЛЕДНЕГО письма: "
+                        "каждый новый запрос кода отменяет предыдущий")
 
-        return what + tail
+            return "код не подошёл." + tail
+
+        return "площадка не приняла запрос: проверьте почту" + tail
 
     if code in (401, 403):
         return "код неверный или уже истёк." + tail

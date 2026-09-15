@@ -183,7 +183,39 @@ class ConfirmTest(unittest.TestCase):
         _, why_confirm = emailauth.confirm(GOOD, "123456", UA, confirming)
 
         self.assertIn("почт", why_send)
-        self.assertIn("цифр", why_confirm)
+        self.assertIn("код", why_confirm)
+        self.assertNotIn("почт", why_confirm)
+
+    def test_platform_slang_is_translated(self):
+        """«otp_code_mismatch» на экране продавца — всё равно что молчание."""
+        platform = Platform(Response(400, {"error": "Bad Request",
+                                           "message": "otp_code_mismatch",
+                                           "statusCode": 400}))
+        _, why = emailauth.confirm(GOOD, "123456", UA, platform)
+
+        self.assertIn("не совпал", why)
+        self.assertNotIn("otp_code_mismatch", why)
+
+    def test_mismatch_advises_the_latest_letter(self):
+        """Каждый новый запрос кода отменяет предыдущий — на этом и
+        спотыкаются."""
+        platform = Platform(Response(400, {"message": "otp_code_mismatch"}))
+        _, why = emailauth.confirm(GOOD, "123456", UA, platform)
+
+        self.assertIn("ПОСЛЕДНЕГО", why)
+
+    def test_expired_code_is_named_as_expired(self):
+        platform = Platform(Response(400, {"message": "otp_code_expired"}))
+        _, why = emailauth.confirm(GOOD, "123456", UA, platform)
+
+        self.assertIn("истёк", why)
+
+    def test_unknown_words_are_shown_as_they_came(self):
+        """Незнакомое лучше показать как есть, чем проглотить."""
+        platform = Platform(Response(400, {"message": "something_new"}))
+        _, why = emailauth.confirm(GOOD, "123456", UA, platform)
+
+        self.assertIn("something_new", why)
 
     def test_plain_text_refusal_is_shown_too(self):
         platform = Platform(Response(400, None, text="invalid otp"))
