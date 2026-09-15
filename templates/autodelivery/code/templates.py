@@ -3,7 +3,8 @@
 Продавец выставляет одно и то же по многу раз. Собирать каждый раз
 название, цену, регион и фотографии заново — это минуты вместо секунд.
 
-Что лежит в шаблоне. Название, цена, регион и сами картинки файлами.
+Что лежит в шаблоне. Название, цена, регион, описание, комментарий и
+сами картинки файлами.
 Картинки именно копией, а не ссылкой на товар: товар продадут, снимут или
 отклонят, а шаблон должен работать и через полгода.
 
@@ -64,6 +65,8 @@ class Template:
         self.name = str(card.get("name") or "")
         self.price = int(card.get("price") or 0)
         self.region = str(card.get("region") or "")
+        self.description = str(card.get("description") or "")
+        self.comment = str(card.get("comment") or "")
         self.files = [str(f) for f in (card.get("photos") or [])]
         self.at = float(card.get("at") or 0)
 
@@ -101,7 +104,8 @@ class TemplateStore:
 
         return os.path.join(self.folder, template_id)
 
-    def save(self, name: str, price: int, region: str, photos: list) -> str:
+    def save(self, name: str, price: int, region: str, photos: list,
+             description: str = "", comment: str = "") -> str:
         """Сохранить объявление шаблоном. → номер."""
         template_id = new_id()
         path = self._path(template_id)
@@ -120,6 +124,7 @@ class TemplateStore:
             files.append(file_name)
 
         card = {"name": name, "price": int(price), "region": region,
+                "description": description or "", "comment": comment or "",
                 "photos": files, "at": time.time()}
 
         with open(os.path.join(path, CARD), "w", encoding="utf-8") as f:

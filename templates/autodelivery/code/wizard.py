@@ -9,8 +9,10 @@
 """
 from __future__ import annotations
 
+import re
+
 # Сколько шагов и в каком порядке.
-STEPS = ("name", "price", "region", "photos")
+STEPS = ("name", "price", "region", "description", "comment", "photos")
 
 QUESTIONS = {
     "name": ("Название товара.\n\n"
@@ -22,6 +24,15 @@ QUESTIONS = {
                "GL — глобальные коды, RU — российские. По этой букве бот "
                "выберет, что покупать у поставщика, так что ошибка здесь "
                "означает покупку не того."),
+    "description": ("Описание товара.\n\n"
+                    "Что покупатель прочитает на странице: что он получит, "
+                    "как быстро, как активировать.\n\n"
+                    "Строку про регион дописывать не нужно — я поставлю её "
+                    "сам, и по ней бот потом выберет, что покупать. Если "
+                    "напишете свою, я её уберу, чтобы они не спорили."),
+    "comment": ("Комментарий к товару — необязательное поле площадки.\n\n"
+                "Короткая пометка для карточки. Если не нужен — "
+                "«пропустить»."),
     "photos": ("Пришлите фотографии товара. Можно несколько — по одной.\n\n"
                "Когда хватит, напишите «готово».\n"
                "Хотя бы одна обязательна: без картинок площадка товар не "
@@ -30,10 +41,26 @@ QUESTIONS = {
 
 DONE_WORD = "готово"
 CANCEL_WORDS = ("отмена", "стоп", "хватит")
+SKIP_WORDS = ("пропустить", "пропуск", "-", "нет")
 
 # Площадка режет длинные названия, и лучше сказать об этом сразу, чем
 # получить обрезанное объявление.
 NAME_LIMIT = 120
+
+# Описание длиннее площадка тоже не примет целиком.
+DESCRIPTION_LIMIT = 2000
+
+COMMENT_LIMIT = 500
+
+# Текст, которым описание заполняется, если продавец его пропустил.
+DEFAULT_TAIL = ("Код приходит в чат сразу после оплаты.\n"
+                "Активация: roblox.com/redeem")
+
+# Своя строка про регион в описании продавца: её надо убрать, иначе в
+# описании окажутся две, и движок прочитает не ту. Ошибка тихая и
+# денежная — купится не тот товар.
+REGION_LINE = re.compile(r"^\s*(?:регион|region)\b.*$",
+                         re.IGNORECASE | re.MULTILINE)
 
 REGIONS = ("GL", "RU")
 
@@ -45,6 +72,10 @@ class Draft:
         self.name = ""
         self.price = 0
         self.region = ""
+        # None — ещё не спрашивали, "" — спросили и пропустили. Разница
+        # важна: иначе пропуск означал бы вечный повтор вопроса.
+        self.description = None
+        self.comment = None
         self.photos: list = []
 
     @property
@@ -59,6 +90,12 @@ class Draft:
         if not self.region:
             return "region"
 
+        if self.description is None:
+            return "description"
+
+        if self.comment is None:
+            return "comment"
+
         if not self.photos:
             return "photos"
 
@@ -68,11 +105,16 @@ class Draft:
         return (f"Название: {self.name}\n"
                 f"Цена: {self.price} ₽\n"
                 f"Регион: {self.region}\n"
+                f"Комментарий: {self.comment or '—'}\n"
                 f"Фотографий: {len(self.photos)}")
 
 
 def cancelled(text: str) -> bool:
     return str(text or "").strip().lower() in CANCEL_WORDS
+
+
+def skipped(text: str) -> bool:
+    return str(text or "").strip().lower() in SKIP_WORDS
 
 
 def enough_photos(text: str) -> bool:
@@ -128,7 +170,45 @@ def accept_region(text: str) -> tuple[str, str]:
     return "", f"Не понял. Напишите {' или '.join(REGIONS)}."
 
 
-ACCEPT = {"name": accept_name, "price": accept_price, "region": accept_region}
+def accept_description(text: str) -> tuple[str, str]:
+    """→ (описание, причина отказа). Пропуск даёт текст по умолчанию.
+
+    Строки про регион из текста продавца вырезаются: свою мы поставим
+    первой, а две разные строки в одном описании — это тихая денежная
+    ошибка, движок прочитает не ту и купит не тот товар.
+    """
+    if skipped(text):
+        return DEFAULT_TAIL, ""
+
+    body = REGION_LINE.sub("", str(text or "")).strip()
+    body = re.sub(r"\n{3,}", "\n\n", body)
+
+    if not body:
+        return DEFAULT_TAIL, ""
+
+    if len(body) > DESCRIPTION_LIMIT:
+        return "", (f"Слишком длинно: {len(body)} знаков при "
+                    f"{DESCRIPTION_LIMIT} допустимых.")
+
+    return body, ""
+
+
+def accept_comment(text: str) -> tuple[str, str]:
+    """→ (комментарий, причина отказа). Поле необязательное."""
+    if skipped(text):
+        return "", ""
+
+    body = " ".join(str(text or "").split())
+
+    if len(body) > COMMENT_LIMIT:
+        return "", (f"Слишком длинно: {len(body)} знаков при "
+                    f"{COMMENT_LIMIT} допустимых.")
+
+    return body, ""
+
+
+ACCEPT = {"name": accept_name, "price": accept_price, "region": accept_region,
+          "description": accept_description, "comment": accept_comment}
 
 
 def question_for(draft: Draft) -> str:
@@ -164,9 +244,9 @@ def description_for(draft: Draft) -> str:
     """Описание товара для площадки.
 
     Первая строка — не оформление: из неё движок выдачи читает регион.
-    Уберёте её — бот при оплате остановится и код не купит.
+    Уберёте её — бот при оплате остановится и код не купит. Поэтому её
+    ставим мы, а не продавец, и в его тексте такие строки вырезаны.
     """
-    return (f"Регион кода: {draft.region}\n"
-            "\n"
-            "Код приходит в чат сразу после оплаты.\n"
-            "Активация: roblox.com/redeem")
+    tail = draft.description if draft.description else DEFAULT_TAIL
+
+    return f"Регион кода: {draft.region}\n\n{tail}"

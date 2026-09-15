@@ -45,6 +45,7 @@ MENU = [[("➕ Новый товар", "новый товар")],
         [("⚡ Из шаблона", "шаблон")]]
 CANCEL = [("✖️ Отмена", "отмена")]
 REGIONS = [("🌍 GL — глобальный", "GL"), ("🇷🇺 RU — российский", "RU")]
+SKIP = [("⏭ Пропустить", "пропустить"), ("✖️ Отмена", "отмена")]
 PHOTOS_DONE = [("✅ Готово", wizard.DONE_WORD), ("✖️ Отмена", "отмена")]
 
 # Товар создаём в той категории, что разведана для кодов Roblox.
@@ -54,6 +55,11 @@ CATEGORY_ID = os.environ.get(
 # «Без входа в аккаунт»: мы выдаём код, а не заходим в чужой аккаунт.
 OBTAINING_TYPE_ID = os.environ.get(
     "PLAYEROK_OBTAINING_TYPE_ID", "1f094822-b7a2-6590-385d-cadb2ec7b130")
+
+# Поле «Комментарий» этого способа получения. Необязательное, и если id
+# не тот — товар создастся без него, а не сломается.
+COMMENT_FIELD_ID = os.environ.get(
+    "PLAYEROK_COMMENT_FIELD_ID", "1f094823-0eb1-6f20-2dfc-d4772e02d700")
 
 START_WORDS = ("новый товар", "новый", "/new", "/newitem")
 TEMPLATE_WORDS = ("шаблон", "шаблоны", "из шаблона", "/tpl")
@@ -110,6 +116,11 @@ def buttons_for(step: str):
 
     if step == "photos":
         return [PHOTOS_DONE]
+
+    if step in ("description", "comment"):
+        # Оба поля можно не заполнять: описание тогда возьмётся типовое,
+        # а комментарий у площадки и так необязательный.
+        return [SKIP]
 
     return [CANCEL]
 
@@ -256,7 +267,7 @@ def make_item(link, account) -> None:
         return
 
     link.say("Проверьте:\n\n" + draft.summary()
-             + "\n\n" + wizard.description_for(draft)
+             + "\n\n— описание —\n" + wizard.description_for(draft)
              + "\n\nСоздаю черновик…")
 
     if not send_draft(link, account, draft):
@@ -267,6 +278,9 @@ def make_item(link, account) -> None:
 
 def send_draft(link, account, draft: wizard.Draft) -> bool:
     """Создать черновик и спросить про выставление. → получилось ли."""
+    fields = ([Field(COMMENT_FIELD_ID, draft.comment)]
+              if draft.comment and COMMENT_FIELD_ID else [])
+
     try:
         item = account.create_item(
             game_category_id=CATEGORY_ID,
@@ -275,7 +289,7 @@ def send_draft(link, account, draft: wizard.Draft) -> bool:
             price=draft.price,
             description=wizard.description_for(draft),
             options={},
-            data_fields=[],
+            data_fields=fields,
             attachments=list(draft.photos),
         )
     except Exception as e:                                    # noqa: BLE001
@@ -306,7 +320,8 @@ def offer_template(link, draft: wizard.Draft) -> None:
     store = TemplateStore(TEMPLATE_DIR)
 
     try:
-        store.save(draft.name, draft.price, draft.region, draft.photos)
+        store.save(draft.name, draft.price, draft.region, draft.photos,
+                   description=draft.description, comment=draft.comment)
     except Exception as e:                                    # noqa: BLE001
         link.say(f"Сохранить шаблон не вышло: {e}")
         return
@@ -351,6 +366,8 @@ def from_template(link, account) -> None:
     draft.name = template.name
     draft.price = template.price
     draft.region = template.region
+    draft.description = template.description
+    draft.comment = template.comment
     draft.photos = photos
 
     link.say(f"Повторяю:\n\n{draft.summary()}\n\nСоздаю черновик…")

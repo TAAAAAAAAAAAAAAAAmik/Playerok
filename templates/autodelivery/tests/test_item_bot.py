@@ -64,9 +64,11 @@ class FakeAccount:
         return []          # выставлять нечем — черновик и остаётся
 
 
-def draft(name="80 Robux", price=149, region="GL", photos=(PNG,)):
+def draft(name="80 Robux", price=149, region="GL", photos=(PNG,),
+          description="Коды сразу.", comment="быстро"):
     d = wizard.Draft()
     d.name, d.price, d.region = name, price, region
+    d.description, d.comment = description, comment
     d.photos = list(photos)
     return d
 
@@ -89,6 +91,28 @@ class SendDraftTest(unittest.TestCase):
         item_bot.send_draft(FakeLink(), account, draft(region="RU"))
 
         self.assertIn("Регион кода: RU", account.created[0]["description"])
+
+    def test_seller_description_reaches_the_marketplace(self):
+        account = FakeAccount()
+        item_bot.send_draft(FakeLink(), account, draft(description="Мой текст."))
+
+        self.assertIn("Мой текст.", account.created[0]["description"])
+
+    def test_comment_goes_into_the_data_field(self):
+        account = FakeAccount()
+        item_bot.send_draft(FakeLink(), account, draft(comment="пометка"))
+        fields = account.created[0]["data_fields"]
+
+        self.assertEqual(len(fields), 1)
+        self.assertEqual(fields[0].value, "пометка")
+        self.assertEqual(fields[0].id, item_bot.COMMENT_FIELD_ID)
+
+    def test_no_comment_means_no_data_field(self):
+        """Необязательное поле не надо слать пустым."""
+        account = FakeAccount()
+        item_bot.send_draft(FakeLink(), account, draft(comment=""))
+
+        self.assertEqual(account.created[0]["data_fields"], [])
 
     def test_refusal_is_reported_and_nothing_is_lost(self):
         link = FakeLink()
@@ -124,9 +148,19 @@ class TemplateFlowTest(unittest.TestCase):
 
         self.assertEqual(self.store.all(), [])
 
+    def test_template_keeps_the_description_and_comment(self):
+        item_bot.offer_template(FakeLink(["да"]),
+                                draft(description="Мой текст.",
+                                      comment="пометка"))
+        template = self.store.all()[0]
+
+        self.assertEqual(template.description, "Мой текст.")
+        self.assertEqual(template.comment, "пометка")
+
     def test_one_press_recreates_the_same_item(self):
         """То, ради чего всё это: нажал — и объявление такое же."""
-        tid = self.store.save("80 Robux", 149, "GL", [PNG])
+        tid = self.store.save("80 Robux", 149, "GL", [PNG],
+                              description="Мой текст.", comment="пометка")
         account = FakeAccount()
         item_bot.from_template(FakeLink([item_bot.PICK + tid]), account)
 
@@ -135,6 +169,8 @@ class TemplateFlowTest(unittest.TestCase):
         self.assertEqual(sent["price"], 149)
         self.assertEqual(sent["attachments"], [PNG])
         self.assertIn("Регион кода: GL", sent["description"])
+        self.assertIn("Мой текст.", sent["description"])
+        self.assertEqual(sent["data_fields"][0].value, "пометка")
 
     def test_no_templates_is_explained_not_silent(self):
         link = FakeLink()

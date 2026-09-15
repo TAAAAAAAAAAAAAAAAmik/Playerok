@@ -27,6 +27,10 @@ class StepsTest(unittest.TestCase):
         draft.price = 100
         self.assertEqual(draft.step, "region")
         draft.region = "GL"
+        self.assertEqual(draft.step, "description")
+        draft.description = "Мои коды лучшие."
+        self.assertEqual(draft.step, "comment")
+        draft.comment = ""
         self.assertEqual(draft.step, "photos")
         draft.photos.append(b"png-bytes")
         self.assertEqual(draft.step, "")
@@ -35,9 +39,18 @@ class StepsTest(unittest.TestCase):
         for step in wizard.STEPS:
             self.assertTrue(wizard.QUESTIONS.get(step, "").strip(), step)
 
+    def test_skipped_is_not_the_same_as_unanswered(self):
+        """Иначе пропуск означал бы вечный повтор одного вопроса."""
+        draft = wizard.Draft()
+        draft.name, draft.price, draft.region = "x", 1, "GL"
+        draft.description = ""
+
+        self.assertEqual(draft.step, "comment")
+
     def test_finished_draft_is_asked_nothing(self):
         draft = wizard.Draft()
         draft.name, draft.price, draft.region = "x", 1, "GL"
+        draft.description, draft.comment = "текст", ""
         draft.photos.append(b"png")
 
         self.assertEqual(wizard.question_for(draft), "")
@@ -116,11 +129,94 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(draft.price, 0)
 
 
+class DescriptionInputTest(unittest.TestCase):
+    def test_seller_text_is_kept(self):
+        body, why = wizard.accept_description("Коды сразу. Активация быстрая.")
+
+        self.assertEqual(why, "")
+        self.assertIn("Коды сразу", body)
+
+    def test_skip_gives_the_default_text(self):
+        self.assertEqual(wizard.accept_description("пропустить")[0],
+                         wizard.DEFAULT_TAIL)
+
+    def test_empty_text_gives_the_default_too(self):
+        self.assertEqual(wizard.accept_description("   ")[0],
+                         wizard.DEFAULT_TAIL)
+
+    def test_own_region_line_is_cut_out(self):
+        """Две разные строки региона — тихая денежная ошибка: движок
+        прочитает не ту и купит не тот товар."""
+        body, _ = wizard.accept_description(
+            "Регион кода: RU\nМои коды лучшие.")
+
+        self.assertNotIn("RU", body)
+        self.assertIn("Мои коды лучшие.", body)
+
+    def test_region_line_in_any_case_and_language(self):
+        for line in ("регион кода: RU", "РЕГИОН: ru", "Region code: RU"):
+            body, _ = wizard.accept_description(f"{line}\nтекст")
+
+            self.assertNotIn("RU", body.upper(), line)
+
+    def test_too_long_is_refused_with_the_numbers(self):
+        _, why = wizard.accept_description("я" * (wizard.DESCRIPTION_LIMIT + 1))
+
+        self.assertIn(str(wizard.DESCRIPTION_LIMIT), why)
+
+
+class CommentInputTest(unittest.TestCase):
+    def test_comment_is_optional(self):
+        self.assertEqual(wizard.accept_comment("пропустить"), ("", ""))
+        self.assertEqual(wizard.accept_comment("-"), ("", ""))
+
+    def test_text_is_tidied(self):
+        self.assertEqual(wizard.accept_comment("  быстрая   выдача ")[0],
+                         "быстрая выдача")
+
+    def test_too_long_is_refused(self):
+        self.assertTrue(
+            wizard.accept_comment("я" * (wizard.COMMENT_LIMIT + 1))[1])
+
+
+class FinalDescriptionTest(unittest.TestCase):
+    """Собранное описание должен понять и покупатель, и движок."""
+
+    def build(self, region, text):
+        draft = wizard.Draft()
+        draft.region = region
+        draft.description = text
+
+        return wizard.description_for(draft)
+
+    def test_chosen_region_wins_over_the_typed_one(self):
+        from catalog import region_from_description
+
+        body, _ = wizard.accept_description("Регион кода: RU\nтекст")
+
+        self.assertEqual(region_from_description(self.build("GL", body)), "GL")
+
+    def test_seller_text_is_below_the_region_line(self):
+        built = self.build("GL", "Мой текст.")
+
+        self.assertTrue(built.startswith("Регион кода: GL"))
+        self.assertIn("Мой текст.", built)
+
+    def test_skipped_description_still_says_something_useful(self):
+        self.assertIn("чат", self.build("GL", wizard.DEFAULT_TAIL))
+
+
 class WordsTest(unittest.TestCase):
     def test_cancel_is_understood_loosely(self):
         self.assertTrue(wizard.cancelled("отмена"))
         self.assertTrue(wizard.cancelled("  СТОП "))
         self.assertFalse(wizard.cancelled("80 Robux"))
+
+    def test_skip_is_understood_loosely(self):
+        self.assertTrue(wizard.skipped("пропустить"))
+        self.assertTrue(wizard.skipped(" НЕТ "))
+        self.assertTrue(wizard.skipped("-"))
+        self.assertFalse(wizard.skipped("мой текст"))
 
     def test_done_only_by_the_word(self):
         self.assertTrue(wizard.enough_photos("готово"))
