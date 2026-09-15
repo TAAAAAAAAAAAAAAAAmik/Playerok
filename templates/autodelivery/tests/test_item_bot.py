@@ -741,5 +741,112 @@ class TemplatesPerAccountTest(unittest.TestCase):
         self.assertEqual(len(item_bot.templates_of().all()), 1)
 
 
+class SettingsMenuTest(unittest.TestCase):
+    """«Автовыдача» — кнопка, за которой продавец включает выдачу кодов.
+
+    Она однажды падала на первом же обращении (NameError), и снаружи это
+    выглядело как «не грузит»: нажал — тишина.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+
+    def test_menu_lists_every_card_we_can_deliver(self):
+        link = FakeLink(["отмена"])
+        item_bot.settings_menu(link)
+        question = link.asked[0][0]
+        keys = link.asked[0][1]
+        names = [row[0][0] for row in keys]
+
+        self.assertIn("Автовыдача", question)
+
+        for card in item_bot.CARDS:
+            self.assertTrue(any(card.title in name for name in names),
+                            f"{card.title} не показан")
+
+    def test_card_opens_and_shows_whether_delivery_is_on(self):
+        slug = item_bot.CARDS[0].slug
+        link = FakeLink([item_bot.PICK_CARD + slug, "отмена"])
+        item_bot.settings_menu(link)
+
+        self.assertTrue(any("Выдача: выключена" in said for said in link.said))
+
+    def test_switching_delivery_on_is_saved(self):
+        slug = item_bot.CARDS[0].slug
+        link = FakeLink([item_bot.PICK_CARD + slug,
+                         item_bot.PICK_SET + "on", "отмена"])
+        item_bot.settings_menu(link)
+
+        self.assertTrue(item_bot.settings_of().card(slug)["enabled"])
+
+    def test_service_id_is_saved_for_the_region(self):
+        slug = item_bot.CARDS[0].slug
+        region = item_bot.REGIONS[0]
+        link = FakeLink([item_bot.PICK_CARD + slug,
+                         item_bot.PICK_SET + "svc" + region,
+                         "abc-123", "отмена"])
+        item_bot.settings_menu(link)
+
+        self.assertEqual(item_bot.settings_of().service_id(slug, region),
+                         "abc-123")
+
+    def test_settings_are_kept_per_account(self):
+        accounts = AccountStore(item_bot.ACCOUNTS_DIR)
+        first = accounts.add("Первый", "token=" + "a" * 60, "ua")
+        second = accounts.add("Второй", "token=" + "b" * 60, "ua")
+        slug = item_bot.CARDS[0].slug
+
+        accounts.set_current(first)
+        item_bot.settings_of().set_enabled(slug, True)
+
+        accounts.set_current(second)
+
+        self.assertFalse(item_bot.settings_of().card(slug)["enabled"])
+
+
+class BrokenCommandTest(unittest.TestCase):
+    """Упавший обработчик не должен уносить бота вместе с собой."""
+
+    def test_the_seller_is_told_instead_of_silence(self):
+        link = FakeLink()
+        broken = item_bot.handle_command
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("внутри всё сломалось")
+
+        item_bot.handle_command = explode
+        try:
+            item_bot.serve_one(link, "кабинет", "настройки")
+        finally:
+            item_bot.handle_command = broken
+
+        self.assertTrue(any("внутри всё сломалось" in said
+                            for said in link.said))
+
+    def test_the_account_survives_the_error(self):
+        link = FakeLink()
+        broken = item_bot.handle_command
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("бум")
+
+        item_bot.handle_command = explode
+        try:
+            kept = item_bot.serve_one(link, "кабинет", "настройки")
+        finally:
+            item_bot.handle_command = broken
+
+        self.assertEqual(kept, "кабинет")
+
+    def test_a_working_command_is_untouched(self):
+        link = FakeLink()
+        kept = item_bot.serve_one(link, "кабинет", "меню")
+
+        self.assertEqual(kept, "кабинет")
+        self.assertTrue(any("Что делаем?" in said for said in link.said))
+
+
 if __name__ == "__main__":
     unittest.main()

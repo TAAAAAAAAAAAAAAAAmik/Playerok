@@ -67,6 +67,7 @@ import listing                                                # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
+from cards import CARDS                                       # noqa: E402
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
@@ -97,7 +98,10 @@ COMMANDS = [
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
-REGIONS = [("🌍 GL — глобальный", "GL"), ("🇷🇺 RU — российский", "RU")]
+# Ряд кнопок, а не список регионов: коды берём из settings.REGIONS, чтобы
+# бот и движок выдачи не разъехались.
+REGION_BUTTONS = [("🌍 GL — глобальный", "GL"),
+                  ("🇷🇺 RU — российский", "RU")]
 SKIP = [("⏭ Пропустить", "пропустить"), ("✖️ Отмена", "отмена")]
 PHOTOS_DONE = [("✅ Готово", wizard.DONE_WORD), ("✖️ Отмена", "отмена")]
 
@@ -207,7 +211,7 @@ def buttons_for(step: str):
     передумать посреди опроса — обычное дело.
     """
     if step == "region":
-        return [REGIONS, CANCEL]
+        return [REGION_BUTTONS, CANCEL]
 
     if step == "photos":
         return [PHOTOS_DONE]
@@ -800,7 +804,7 @@ def edit_template(link, store, template_id: str) -> None:
 
     if what == "region":
         answer = link.ask("Новый регион:", ANSWER_WAIT,
-                          buttons=[REGIONS, CANCEL])
+                          buttons=[REGION_BUTTONS, CANCEL])
         value, why = wizard.accept_region(str(answer.get("text") or ""))
     elif what == "price":
         answer = link.ask("Новая цена:", ANSWER_WAIT, buttons=[CANCEL])
@@ -1414,41 +1418,74 @@ def main() -> None:
         if not text:
             continue
 
-        if text in MENU_WORDS:
-            # «Меню» должно открываться всегда — даже когда кабинета нет и
-            # делать больше нечего.
-            link.forget_screen()
-            link.screen("Что делаем?", buttons=MENU)
-            continue
-
-        if text in START_WORDS or text in TEMPLATE_WORDS \
-                or text in DRAFT_WORDS or text in CHECK_WORDS:
-            if account is None:
-                link.screen("Сначала нужен рабочий кабинет: откройте "
-                         "«Аккаунт».", buttons=MENU)
-                continue
-
-        if text in START_WORDS:
-            make_item(link, account)
-            link.screen("Готов к следующему.", buttons=MENU)
-        elif text in TEMPLATE_WORDS:
-            from_template(link, account)
-            link.screen("Готов к следующему.", buttons=MENU)
-        elif text in DRAFT_WORDS:
-            drafts_menu(link, account)
-            link.screen("Готов к следующему.", buttons=MENU)
-        elif text in SETTINGS_WORDS:
-            settings_menu(link)
-            link.screen("Готов к следующему.", buttons=MENU)
-        elif text in CHECK_WORDS:
-            check_session(link, account)
-        elif text in ACCOUNT_WORDS:
-            account = accounts_menu(link, account)
-        elif not wizard.cancelled(text):
-            # Молчать нельзя: продавец решит, что бот умер.
-            link.screen("Что делаем?", buttons=MENU)
-
+        account = serve_one(link, account, text)
         time.sleep(0.2)
+
+
+def serve_one(link, account, text: str):
+    """Одна команда под защитой. → аккаунт для дальнейшей работы.
+
+    Ошибка в обработчике не должна уносить бота целиком: сторож его, конечно,
+    поднимет, но продавец за это время видит только «не грузит» — кнопка
+    нажата, ответа нет — и теряет начатое. Лучше сказать словами и работать
+    дальше.
+    """
+    try:
+        return handle_command(link, account, text)
+    except Exception as e:                                    # noqa: BLE001
+        log_error(e)
+        link.forget_screen()
+        link.screen(f"Что-то пошло не так: {e}\n\n"
+                    "Бот жив, можно продолжать.", buttons=MENU)
+
+        return account
+
+
+def log_error(e) -> None:
+    """В журнал — полностью, с местом, где случилось."""
+    import traceback
+
+    print("ОШИБКА:", e)
+    traceback.print_exc()
+
+
+def handle_command(link, account, text: str):
+    """Разобрать одну команду. → аккаунт для дальнейшей работы."""
+    if text in MENU_WORDS:
+        # «Меню» должно открываться всегда — даже когда кабинета нет и
+        # делать больше нечего.
+        link.forget_screen()
+        link.screen("Что делаем?", buttons=MENU)
+        return account
+
+    if text in START_WORDS or text in TEMPLATE_WORDS \
+            or text in DRAFT_WORDS or text in CHECK_WORDS:
+        if account is None:
+            link.screen("Сначала нужен рабочий кабинет: откройте "
+                        "«Аккаунт».", buttons=MENU)
+            return account
+
+    if text in START_WORDS:
+        make_item(link, account)
+        link.screen("Готов к следующему.", buttons=MENU)
+    elif text in TEMPLATE_WORDS:
+        from_template(link, account)
+        link.screen("Готов к следующему.", buttons=MENU)
+    elif text in DRAFT_WORDS:
+        drafts_menu(link, account)
+        link.screen("Готов к следующему.", buttons=MENU)
+    elif text in SETTINGS_WORDS:
+        settings_menu(link)
+        link.screen("Готов к следующему.", buttons=MENU)
+    elif text in CHECK_WORDS:
+        check_session(link, account)
+    elif text in ACCOUNT_WORDS:
+        account = accounts_menu(link, account)
+    elif not wizard.cancelled(text):
+        # Молчать нельзя: продавец решит, что бот умер.
+        link.screen("Что делаем?", buttons=MENU)
+
+    return account
 
 
 CHOOSE.update({"game": choose_game, "category": choose_category,
