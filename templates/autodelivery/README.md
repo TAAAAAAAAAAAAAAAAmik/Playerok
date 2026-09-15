@@ -25,6 +25,7 @@ tests/
   test_playerok.py 27 тестов адаптера на поддельном аккаунте
   test_owner.py    34 теста связи с владельцем на поддельном телеграме
   test_auth.py     6 тестов входа в кабинет
+  test_pull.py     8 тестов обновления кода без git
 docs/
   01_ARCHITECTURE.md   конвейер, состояния, инварианты
   02_MARKETPLACE_PORT.md что именно писать под PlayerOK
@@ -33,6 +34,7 @@ docs/
   05_CHECKLIST.md        чек-лист приёмки до первой живой покупки
 check_telegram.py  проверка связи с владельцем: живой ли токен, дойдёт ли
                    сообщение
+pull.py            обновление кода с GitHub там, где git не установлен
 example_bot.py     минимальная сборка: как всё соединяется
 ```
 
@@ -40,7 +42,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 87 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 95 тестов, сети не требуют
 ```
 
 ---
