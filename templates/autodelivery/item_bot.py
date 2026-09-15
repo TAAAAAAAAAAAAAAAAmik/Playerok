@@ -42,12 +42,12 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
-from auth import sign_in                                      # noqa: E402
 from envfile import load_env_file                             # noqa: E402
+from owner import link_from_env                               # noqa: E402
 import listing                                                # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
-from auth import open_account                                 # noqa: E402
+from auth import open_account, sign_in                        # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
 from templates import TemplateStore                           # noqa: E402
 
@@ -89,6 +89,7 @@ PICK_CATEGORY = "cat:"
 PICK_OBTAINING = "obt:"
 PICK_OPTION = "opt:"
 PICK_ACCOUNT = "acc:"
+PICK_FIX = "fix:"
 
 # Где живут сохранённые кабинеты.
 ACCOUNTS_DIR = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
@@ -694,13 +695,57 @@ def switch_account(link, store, account_id: str, account):
                              saved.user_agent or os.environ.get(
                                  "PLAYEROK_UA", ""))
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Войти не вышло: {e}\n"
-                 "Кабинет остался прежним. Скорее всего протухли куки — "
-                 "добавьте их заново.", buttons=MENU)
-        return account
+        return offer_new_cookies(link, store, saved, account, e)
 
     store.set_current(account_id)
     link.say(f"Переключился: {saved.name}", buttons=MENU)
+
+    return fresh
+
+
+def offer_new_cookies(link, store, saved, account, why):
+    """Куки кабинета не приняли — предложить прислать свежие.
+
+    Без этого единственным выходом было бы завести кабинет заново, потеряв
+    имя и порядок. А протухают куки чаще всего остального.
+    """
+    answer = link.ask(
+        f"Войти в «{saved.name}» не вышло: {why}\n\n"
+        "Обычно это значит, что куки протухли. Пришлёте свежие?",
+        ANSWER_WAIT,
+        buttons=[[("🔑 Прислать куки", PICK_FIX + saved.id)],
+                 [("✖️ Не сейчас", "отмена")]])
+
+    if not str(answer.get("text") or "").startswith(PICK_FIX):
+        link.say("Оставил как есть.", buttons=MENU)
+        return account
+
+    answer = link.ask(
+        f"Куки кабинета «{saved.name}» — строка, JSON или токен. "
+        "Сообщение удалю сразу после прочтения.", ANSWER_WAIT,
+        buttons=[CANCEL])
+    cookies = normalize_cookies(str(answer.get("text") or ""))
+
+    if not cookies:
+        link.say("Это не похоже на куки. Оставил как есть.", buttons=MENU)
+        return account
+
+    if not answer.get("from_button"):
+        link._delete(answer)
+
+    store.update_cookies(saved.id, cookies)
+
+    try:
+        fresh = open_account(cookies, saved.user_agent
+                             or os.environ.get("PLAYEROK_UA", ""))
+    except Exception as e:                                    # noqa: BLE001
+        link.say(f"И эти не подошли: {e}\n"
+                 "Проверьте, что куки из того же браузера, чей user-agent "
+                 "указан у кабинета.", buttons=MENU)
+        return account
+
+    store.set_current(saved.id)
+    link.say(f"Готово, кабинет «{saved.name}» снова работает.", buttons=MENU)
 
     return fresh
 
@@ -751,22 +796,47 @@ def add_account(link, store, account):
     return switch_account(link, store, account_id, account)
 
 
+def try_sign_in(link):
+    """Войти, не роняя бота. → аккаунт или None.
+
+    Негодные куки НЕ должны останавливать бота: починить кабинет можно
+    только из его же меню, и падение на старте запирало бы починку за тем,
+    что сломалось. Продавцу осталась бы только консоль сервера — то есть
+    ровно то, от чего мы уходили.
+    """
+    try:
+        account, _store, _link = sign_in()
+        return account
+    except SystemExit as e:
+        link.say(f"Войти в кабинет не вышло.\n\n{e}", buttons=MENU)
+    except Exception as e:                                    # noqa: BLE001
+        link.say(f"Войти в кабинет не вышло: {e}\n\n"
+                 "Скорее всего протухли куки. Откройте «Аккаунт» и "
+                 "пришлите свежие или переключитесь на другой кабинет.",
+                 buttons=MENU)
+
+    return None
+
+
 def main() -> None:
     load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
-    account, _store, link = sign_in()
+    link = link_from_env()
 
     if link is None:
         raise SystemExit(
             "Не заданы TELEGRAM_BOT_TOKEN и TELEGRAM_OWNER_ID — "
             "разговаривать не с кем.")
 
+    account = try_sign_in(link)
     where = AccountStore(ACCOUNTS_DIR).current()
 
-    if where is not None:
+    if account is not None and where is not None:
         link.say(f"Кабинет: {where.name}")
 
     print("Жду в телеграме. Напишите боту «новый товар».")
-    link.say("Готов.", buttons=MENU)
+
+    if account is not None:
+        link.say("Готов.", buttons=MENU)
 
     while True:
         message = link.wait_answer(3600)
@@ -774,6 +844,12 @@ def main() -> None:
 
         if not text:
             continue
+
+        if text in START_WORDS or text in TEMPLATE_WORDS:
+            if account is None:
+                link.say("Сначала нужен рабочий кабинет: откройте "
+                         "«Аккаунт».", buttons=MENU)
+                continue
 
         if text in START_WORDS:
             make_item(link, account)

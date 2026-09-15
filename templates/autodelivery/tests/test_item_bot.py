@@ -247,6 +247,56 @@ class AccountsTest(unittest.TestCase):
             "прежний")
         self.assertTrue(any("не вышло" in t for t in link.said))
 
+    def test_expired_cookies_can_be_replaced_without_losing_the_cabinet(self):
+        """Иначе пришлось бы заводить кабинет заново, теряя имя."""
+        calls = []
+
+        def picky(cookies, user_agent):
+            calls.append(cookies)
+
+            if len(calls) == 1:
+                raise RuntimeError("куки протухли")
+
+            return "аккаунт:новый"
+
+        item_bot.open_account = picky
+        aid = self.store.add("Основной", self.COOKIES, self.UA)
+        fresh = "token=" + "n" * 60
+        link = FakeLink([item_bot.PICK_FIX + aid, fresh])
+        got = item_bot.switch_account(link, self.store, aid, "прежний")
+
+        self.assertEqual(got, "аккаунт:новый")
+        self.assertEqual(self.store.get(aid).cookies, fresh)
+        self.assertEqual(self.store.get(aid).name, "Основной")
+
+    def test_refusing_to_send_cookies_keeps_everything(self):
+        def broken(cookies, user_agent):
+            raise RuntimeError("куки протухли")
+
+        item_bot.open_account = broken
+        aid = self.store.add("Основной", self.COOKIES, self.UA)
+        link = FakeLink(["отмена"])
+
+        self.assertEqual(
+            item_bot.switch_account(link, self.store, aid, "прежний"),
+            "прежний")
+        self.assertEqual(self.store.get(aid).cookies, self.COOKIES)
+
+    def test_bad_cookies_do_not_stop_the_bot(self):
+        """Починка живёт в меню бота: упав, он запер бы её за собой."""
+        def broken():
+            raise RuntimeError("Не удалось подключиться к аккаунту Playerok")
+
+        saved = item_bot.sign_in
+        item_bot.sign_in = broken
+        link = FakeLink()
+
+        try:
+            self.assertIsNone(item_bot.try_sign_in(link))
+            self.assertTrue(any("Аккаунт" in t for t in link.said))
+        finally:
+            item_bot.sign_in = saved
+
     def test_missing_account_keeps_the_previous_one(self):
         link = FakeLink()
 
