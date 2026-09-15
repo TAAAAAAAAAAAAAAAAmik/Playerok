@@ -55,7 +55,9 @@ import listing                                                # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
+from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
+from playerok import is_auth_error                            # noqa: E402
 from templates import TemplateStore, folder_for               # noqa: E402
 
 # Кнопки, которые повторяются. Подписи для человека, значения — те же
@@ -566,8 +568,15 @@ def send_draft(link, account, draft: wizard.Draft) -> bool:
             attachments=list(draft.photos),
         )
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Создать не вышло: {e}\n"
-                 "Ничего не потрачено. Попробуем ещё раз.", buttons=MENU)
+        # Отказ во входе лечится не повтором, а свежими куками — и сказать
+        # об этом надо прямо здесь, иначе продавец будет жать «ещё раз».
+        if is_auth_error(e):
+            link.say(f"Создать не вышло: площадка не приняла вход.\n\n"
+                     f"{COOKIES_ADVICE}", buttons=MENU)
+        else:
+            link.say(f"Создать не вышло: {e}\n"
+                     "Ничего не потрачено. Попробуем ещё раз.", buttons=MENU)
+
         return False
 
     link.say(f"Черновик создан.\nhttps://playerok.com/products/{item.id}")
@@ -1007,10 +1016,13 @@ def try_sign_in(link):
     except SystemExit as e:
         link.say(f"Войти в кабинет не вышло.\n\n{e}", buttons=MENU)
     except Exception as e:                                    # noqa: BLE001
-        link.say(f"Войти в кабинет не вышло: {e}\n\n"
-                 "Скорее всего протухли куки. Откройте «Аккаунт» и "
-                 "пришлите свежие или переключитесь на другой кабинет.",
-                 buttons=MENU)
+        if is_auth_error(e):
+            link.say(f"🔴 Вход в кабинет не принят.\n\n{COOKIES_ADVICE}",
+                     buttons=MENU)
+        else:
+            link.say(f"Войти в кабинет не вышло: {e}\n\n"
+                     "Откройте «Аккаунт», чтобы прислать свежие куки или "
+                     "переключиться на другой кабинет.", buttons=MENU)
 
     return None
 

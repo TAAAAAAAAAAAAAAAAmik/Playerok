@@ -385,6 +385,20 @@ def _amount(deal: Any) -> float | None:
         return None
 
 
+# Как библиотека называет свои исключения входа. Смотреть надо на имя
+# класса, а не только на текст: у playerokapi.exceptions.UnauthorizedError
+# сообщение целиком по-русски — «Не удалось подключиться к аккаунту
+# Playerok» — и ни кода, ни слова unauthorized в нём нет. Проверка по
+# тексту молча пропускала САМЫЙ ЧАСТЫЙ случай отказа во входе.
+AUTH_ERRORS = ("unauthorizederror", "forbiddenerror", "notinitiatederror")
+
+# Куски текста, по которым отказ во входе узнаётся, когда исключение
+# пришло не от библиотеки, а прямо от площадки.
+AUTH_WORDS = ("401", "403", "unauthor", "forbidden",
+              "не удалось подключиться к аккаунту",
+              "неверный token", "неверный токен")
+
+
 def is_auth_error(error: Any) -> bool:
     """Отказ именно во входе, а не любая ошибка площадки.
 
@@ -392,10 +406,14 @@ def is_auth_error(error: Any) -> bool:
     просит у владельца новые куки. Разбирать русскую фразу из _explain для
     этого нельзя: текст пишется человеку и меняется вместе с формулировкой.
     """
+    name = type(error).__name__.lower()
+
+    if name in AUTH_ERRORS:
+        return True
+
     low = str(error).lower()
 
-    return ("401" in low or "403" in low
-            or "unauthor" in low or "forbidden" in low)
+    return any(word in low for word in AUTH_WORDS)
 
 
 def _explain(error: Exception) -> str:
@@ -409,7 +427,8 @@ def _explain(error: Exception) -> str:
     low = text.lower()
 
     if is_auth_error(error):
-        return "площадка не приняла вход: истекли куки продавца, нужно войти заново"
+        return ("площадка не приняла вход: истекли куки продавца, нужно "
+                "войти заново")
 
     if "429" in low or "too many" in low or "rate" in low:
         return "площадка просит сбавить темп — повторим позже"

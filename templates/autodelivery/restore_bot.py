@@ -25,7 +25,9 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
 import restore                                                # noqa: E402
+from alarm import Alarm, COOKIES_ADVICE                       # noqa: E402
 from auth import sign_in                                      # noqa: E402
+from playerok import is_auth_error                            # noqa: E402
 from envfile import load_env_file                             # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
@@ -188,6 +190,8 @@ def main() -> None:
     account, _store, link = sign_in()
     handled = restore.Handled(HANDLED_FILE)
 
+    alarm = Alarm(link, "Восстановление проданного")
+
     log.info("Слежу за проданными. Проверяю раз в %.0f с.", PERIOD)
     log.info("Выставляю только бесплатным статусом: платный сам не куплю.")
 
@@ -198,8 +202,17 @@ def main() -> None:
 
                 if told and link:
                     link.say(told)
+
+            # Проход дошёл до конца — значит вход в кабинет работает.
+            alarm.working()
         except Exception as e:                                # noqa: BLE001
-            # Один сбойный проход не должен уносить с собой остальные.
+            # Один сбойный проход не должен уносить с собой остальные. Но
+            # отказ во входе сам не пройдёт: пока куки не обновят,
+            # проданное так и будет лежать невыставленным, а бот молча
+            # крутиться. Об этом говорим — один раз.
+            if is_auth_error(e):
+                alarm.broken("площадка не приняла вход", COOKIES_ADVICE)
+
             log.error("проход не удался: %s", e)
 
         time.sleep(PERIOD)

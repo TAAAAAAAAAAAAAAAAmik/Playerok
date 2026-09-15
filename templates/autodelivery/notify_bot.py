@@ -27,7 +27,9 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
 import notices                                                # noqa: E402
+from alarm import Alarm, COOKIES_ADVICE                       # noqa: E402
 from auth import sign_in                                      # noqa: E402
+from playerok import is_auth_error                            # noqa: E402
 from envfile import load_env_file                             # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
@@ -80,11 +82,14 @@ def main() -> None:
     # мы стирали её — после любого сбоя сети недавние события приходили
     # повторно, и выглядело это как бот, который дублирует сообщения.
     listener = EventListener(account)
+    alarm = Alarm(link, "Уведомления")
 
     while True:
         try:
             for event in listener.listen():
-                pause = PAUSE          # дожили до события — значит связь есть
+                # Дожили до события — значит связь есть.
+                pause = PAUSE
+                alarm.working()
 
                 if not seen.fresh(event):
                     continue
@@ -98,8 +103,15 @@ def main() -> None:
             raise
         except Exception as e:                                # noqa: BLE001
             # Обрыв слушателя — обычное дело: сеть, перезапуск площадки.
-            # Молча поднимаемся, но владельцу об этом не пишем: поток
-            # уведомлений не должен превращаться в отчёт о своей сети.
+            # Про такое молчим: поток уведомлений не должен превращаться в
+            # отчёт о своей сети.
+            #
+            # А вот отказ во входе молчанием не отделаешься: сам он не
+            # пройдёт, и пока продавец не пришлёт куки, уведомлений не
+            # будет вовсе. Об этом говорим — один раз.
+            if is_auth_error(e):
+                alarm.broken("площадка не приняла вход", COOKIES_ADVICE)
+
             log.error("слушатель оборвался: %s, продолжу через %ss", e, pause)
             time.sleep(pause)
             pause = min(pause * 2, MAX_PAUSE)
