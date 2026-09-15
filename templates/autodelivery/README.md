@@ -37,6 +37,7 @@ docs/
 check_telegram.py  проверка связи с владельцем: живой ли токен, дойдёт ли
                    сообщение
 catalog_ids.py     разведка каталога площадки: ID для создания товара
+supplier_ids.py    разведка каталога поставщика: ID услуг и номиналов
 pull.py            обновление кода с GitHub там, где git не установлен
 example_bot.py     минимальная сборка: как всё соединяется
 ```
@@ -45,7 +46,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 130 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 138 тестов, сети не требуют
 ```
 
 ---
