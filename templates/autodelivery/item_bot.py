@@ -127,14 +127,22 @@ def buttons_for(step: str):
 
 def collect(link, draft: wizard.Draft) -> bool:
     """Пройти опрос. → дошли ли до конца."""
+    complaint = ""
+
     while True:
         step = draft.step
 
         if not step:
             return True
 
-        message = link.ask(wizard.question_for(draft), ANSWER_WAIT,
-                           buttons=buttons_for(step))
+        # Замечание и вопрос — одним сообщением, а не двумя. Каждый лишний
+        # обмен с Telegram это задержка на ровном месте, и в переписке от
+        # них рябит.
+        question = wizard.question_for(draft)
+        message = link.ask(f"{complaint}\n\n{question}" if complaint
+                           else question,
+                           ANSWER_WAIT, buttons=buttons_for(step))
+        complaint = ""
 
         if not message:
             link.say("Не дождался ответа. Начнём заново, когда будете "
@@ -148,11 +156,7 @@ def collect(link, draft: wizard.Draft) -> bool:
             return False
 
         if step != "photos":
-            why = wizard.apply(draft, text)
-
-            if why:
-                link.say(why)
-
+            complaint = wizard.apply(draft, text)
             continue
 
         if not collect_photos(link, draft, message):

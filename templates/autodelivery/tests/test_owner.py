@@ -379,6 +379,36 @@ class ButtonPressTest(unittest.TestCase):
         self.assertIn("inline_keyboard", sent.get("reply_markup") or {})
 
 
+class SpeedTest(unittest.TestCase):
+    """Быстрота здесь — это не роскошь: бот, который «думает» секунды на
+    каждый вопрос, кажется сломанным."""
+
+    def test_a_reused_connection_is_used_by_default(self):
+        """Модуль requests поднимает новое TLS-соединение на каждый вызов;
+        на один шаг диалога их три."""
+        import requests
+
+        self.assertIsInstance(OwnerLink("t", OWNER).session, requests.Session)
+
+    def test_two_presses_in_a_row_are_both_kept(self):
+        """Раньше второе нажатие терялось, и бот выглядел зависшим."""
+        telegram = FakeTelegram([[update(1, "первое"), update(2, "второе")]])
+        bot = link(telegram)
+
+        self.assertEqual(bot.wait_answer(1).get("text"), "первое")
+        self.assertEqual(bot.wait_answer(1).get("text"), "второе")
+
+    def test_queued_answer_costs_no_network_call(self):
+        """Пока ответы есть в очереди, в сеть ходить незачем."""
+        telegram = FakeTelegram([[update(1, "первое"), update(2, "второе")]])
+        bot = link(telegram)
+        bot.wait_answer(1)
+        before = len(telegram.calls)
+        bot.wait_answer(1)
+
+        self.assertEqual(len(telegram.calls), before)
+
+
 class WhoamiTest(unittest.TestCase):
     """Самопроверка: токен живой и бот тот самый."""
 

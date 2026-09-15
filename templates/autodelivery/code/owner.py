@@ -55,8 +55,16 @@ class OwnerLink:
 
         self.bot_token = str(bot_token)
         self.owner_id = str(owner_id)
-        self.session = session or requests
+        # Именно Session, а не модуль requests: модуль поднимает новое
+        # TLS-соединение на КАЖДЫЙ вызов. На один шаг диалога их три —
+        # погасить кнопку, задать вопрос, опросить ответ, — и рукопожатия
+        # складывались в те самые секунды «бот думает».
+        self.session = session or requests.Session()
         self._offset: int | None = None
+        # Непрочитанные сообщения. Telegram отдаёт их пачкой, а раньше мы
+        # брали первое и теряли остальные: два быстрых нажатия подряд — и
+        # второе пропадало, а бот выглядел зависшим.
+        self._pending: list[dict] = []
 
     def _call(self, method: str, wait: int = 0, **params) -> Any:
         """Вызов Telegram. `wait` — сколько метод сам будет держать ответ.
@@ -118,7 +126,8 @@ class OwnerLink:
         deadline = time.time() + wait_seconds
 
         while time.time() < deadline:
-            messages = self._wait(deadline)
+            self._wait(deadline)
+            messages, self._pending = self._pending, []
 
             for message in messages:
                 text = str(message.get("text") or "").strip()
@@ -153,14 +162,22 @@ class OwnerLink:
     def _wait(self, deadline: float) -> list[dict]:
         """Сообщения от владельца, не крутя пустой цикл.
 
+        Сначала отдаём уже полученные: пока они есть, в сеть ходить незачем
+        — это и быстрее, и не теряет ничего из пачки.
+
         Настоящий Telegram держит опрос LONG_POLL секунд и сам задаёт темп.
         Но если он ответит сразу, цикл без паузы выжрал бы процессор на всё
         время ожидания.
         """
+        if self._pending:
+            return []
+
         messages = self._updates()
 
         if not messages:
             time.sleep(max(0.0, min(1.0, deadline - time.time())))
+
+        self._pending.extend(messages)
 
         return messages
 
@@ -178,14 +195,21 @@ class OwnerLink:
         return self.wait_answer(wait_seconds)
 
     def wait_answer(self, wait_seconds: float = WAIT_SECONDS) -> dict:
-        """Дождаться следующего сообщения владельца. → сообщение или {}."""
+        """Дождаться следующего сообщения владельца. → сообщение или {}.
+
+        Берём по одному из очереди, а не первое из пачки: остальные нужны
+        следующему вопросу, и выбрасывать их значит терять нажатия.
+        """
         deadline = time.time() + wait_seconds
 
-        while time.time() < deadline:
-            for message in self._wait(deadline):
-                return message
+        while True:
+            if self._pending:
+                return self._pending.pop(0)
 
-        return {}
+            if time.time() >= deadline:
+                return {}
+
+            self._wait(deadline)
 
     def download(self, file_id: str) -> bytes:
         """Забрать файл, присланный владельцем. → байты или пусто.
@@ -275,6 +299,8 @@ class OwnerLink:
             result = self._call("getUpdates", offset=-1, timeout=0)
         except Exception:                                  # noqa: BLE001
             return
+
+        self._pending = []
 
         for update in result if isinstance(result, list) else []:
             self._offset = int(update.get("update_id", 0)) + 1
