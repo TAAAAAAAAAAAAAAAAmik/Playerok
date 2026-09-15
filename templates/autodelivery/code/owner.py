@@ -102,9 +102,9 @@ class OwnerLink:
         self._drain()
         self.say(
             f"{why}\n\n"
-            "Пришлите строку куки из браузера, где вы вошли продавцом — "
-            "целиком, как скопировали. Сообщение я удалю сразу после "
-            "прочтения."
+            "Пришлите куки из браузера, где вы вошли продавцом — целиком, "
+            "как скопировали. Подойдёт и строка «token=...», и выгрузка "
+            "расширения в JSON. Сообщение я удалю сразу после прочтения."
         )
 
         deadline = time.time() + wait_seconds
@@ -121,11 +121,14 @@ class OwnerLink:
 
             for message in messages:
                 text = str(message.get("text") or "").strip()
+                cookies = normalize_cookies(text)
 
-                if not looks_like_cookies(text):
+                if not cookies:
                     self.say(
-                        "Это не похоже на куки: в строке должно быть "
-                        "«token=». Пришлите её целиком."
+                        "Это не похоже на куки. Пришлите строку целиком — "
+                        "либо в виде «token=...; __ddg3=...», либо выгрузкой "
+                        "расширения в JSON, как есть. В ней должен быть "
+                        "token."
                     )
                     continue
 
@@ -137,7 +140,7 @@ class OwnerLink:
                     "Куки приняты, но удалить сообщение не вышло — сотрите "
                     "его сами, оно останется в истории."
                 )
-                return text
+                return cookies
 
         return ""
 
@@ -188,8 +191,19 @@ class OwnerLink:
             return False
 
 
-def looks_like_cookies(text: str) -> bool:
-    """Похоже ли это на строку куки.
+def normalize_cookies(text: str) -> str:
+    """Строка куки из того, что прислал владелец, или пустая строка.
+
+    Принимаем два вида, потому что их два в жизни:
+
+    * строка `name=value; name2=value2` — как копируется из инструментов
+      разработчика на компьютере;
+    * JSON-выгрузка расширения вроде Cookie-Editor — так куки достают с
+      телефона, где инструментов разработчика нет.
+
+    Второе не прихоть: у владельца может не быть компьютера вовсе, и
+    требовать переделки JSON в строку руками на телефоне значит требовать
+    компьютера окольным путём.
 
     Проверка нарочно грубая: задача — отсеять «ок» и «привет», а не
     валидировать формат. Строгая проверка отвергала бы рабочие куки при
@@ -197,7 +211,58 @@ def looks_like_cookies(text: str) -> bool:
     """
     value = str(text or "").strip()
 
-    return "token=" in value and len(value) > 40
+    if not value:
+        return ""
+
+    pairs = _from_json(value)
+
+    if pairs is not None:
+        # Точку с запятой в конце не ставим: библиотека разбирает и так, а
+        # лишний пустой элемент некоторым разборщикам не нравится.
+        value = "; ".join(f"{name}={cookie}" for name, cookie in pairs)
+
+    return value if "token=" in value and len(value) > 40 else ""
+
+
+def _from_json(text: str):
+    """Пары имя-значение из выгрузки расширения, или None, если это не она.
+
+    None и пустой список — разные ответы: первое значит «это не JSON,
+    разбирай как строку», второе — «JSON, но пустой».
+    """
+    if text[0] not in "[{":
+        return None
+
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+
+    if isinstance(data, dict):
+        # Простой вид {"token": "...", "__ddg3": "..."}.
+        return [(str(k), str(v)) for k, v in data.items()]
+
+    if not isinstance(data, list):
+        return None
+
+    pairs = []
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        name = str(item.get("name") or "").strip()
+        cookie = item.get("value")
+
+        if name and cookie is not None:
+            pairs.append((name, str(cookie)))
+
+    return pairs
+
+
+def looks_like_cookies(text: str) -> bool:
+    """Похоже ли присланное на куки — в любом из принимаемых видов."""
+    return bool(normalize_cookies(text))
 
 
 class CookieStore:

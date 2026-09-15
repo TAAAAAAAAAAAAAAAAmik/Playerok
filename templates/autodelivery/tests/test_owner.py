@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 
 import owner                                                    # noqa: E402
 from owner import (CookieStore, OwnerLink, cookies_now,          # noqa: E402
-                   link_from_env, looks_like_cookies, renew_cookies)
+                   link_from_env, looks_like_cookies,
+                   normalize_cookies, renew_cookies)
 
 OWNER = "555"
 STRANGER = "666"
@@ -154,6 +155,56 @@ class StaleAnswerTest(unittest.TestCase):
         self.assertEqual(offsets[-1], 6)
 
 
+class JsonExportTest(unittest.TestCase):
+    """Выгрузка расширения. С телефона куки достают только так: инструментов
+    разработчика там нет, а компьютера у владельца может не быть вовсе."""
+
+    EXPORT = json.dumps([
+        {"name": "__ddg3", "value": "abc", "domain": ".playerok.com",
+         "path": "/", "secure": False, "httpOnly": False,
+         "expirationDate": 1822218314, "storeId": None},
+        {"name": "token", "value": "j" * 60, "domain": ".playerok.com"},
+    ])
+
+    def test_export_becomes_a_cookie_string(self):
+        got = normalize_cookies(self.EXPORT)
+
+        self.assertEqual(got, "__ddg3=abc; token=" + "j" * 60)
+
+    def test_plain_string_passes_through_unchanged(self):
+        self.assertEqual(normalize_cookies(COOKIES), COOKIES)
+
+    def test_simple_object_is_understood_too(self):
+        got = normalize_cookies(json.dumps({"token": "j" * 60, "__ddg3": "a"}))
+
+        self.assertIn("token=" + "j" * 60, got)
+
+    def test_export_without_token_is_refused(self):
+        """Куки без token — это не вход, а просто печенье площадки."""
+        other = json.dumps([{"name": "__ddg3", "value": "a" * 80}])
+
+        self.assertEqual(normalize_cookies(other), "")
+
+    def test_broken_json_is_not_a_crash(self):
+        self.assertEqual(normalize_cookies("[{сломано"), "")
+        self.assertEqual(normalize_cookies("{"), "")
+
+    def test_junk_entries_are_skipped_not_fatal(self):
+        mixed = json.dumps(["мусор", {"name": "token", "value": "j" * 60},
+                            {"нет": "имени"}])
+
+        self.assertEqual(normalize_cookies(mixed), "token=" + "j" * 60)
+
+    def test_bot_accepts_an_export_sent_in_telegram(self):
+        """Сквозь весь путь: прислали JSON — получили строку для площадки."""
+        telegram = FakeTelegram([[], [update(1, self.EXPORT)]])
+        got = link(telegram).ask_cookies("проверка")
+
+        self.assertEqual(got, "__ddg3=abc; token=" + "j" * 60)
+        # В площадку уходит строка, а не JSON, который она не поймёт.
+        self.assertNotIn("{", got)
+
+
 class ChatterTest(unittest.TestCase):
     def test_greeting_is_not_taken_for_cookies(self):
         self.assertFalse(looks_like_cookies("ок"))
@@ -176,7 +227,7 @@ class ChatterTest(unittest.TestCase):
         got = link(telegram).ask_cookies("проверка")
 
         self.assertEqual(got, COOKIES)
-        self.assertTrue(any("token=" in m for m in telegram.sent))
+        self.assertTrue(any("token" in m for m in telegram.sent))
 
 
 class NetworkTest(unittest.TestCase):
