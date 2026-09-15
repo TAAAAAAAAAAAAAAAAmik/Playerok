@@ -43,6 +43,16 @@ BATCH = 12
 
 HANDLED_FILE = os.environ.get("PLAYEROK_RESTORED", "state/restored.json")
 
+# Насколько замедляться, когда площадка просит подождать, и до какого
+# предела. Продолжать долбить в том же темпе — верный способ получить
+# ограничение и на всё остальное, включая вход в кабинет.
+SLOWDOWN = 3
+MAX_PERIOD = 3600
+
+
+class TooFast(Exception):
+    """Площадка просит сбавить темп. Не отказ, а просьба подождать."""
+
 
 def sold_items(account, count: int = BATCH) -> list:
     """Недавно проданные товары продавца."""
@@ -189,6 +199,15 @@ def handle(account, item, handled):
                                or getattr(full, "price", 0))
         what = "выставлен заново"
 
+    if not ok and restore.try_later(why):
+        # Площадка сказала «попробуйте позже». Это не отказ, а просьба
+        # сбавить темп: запомнить такое значило бы бросить товар навсегда
+        # из-за минутной заминки. Не запоминаем и вернёмся следующим
+        # проходом — но уже реже, см. главный цикл.
+        log.warning("«%s»: площадка просит подождать (%s)", name, why)
+
+        raise TooFast(why)
+
     # Запоминаем в любом случае — и удачу, и неудачу. Попытка одна.
     handled.add(item.id)
 
@@ -212,6 +231,9 @@ def main() -> None:
     log.info("Слежу за проданными. Проверяю раз в %.0f с.", PERIOD)
     log.info("Выставляю только бесплатным статусом: платный сам не куплю.")
 
+    period = PERIOD
+    slow = Alarm(link, "Восстановление")
+
     while True:
         try:
             for item in sold_items(account):
@@ -220,8 +242,23 @@ def main() -> None:
                 if told and link:
                     link.say(told)
 
-            # Проход дошёл до конца — значит вход в кабинет работает.
+            # Проход дошёл до конца — значит вход в кабинет работает, и
+            # темп площадку устраивает.
             alarm.working()
+            slow.working()
+
+            if period != PERIOD:
+                log.info("темп восстановлен: раз в %.0f с", PERIOD)
+                period = PERIOD
+        except TooFast as e:
+            # Замедляемся и пробуем снова позже. Товар не помечен, так что
+            # следующий проход вернётся к нему.
+            period = min(period * SLOWDOWN, MAX_PERIOD)
+            slow.broken(
+                f"площадка просит сбавить темп: {e}",
+                f"Подожду и попробую снова — теперь раз в "
+                f"{int(period // 60)} мин. Ничего не потеряно.")
+            log.warning("сбавляю темп до раза в %.0f с", period)
         except Exception as e:                                # noqa: BLE001
             # Один сбойный проход не должен уносить с собой остальные. Но
             # отказ во входе сам не пройдёт: пока куки не обновят,
@@ -232,7 +269,7 @@ def main() -> None:
 
             log.error("проход не удался: %s", e)
 
-        time.sleep(PERIOD)
+        time.sleep(period)
 
 
 if __name__ == "__main__":

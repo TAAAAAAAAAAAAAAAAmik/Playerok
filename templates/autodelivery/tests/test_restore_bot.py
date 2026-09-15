@@ -37,11 +37,12 @@ class Account:
     """Площадка-пустышка: считает, сколько раз её дёрнули."""
 
     def __init__(self, item=None, readable=True, statuses=None,
-                 publish_fails=False):
+                 publish_fails=False, publish_error=None):
         self.item = item or Item()
         self.readable = readable
         self.statuses = statuses if statuses is not None else [Status(0)]
         self.publish_fails = publish_fails
+        self.publish_error = publish_error
         self.reads = 0
         self.published = []
 
@@ -57,6 +58,9 @@ class Account:
         return self.statuses
 
     def publish_item(self, item_id, status_id):
+        if self.publish_error:
+            raise RuntimeError(self.publish_error)
+
         if self.publish_fails:
             raise RuntimeError("площадка отказала")
 
@@ -121,6 +125,55 @@ class OneAttemptTest(unittest.TestCase):
 
         self.assertIsNone(restore_bot.handle(account, Item(),
                                              restore.Handled(self.path)))
+
+
+class TooFastTest(unittest.TestCase):
+    """«Слишком много попыток» — не отказ, а просьба подождать. Записать
+    такое в вечные неудачи значит бросить товар из-за минутной заминки."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "state", "restored.json")
+        self.handled = restore.Handled(self.path)
+
+    def test_rate_limit_is_recognised(self):
+        self.assertTrue(restore.try_later(
+            "Слишком много попыток, пожалуйста, попробуйте повторить запрос позже"))
+        self.assertTrue(restore.try_later("429 Too Many Requests"))
+        self.assertTrue(restore.try_later("площадка просит сбавить темп"))
+
+    def test_real_refusals_are_not_mistaken_for_it(self):
+        """Иначе бот вечно ходил бы по кругу с тем, что не починится."""
+        self.assertFalse(restore.try_later("бесплатного статуса нет"))
+        self.assertFalse(restore.try_later("товар не найден"))
+        self.assertFalse(restore.try_later(""))
+
+    def test_item_is_not_written_off_after_a_rate_limit(self):
+        account = Account(publish_error="Слишком много попыток")
+
+        with self.assertRaises(restore_bot.TooFast):
+            restore_bot.handle(account, Item(), self.handled)
+
+        self.assertNotIn("i-1", self.handled)
+
+    def test_the_item_is_restored_on_a_later_pass(self):
+        """То, ради чего всё это: заминка не должна стоить товара."""
+        account = Account(publish_error="Слишком много попыток")
+
+        with self.assertRaises(restore_bot.TooFast):
+            restore_bot.handle(account, Item(), self.handled)
+
+        account.publish_error = None
+        told = restore_bot.handle(account, Item(), self.handled)
+
+        self.assertIn("выставлен заново", told)
+        self.assertEqual(account.published, ["i-1"])
+
+    def test_a_genuine_failure_is_still_one_attempt(self):
+        account = Account(publish_fails=True)
+        restore_bot.handle(account, Item(), self.handled)
+
+        self.assertIn("i-1", self.handled)
+        self.assertIsNone(restore_bot.handle(account, Item(), self.handled))
 
 
 if __name__ == "__main__":
