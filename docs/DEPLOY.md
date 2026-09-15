@@ -37,7 +37,7 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/python -m unittest discover tests
-# 286 тестов, сети не требуют
+# 299 тестов, сети не требуют
 ```
 
 ---
@@ -173,9 +173,14 @@ set -a && . /etc/autodelivery.env && set +a
 
 ```bash
 cd ~/playerok/templates/autodelivery
-./run_bot.sh          # поднять, если не поднят
-./stop_bot.sh         # остановить
+./run_bot.sh                   # бот создания товаров
+./run_bot.sh restore_bot.py    # восстановление проданных
+./stop_bot.sh                  # остановить первого
+./stop_bot.sh restore_bot.py   # остановить второго
 ```
+
+Второй бот только пишет в телеграм и не читает оттуда: читать может лишь
+один, иначе они будут воровать сообщения друг у друга.
 
 `run_bot.sh` запускает бота отвязанным от терминала и пишет журнал в
 `state/item_bot.log`. Повторный вызов ничего не делает, пока бот жив.

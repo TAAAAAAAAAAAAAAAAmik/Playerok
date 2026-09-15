@@ -14,6 +14,8 @@ set -u
 HERE=$(CD=$(dirname "$0"); cd "$CD" && pwd)
 cd "$HERE"
 
+WHAT=${1:-item_bot.py}
+
 PAUSE=5
 # Если бот падает раз за разом, ждём дольше — до минуты. Чинить всё равно
 # придётся руками, а частые попытки только мешают читать журнал.
@@ -21,12 +23,12 @@ MAX_PAUSE=60
 
 while true; do
     START=$(date +%s)
-    python3 -u item_bot.py
+    python3 -u "$WHAT"
     CODE=$?
     LIVED=$(( $(date +%s) - START ))
 
     if [ "$CODE" = "0" ]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') бот вышел сам, больше не поднимаю"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') $WHAT вышел сам, больше не поднимаю"
         break
     fi
 
@@ -36,6 +38,6 @@ while true; do
         PAUSE=$(( PAUSE * 2 ))
     fi
 
-    echo "$(date '+%Y-%m-%d %H:%M:%S') бот упал (код $CODE, прожил ${LIVED}с), поднимаю через ${PAUSE}с"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $WHAT упал (код $CODE, прожил ${LIVED}с), поднимаю через ${PAUSE}с"
     sleep "$PAUSE"
 done

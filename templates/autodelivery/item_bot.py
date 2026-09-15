@@ -12,6 +12,9 @@
 у разных игр разные, а один зашитый id уже приводил к тому, что товары
 создавались не там, где нужно.
 
+ЧЕРНОВИКИ. Кнопка «Черновики» показывает несозданные объявления кабинета
+и выставляет выбранное — с тем же вопросом про платный статус.
+
 ШАБЛОНЫ У КАЖДОГО КАБИНЕТА СВОИ: товары у разных кабинетов разные, и
 перемешанные шаблоны означают объявление, созданное не там, где хотели.
 Шаблон можно повторить, изменить по одному полю или удалить.
@@ -60,6 +63,7 @@ from templates import TemplateStore, folder_for               # noqa: E402
 # приходить в один и тот же разбор.
 MENU = [[("➕ Новый товар", "новый товар")],
         [("⚡ Из шаблона", "шаблон")],
+        [("📄 Черновики", "черновики")],
         [("👤 Аккаунт", "аккаунт")]]
 CANCEL = [("✖️ Отмена", "отмена")]
 REGIONS = [("🌍 GL — глобальный", "GL"), ("🇷🇺 RU — российский", "RU")]
@@ -77,6 +81,7 @@ MAX_CHOICES = 12
 START_WORDS = ("новый товар", "новый", "/new", "/newitem")
 TEMPLATE_WORDS = ("шаблон", "шаблоны", "из шаблона", "/tpl")
 ACCOUNT_WORDS = ("аккаунт", "аккаунты", "кабинет", "/account")
+DRAFT_WORDS = ("черновики", "черновик", "/drafts")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -95,6 +100,7 @@ PICK_OPTION = "opt:"
 PICK_ACCOUNT = "acc:"
 PICK_FIX = "fix:"
 PICK_ACT = "act:"
+PICK_DRAFT = "drf:"
 
 # Где живут сохранённые кабинеты.
 ACCOUNTS_DIR = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
@@ -797,6 +803,51 @@ def make_from_template(link, account, store, template_id: str) -> None:
     send_draft(link, account, draft)
 
 
+def drafts_menu(link, account) -> None:
+    """Показать черновики кабинета и выставить выбранный.
+
+    Черновик остаётся после каждого созданного товара и после неудачного
+    выставления. Без этого списка добраться до него можно было только из
+    кабинета на сайте.
+    """
+    try:
+        from playerokapi.enums import ItemStatuses
+    except ImportError:
+        link.say("Не установлена библиотека playerokapi.", buttons=MENU)
+        return
+
+    try:
+        page = account.get_my_items(statuses=[ItemStatuses.DRAFT], count=24)
+        drafts = list(getattr(page, "items", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.say(f"Черновики прочитать не вышло: {e}", buttons=MENU)
+        return
+
+    if not drafts:
+        link.say("Черновиков нет.", buttons=MENU)
+        return
+
+    keys = [[(f"{d.name} — {getattr(d, 'price', '?')} ₽",
+              PICK_DRAFT + str(d.id))] for d in drafts[:MAX_CHOICES]]
+    keys.append([("✖️ Назад", "отмена")])
+    answer = link.ask("Черновики:", ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_DRAFT):
+        link.say("Отменил.", buttons=MENU)
+        return
+
+    draft_id = text[len(PICK_DRAFT):]
+    chosen = next((d for d in drafts if str(d.id) == draft_id), None)
+
+    if chosen is None:
+        link.say("Такого черновика больше нет.", buttons=MENU)
+        return
+
+    price = getattr(chosen, "raw_price", None) or getattr(chosen, "price", 0)
+    publish_step(link, account, draft_id, price)
+
+
 def accounts_menu(link, account):
     """Показать кабинеты и переключить. → аккаунт для дальнейшей работы.
 
@@ -991,7 +1042,8 @@ def main() -> None:
         if not text:
             continue
 
-        if text in START_WORDS or text in TEMPLATE_WORDS:
+        if text in START_WORDS or text in TEMPLATE_WORDS \
+                or text in DRAFT_WORDS:
             if account is None:
                 link.say("Сначала нужен рабочий кабинет: откройте "
                          "«Аккаунт».", buttons=MENU)
@@ -1002,6 +1054,9 @@ def main() -> None:
             link.say("Готов к следующему.", buttons=MENU)
         elif text in TEMPLATE_WORDS:
             from_template(link, account)
+            link.say("Готов к следующему.", buttons=MENU)
+        elif text in DRAFT_WORDS:
+            drafts_menu(link, account)
             link.say("Готов к следующему.", buttons=MENU)
         elif text in ACCOUNT_WORDS:
             account = accounts_menu(link, account)

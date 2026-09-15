@@ -7,7 +7,13 @@
 set -eu
 
 HERE=$(CD=$(dirname "$0"); cd "$CD" && pwd)
-PIDFILE="$HERE/state/item_bot.pid"
+WHAT=${1:-item_bot.py}
+
+case "$WHAT" in
+    --*) WHAT=item_bot.py ;;
+esac
+
+PIDFILE="$HERE/state/$(basename "$WHAT" .py).pid"
 
 if [ -f "$PIDFILE" ]; then
     PID=$(cat "$PIDFILE" 2>/dev/null || echo "")
@@ -27,7 +33,7 @@ else
     echo "не найден"
 fi
 
-if [ "${1:-}" = "--насовсем" ]; then
+if [ "${1:-}" = "--насовсем" ] || [ "${2:-}" = "--насовсем" ]; then
     # Иначе cron поднимет его через минуту.
     if command -v crontab >/dev/null 2>&1; then
         crontab -l 2>/dev/null | grep -v "run_bot.sh" | crontab - || true

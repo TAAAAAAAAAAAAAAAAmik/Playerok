@@ -16,8 +16,15 @@ set -eu
 
 HERE=$(CD=$(dirname "$0"); cd "$CD" && pwd)
 STATE="$HERE/state"
-PIDFILE="$STATE/item_bot.pid"
-LOG="$STATE/item_bot.log"
+
+# Какого бота держать. По умолчанию тот, что создаёт товары; вторым
+# аргументом можно поднять восстановление проданных:
+#   ./run_bot.sh                  создание товаров
+#   ./run_bot.sh restore_bot.py   восстановление проданных
+WHAT=${1:-item_bot.py}
+NAME=$(basename "$WHAT" .py)
+PIDFILE="$STATE/$NAME.pid"
+LOG="$STATE/$NAME.log"
 
 mkdir -p "$STATE"
 
@@ -40,8 +47,7 @@ if command -v pgrep >/dev/null 2>&1; then
     # угодно, где эта строка вообще встречается — вплоть до редактора,
     # открывшего этот файл. Один такой ложный «он уже запущен» и бот не
     # поднимется вовсе.
-    ALIVE=$(pgrep -f "^/bin/sh $HERE/keep_bot.sh" 2>/dev/null | head -1 \
-            || pgrep -f "$HERE/keep_bot.sh" 2>/dev/null | head -1 || true)
+    ALIVE=$(pgrep -f "$HERE/keep_bot.sh $WHAT" 2>/dev/null | head -1 || true)
 
     if [ -n "$ALIVE" ]; then
         echo "$ALIVE" > "$PIDFILE"
@@ -59,7 +65,7 @@ cd "$HERE"
 # Запускаем не бота, а сторожа: он поднимет бота обратно, если тот
 # упадёт. nohup и & — чтобы всё это пережило закрытие терминала, иначе
 # умирает вместе с оболочкой, из которой запущено.
-nohup "$HERE/keep_bot.sh" >> "$LOG" 2>&1 &
+nohup "$HERE/keep_bot.sh" "$WHAT" >> "$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') запущен, номер $(cat "$PIDFILE")" >> "$LOG"
