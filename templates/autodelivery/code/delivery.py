@@ -276,6 +276,24 @@ class DeliveryEngine:
             delivered.append(str(order_id))
         self.store.save()
         logger.info("%s: заказ %s выдан", card.slug, order_id)
+
+        # Пометка идёт ПОСЛЕ записи в журнал: сбой на ней не должен
+        # заставить купить код второй раз. Покупатель код уже получил, так
+        # что неудача здесь выдачу не отменяет — но деньги по непомеченной
+        # сделке у площадки не разблокированы, и продавец должен узнать.
+        marked, why = await self.market.mark_sent(order_id)
+
+        if not marked:
+            entry["mark_sent_failed"] = str(why)[:200]
+            self.store.save()
+            logger.warning("%s: заказ %s не помечен отправленным: %s",
+                           card.slug, order_id, why)
+            await self.notify(
+                f"{card.emoji} {card.title}: код выдан, но сделка не "
+                f"помечена отправленной.\n"
+                f"Заказ #{order_id}. Причина: {why}\n"
+                f"Пометь её в кабинете сам — иначе деньги по ней висят.")
+
         return Result(True, STATE_DONE, codes=tuple(codes))
 
     async def _buy(self, card: Card, entry: dict, reference: str):

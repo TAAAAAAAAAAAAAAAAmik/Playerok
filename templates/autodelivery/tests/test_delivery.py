@@ -34,13 +34,16 @@ CARD = Card(slug="robux", title="Roblox", emoji="🎮",
 
 
 class FakeMarket:
-    """Площадка-пустышка. Ровно пять методов протокола."""
+    """Площадка-пустышка. Ровно шесть методов протокола."""
     name = "fake"
 
-    def __init__(self, orders=None, send_ok=True, send_why=""):
+    def __init__(self, orders=None, send_ok=True, send_why="",
+                 mark_ok=True, mark_why="площадка отказала"):
         self.orders = {o.id: o for o in (orders or [])}
         self.sent: list[tuple[str, str]] = []
         self.send_ok, self.send_why = send_ok, send_why
+        self.marked: list[str] = []
+        self.mark_ok, self.mark_why = mark_ok, mark_why
 
     async def paid_orders(self):
         return [o for o in self.orders.values() if self.is_paid(o.status)]
@@ -51,6 +54,13 @@ class FakeMarket:
     async def send_message(self, chat_id, text):
         self.sent.append((chat_id, text))
         return self.send_ok, self.send_why
+
+    async def mark_sent(self, order_id):
+        if not self.mark_ok:
+            return False, self.mark_why
+
+        self.marked.append(str(order_id))
+        return True, "отмечено"
 
     def is_paid(self, status):
         return str(status).lower() in ("paid", "оплачен")
@@ -128,6 +138,50 @@ class Base(unittest.IsolatedAsyncioTestCase):
               desc="Регион кода: GL", chat="chat-1"):
         return Order(id=oid, title=title, status=status, chat_id=chat,
                      description=desc)
+
+
+class MarkSentTest(Base):
+    """Без пометки сделка остаётся оплаченной: покупатель код видит, а
+    деньги у площадки не разблокированы."""
+
+    async def test_delivered_order_is_marked_sent(self):
+        market, sup = FakeMarket(), FakeSupplier()
+        await self.engine(market, sup).on_paid_order(self.order())
+
+        self.assertEqual(market.marked, ["777"])
+
+    async def test_unsent_order_is_not_marked(self):
+        """Пометить неотправленное значит соврать площадке."""
+        market = FakeMarket(send_ok=False, send_why="чат закрыт")
+        res = await self.engine(market, FakeSupplier()).on_paid_order(self.order())
+
+        self.assertFalse(res.ok)
+        self.assertEqual(market.marked, [])
+
+    async def test_failed_mark_does_not_cancel_the_delivery(self):
+        """Покупатель код уже получил — отменять нечего."""
+        market = FakeMarket(mark_ok=False, mark_why="площадка не ответила")
+        res = await self.engine(market, FakeSupplier()).on_paid_order(self.order())
+
+        self.assertTrue(res.ok)
+        self.assertEqual(res.state, STATE_DONE)
+
+    async def test_failed_mark_reaches_the_seller(self):
+        """Иначе деньги висят, а продавец об этом не знает."""
+        market = FakeMarket(mark_ok=False, mark_why="площадка не ответила")
+        await self.engine(market, FakeSupplier()).on_paid_order(self.order())
+
+        self.assertTrue(any("не помечена" in note for note in self.notes))
+
+    async def test_failed_mark_does_not_cause_a_second_purchase(self):
+        """Запись в журнал идёт до пометки — повтор не должен купить снова."""
+        market = FakeMarket(mark_ok=False)
+        sup = FakeSupplier()
+        engine = self.engine(market, sup)
+        await engine.on_paid_order(self.order())
+        await engine.on_paid_order(self.order())
+
+        self.assertEqual(len(sup.purchases), 1)
 
 
 class HappyPath(Base):
