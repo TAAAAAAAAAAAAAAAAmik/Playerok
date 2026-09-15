@@ -53,6 +53,27 @@ if command -v pgrep >/dev/null 2>&1; then
         echo "$ALIVE" > "$PIDFILE"
         exit 0
     fi
+
+    # И сам бот, запущенный руками, без сторожа. Проверяем по /proc, а не
+    # по куску командной строки: под «python3 item_bot.py» попадает и
+    # оболочка, где эту команду набирали.
+    for PID in $(pgrep -f "$NAME" 2>/dev/null || true); do
+        ARGS=$(tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null)
+        [ -n "$ARGS" ] || continue
+
+        case "$(printf '%s\n' "$ARGS" | head -1)" in
+            *python*) ;;
+            *) continue ;;
+        esac
+
+        case "$(printf '%s\n' "$ARGS" | grep -v '^$' | tail -1)" in
+            *"$NAME.py")
+                echo "$NAME уже работает (номер $PID), запущен вручную."
+                echo "Остановить всё: $HERE/stop_bot.sh $WHAT"
+                exit 0
+                ;;
+        esac
+    done
 fi
 
 # Журнал не должен съесть диск: у бота его немного, но он пишется годами.
