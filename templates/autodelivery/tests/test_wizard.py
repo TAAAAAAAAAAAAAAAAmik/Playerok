@@ -138,9 +138,24 @@ class RegionTest(unittest.TestCase):
         self.assertEqual(wizard.accept_region("gl"), ("GL", ""))
         self.assertEqual(wizard.accept_region(" RU "), ("RU", ""))
 
+    def test_a_seller_is_not_stuck_with_two_regions(self):
+        """Торгующий и глобальными кодами, и российскими, и турецкими не
+        должен упираться в список из двух: у гифт-карт регионов много."""
+        for region in ("US", "TR", "EU", "AR", "BR", "AE"):
+            self.assertEqual(wizard.accept_region(region), (region, ""))
+
+    def test_a_region_written_as_a_word_is_understood(self):
+        """Продавец пишет «Россия» так же часто, как «RU», а отказ на
+        понятном ответе — это экран, спорящий с человеком."""
+        self.assertEqual(wizard.accept_region("Россия"), ("RU", ""))
+        self.assertEqual(wizard.accept_region("глобал"), ("GL", ""))
+        self.assertEqual(wizard.accept_region("Турция"), ("TR", ""))
+
     def test_unknown_region_is_refused(self):
-        """По этой букве бот выбирает, что покупать у поставщика."""
-        value, why = wizard.accept_region("EU")
+        """Список закрыт нарочно: принять любые две буквы значило бы
+        записать в товар регион, которого у поставщика нет, — и узнал бы об
+        этом продавец из отказа, когда покупатель уже заплатил."""
+        value, why = wizard.accept_region("ZZ")
 
         self.assertEqual(value, "")
         self.assertIn("GL", why)

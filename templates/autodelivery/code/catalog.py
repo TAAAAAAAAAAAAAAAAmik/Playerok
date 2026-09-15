@@ -196,12 +196,39 @@ _REGION = re.compile(
 
 # Глобальный и российский коды невзаимозаменяемы: выдать не тот регион —
 # это возврат, а не мелочь.
-_ALIASES = {
+REGION_ALIASES = {
     "GLOBAL": "GL", "ГЛОБАЛ": "GL", "ГЛОБАЛЬНЫЙ": "GL", "GL": "GL",
     "РОССИЯ": "RU", "РФ": "RU", "RU": "RU", "RUS": "RU",
     "США": "US", "US": "US", "USA": "US",
-    "ТУРЦИЯ": "TR", "TR": "TR", "ЕВРОПА": "EU", "EU": "EU",
+    "ТУРЦИЯ": "TR", "TR": "TR", "ТУРЕЦКИЙ": "TR",
+    "ЕВРОПА": "EU", "EU": "EU", "ЕВРО": "EU",
+    "АРГЕНТИНА": "AR", "AR": "AR",
+    "БРАЗИЛИЯ": "BR", "BR": "BR",
+    "ИНДИЯ": "IN", "IN": "IN",
+    "ОАЭ": "AE", "AE": "AE", "UAE": "AE",
+    "ВЕЛИКОБРИТАНИЯ": "GB", "GB": "GB", "UK": "GB", "АНГЛИЯ": "GB",
+    "ГЕРМАНИЯ": "DE", "DE": "DE",
+    "ПОЛЬША": "PL", "PL": "PL",
+    "УКРАИНА": "UA", "UA": "UA",
+    "КАЗАХСТАН": "KZ", "KZ": "KZ",
+    "КАНАДА": "CA", "CA": "CA",
+    "ЯПОНИЯ": "JP", "JP": "JP",
 }
+
+
+def normalize_region(word: str) -> str:
+    """Слово продавца → код региона: «Россия» → "RU", «us» → "US".
+
+    Один разбор на всех: и описание товара, и ответ в мастере, и название
+    услуги поставщика. Два разных означали бы, что товар помечен «RU», а
+    ищется он как «РФ».
+    """
+    word = " ".join(str(word or "").strip().upper().split())
+
+    if word in REGION_ALIASES:
+        return REGION_ALIASES[word]
+
+    return word if word in REGION_CODES else ""
 
 
 def region_from_description(text: str) -> str:
@@ -215,7 +242,7 @@ def region_from_description(text: str) -> str:
     if not m:
         return ""
     word = m.group(1).strip().upper()
-    return _ALIASES.get(word, word if word.isascii() and len(word) <= 3 else "")
+    return REGION_ALIASES.get(word, word if word.isascii() and len(word) <= 3 else "")
 
 
 # ---------------------------------------------------------------------------
@@ -238,36 +265,66 @@ def match_denomination(rows: list[Denomination], region: str,
                        want: float | None) -> tuple[Denomination | None, str]:
     """Найти ТОЧНЫЙ номинал → (номинал, причина отказа).
 
-    Три правила, каждое против потери денег:
+    Четыре правила, каждое против потери денег:
 
     * **регион сначала.** Правильный номинал чужого региона хуже, чем
       отказ: покупатель не активирует код и откроет спор;
     * **точное совпадение.** «Ближайший» номинал — это либо недодать, либо
       переплатить за продавца. Ни то ни другое он не просил;
+    * **непонятный регион — отказ, а не «подешевле».** Когда у поставщика
+      название услуги региона не называет, номинал 1000 может оказаться и
+      российским, и турецким. Выбрать дешёвый значит продать покупателю
+      код, который он не активирует;
     * **остаток проверяется здесь и ещё раз перед покупкой.** Каталог
       кешируется, и «есть в наличии» в нём может быть вчерашним.
     """
     if want is None:
         return None, ("в названии товара нет числа — непонятно, какой "
                       "номинал покупать")
-    same_region = [r for r in rows if not region or not r.region
-                   or r.region.upper() == region.upper()]
+
+    want_region = str(region or "").upper()
+    exact = [r for r in rows if abs(r.value - want) < 1e-9]
+
+    # Регион берём точный. Номиналы без региона — запасной путь: у части
+    # поставщиков регион в названии услуги просто не написан.
+    named = [r for r in exact if r.region and r.region.upper() == want_region]
+    unnamed = [r for r in exact if not r.region]
+    same_region = named or unnamed
+
     if not same_region:
-        return None, f"у поставщика нет номиналов региона {region}"
+        if not exact:
+            near = ", ".join(str(int(r.value)) for r in sorted(
+                rows, key=lambda r: r.value)[:8])
+            return None, (
+                f"номинала {want:g} у поставщика нет"
+                + (f". Есть: {near}" if near else "")
+                + ". Подбирать похожий бот не станет — это чужие деньги")
 
-    exact = [r for r in same_region if abs(r.value - want) < 1e-9]
-    if not exact:
-        near = ", ".join(str(int(r.value)) for r in sorted(
-            same_region, key=lambda r: r.value)[:8])
-        return None, (f"номинала {want:g} у поставщика нет. Есть: {near}. "
-                      f"Подбирать похожий бот не станет — это чужие деньги")
+        got = ", ".join(sorted({r.region for r in exact if r.region}))
 
-    live = [r for r in exact if r.in_stock > 0]
+        return None, (f"номинал {want:g} у поставщика есть, но не в регионе "
+                      f"{want_region or '—'}"
+                      + (f" (есть: {got})" if got else ""))
+
+    if not named and len({r.service_id for r in unnamed}) > 1:
+        # Несколько услуг, и ни одна не называет свой регион: какая из них
+        # {want_region}, отсюда не видно. Купить дешёвую значит наугад
+        # продать покупателю код, который он не активирует.
+        return None, (
+            f"у поставщика несколько услуг с номиналом {want:g}, и ни одна "
+            f"не называет регион — какая из них {want_region}, "
+            f"непонятно. Бот угадывать не станет: привяжите услугу вручную "
+            f"в настройках карты, «Услуги вручную»")
+
+    live = [r for r in same_region if r.in_stock > 0]
+
     if not live:
         return None, f"номинал {want:g} есть в каталоге, но его нет в наличии"
 
-    # Дешевле — лучше: номинал один и тот же, разница только в закупке.
+    # Дешевле — лучше: номинал и регион одни и те же, разница только в
+    # закупке.
     live.sort(key=lambda r: (r.price if r.price is not None else 1e9))
+
     return live[0], ""
 
 
@@ -446,8 +503,8 @@ def region_of_service(service: dict) -> str:
     for word in _WORD.findall(name):
         code = word.upper()
 
-        if code in _ALIASES:
-            return _ALIASES[code]
+        if code in REGION_ALIASES:
+            return REGION_ALIASES[code]
 
         if code in REGION_CODES:
             return "GB" if code == "UK" else code
@@ -460,16 +517,19 @@ def services_for(card: Card, catalog) -> list:
     return [s for s in _services(catalog) if matches_service(card, s)]
 
 
-def denominations_for(card: Card, catalog, region: str = "") -> list:
+def denominations_for(card: Card, catalog) -> list:
     """Номиналы карты во всём каталоге поставщика.
 
     Заменяет ручную привязку «карта → номер услуги»: номера у поставщика
     свои на каждый регион, их десятки, и переписывать их руками с телефона
     продавец не должен. Подкатегория же одна и меняется редко.
 
-    Регион берётся из названия услуги. Когда его там нет, номиналы
-    остаются без региона — и подойдут любому: отбор по региону делает
-    `match_denomination`, и пустой регион он считает подходящим.
+    Регион у каждого номинала свой — из названия его услуги. По регионам
+    здесь НЕ отбираем: это делает `match_denomination`, и там же написаны
+    причины отказа. Отсеяв чужие регионы заранее, мы бы оставили ему
+    пустой список, и вместо «номинал есть, но региона TR у поставщика нет»
+    продавец прочитал бы «номинала нет вовсе» — и пошёл бы искать ошибку
+    не там.
     """
     rows = []
 
@@ -481,10 +541,6 @@ def denominations_for(card: Card, catalog, region: str = "") -> list:
 
         rows.extend(denominations_from(service, service_id,
                                        region_of_service(service)))
-
-    if region:
-        want = region.upper()
-        rows = [r for r in rows if not r.region or r.region == want]
 
     return rows
 

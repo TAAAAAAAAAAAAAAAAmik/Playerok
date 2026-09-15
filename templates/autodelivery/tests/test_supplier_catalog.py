@@ -298,8 +298,11 @@ class DenominationsForTest(unittest.TestCase):
         card = Card(slug="apple", title="Apple",
                     subcategory="Apple Gift Cards")
 
-        self.assertEqual([r.item_id for r in denominations_for(
-            card, catalog, "TR")], ["i2"])
+        rows = denominations_for(card, catalog)
+        got, why = match_denomination(rows, "TR", 10)
+
+        self.assertEqual(why, "")
+        self.assertEqual(got.item_id, "i2")
 
     def test_nominals_without_a_region_suit_any_region(self):
         catalog = {"services": [
@@ -310,7 +313,88 @@ class DenominationsForTest(unittest.TestCase):
         card = Card(slug="apple", title="Apple",
                     subcategory="Apple Gift Cards")
 
-        self.assertEqual(len(denominations_for(card, catalog, "TR")), 1)
+        rows = denominations_for(card, catalog)
+
+        self.assertEqual(match_denomination(rows, "TR", 10)[0].item_id, "i1")
+
+
+# Xbox у продавца, торгующего и глобальными кодами, и российскими. Номинал
+# 1000 есть в обоих регионах — в рублях и в тенге, — и цены разные.
+TWO_REGIONS = {"services": [
+    {"id": "s-ru", "name": "Xbox Gift Cards RU",
+     "subcategoryName": "Xbox Gift Cards",
+     "items": [{"id": "ru-1000", "value": 1000, "inStock": 9, "price": 11.0}]},
+    {"id": "s-kz", "name": "Xbox Gift Cards KZ",
+     "subcategoryName": "Xbox Gift Cards",
+     "items": [{"id": "kz-1000", "value": 1000, "inStock": 9, "price": 2.1}]},
+]}
+
+
+class TwoRegionsTest(unittest.TestCase):
+    """Одна карта, несколько регионов — обычное дело у гифт-карт.
+
+    Регион живёт в объявлении, а не в карте: продавец выставляет и
+    глобальные коды, и российские, и это два разных товара на витрине.
+    """
+
+    def rows(self, region=""):
+        return denominations_for(XBOX, TWO_REGIONS)
+
+    def test_each_region_gets_its_own_nominal(self):
+        got, why = match_denomination(self.rows("RU"), "RU", 1000)
+
+        self.assertEqual(why, "")
+        self.assertEqual(got.item_id, "ru-1000")
+
+    def test_the_cheaper_region_is_not_substituted(self):
+        """Код KZ дешевле впятеро, но покупателю с российским аккаунтом он
+        не активируется: это не экономия, а спор и возврат."""
+        got, _ = match_denomination(self.rows("RU"), "RU", 1000)
+
+        self.assertNotEqual(got.item_id, "kz-1000")
+
+    def test_a_region_the_supplier_does_not_have_is_refused(self):
+        got, why = match_denomination(self.rows("TR"), "TR", 1000)
+
+        self.assertIsNone(got)
+        self.assertIn("TR", why)
+        self.assertIn("RU", why)
+
+    def test_a_nameless_region_is_refused_not_guessed(self):
+        """Когда поставщик не называет регион ни у одной услуги, какая из
+        них российская — отсюда не видно. Купить дешёвую значит наугад
+        продать код, который покупатель не активирует."""
+        nameless = {"services": [
+            dict(TWO_REGIONS["services"][0], name="Xbox Gift Cards"),
+            dict(TWO_REGIONS["services"][1], name="Xbox Gift Cards"),
+        ]}
+        got, why = match_denomination(
+            denominations_for(XBOX, nameless), "RU", 1000)
+
+        self.assertIsNone(got)
+        self.assertIn("вручную", why)
+
+    def test_one_nameless_service_is_not_ambiguous(self):
+        """Выбора нет — значит и гадать не о чем."""
+        single = {"services": [
+            dict(TWO_REGIONS["services"][0], name="Xbox Gift Cards"),
+        ]}
+        got, why = match_denomination(
+            denominations_for(XBOX, single), "RU", 1000)
+
+        self.assertEqual(why, "")
+        self.assertEqual(got.item_id, "ru-1000")
+
+    def test_a_named_region_wins_over_a_nameless_one(self):
+        """Точный регион сильнее догадки, даже если догадка дешевле."""
+        mixed = {"services": [
+            TWO_REGIONS["services"][0],
+            dict(TWO_REGIONS["services"][1], name="Xbox Gift Cards"),
+        ]}
+        got, _ = match_denomination(
+            denominations_for(XBOX, mixed), "RU", 1000)
+
+        self.assertEqual(got.item_id, "ru-1000")
 
 
 if __name__ == "__main__":

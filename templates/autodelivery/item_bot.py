@@ -100,10 +100,15 @@ COMMANDS = [
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
-# Ряд кнопок, а не список регионов: коды берём из settings.REGIONS, чтобы
+# Ряды кнопок, а не список регионов: коды берём из settings.REGIONS, чтобы
 # бот и движок выдачи не разъехались.
-REGION_BUTTONS = [("🌍 GL — глобальный", "GL"),
-                  ("🇷🇺 RU — российский", "RU")]
+#
+# Кнопками — ходовые; остальные регионы продавец вводит текстом, и мастер
+# понимает их и словом («Турция»), и кодом. Два десятка кнопок на экран
+# телефона не помещаются, а торгующему одним регионом они и не нужны.
+REGION_BUTTONS = [("🌍 GL", "GL"), ("🇷🇺 RU", "RU"), ("🇺🇸 US", "US")]
+MORE_REGIONS = [("🇹🇷 TR", "TR"), ("🇪🇺 EU", "EU"), ("🇦🇷 AR", "AR"),
+                ("🇧🇷 BR", "BR")]
 SKIP = [("⏭ Пропустить", "пропустить"), ("✖️ Отмена", "отмена")]
 PHOTOS_DONE = [("✅ Готово", wizard.DONE_WORD), ("✖️ Отмена", "отмена")]
 
@@ -213,7 +218,7 @@ def buttons_for(step: str):
     передумать посреди опроса — обычное дело.
     """
     if step == "region":
-        return [REGION_BUTTONS, CANCEL]
+        return [REGION_BUTTONS, MORE_REGIONS, CANCEL]
 
     if step == "photos":
         return [PHOTOS_DONE]
@@ -829,7 +834,8 @@ def edit_template(link, store, template_id: str) -> None:
 
     if what == "region":
         answer = link.ask("Новый регион:", ANSWER_WAIT,
-                          buttons=[REGION_BUTTONS, CANCEL])
+                          buttons=[REGION_BUTTONS, MORE_REGIONS,
+                                   CANCEL])
         value, why = wizard.accept_region(str(answer.get("text") or ""))
     elif what == "price":
         answer = link.ask("Новая цена:", ANSWER_WAIT, buttons=[CANCEL])

@@ -132,7 +132,7 @@ class Catalog:
             # скажет об этом понятнее, с названием карты и регионом.
             return []
 
-        rows = denominations_for(card, catalog, region)
+        rows = denominations_for(card, catalog)
 
         if not rows:
             logging.error("в каталоге нет услуг подкатегории «%s» — "
