@@ -58,7 +58,10 @@ if command -v pgrep >/dev/null 2>&1; then
     # по куску командной строки: под «python3 item_bot.py» попадает и
     # оболочка, где эту команду набирали.
     for PID in $(pgrep -f "$NAME" 2>/dev/null || true); do
-        ARGS=$(tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null)
+        # Процесс может исчезнуть между поиском и чтением — это обычное
+    # дело, а не поломка. Без защиты оборвавшееся чтение роняет весь
+    # скрипт из-за строгого режима, и бот тогда просто не стартует.
+    ARGS=$( { tr '\0' '\n' < "/proc/$PID/cmdline"; } 2>/dev/null || true )
         [ -n "$ARGS" ] || continue
 
         case "$(printf '%s\n' "$ARGS" | head -1)" in
