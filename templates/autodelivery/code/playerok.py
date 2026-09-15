@@ -29,6 +29,10 @@
 
 5. Номер чата НЕ равен номеру заказа: у сделки отдельное поле `chat` со
    своим id. Подтверждено типом ItemDeal.
+   ⚠️ И его НЕТ в ответе на «список сделок» — проверено на живом кабинете:
+   заказ приходит с пустым чатом, то есть код отправить некуда. Запросы
+   «список» и «одна сделка» у площадки закреплённые, с разными наборами
+   полей. Поэтому чат дочитывается отдельно (см. _with_chat).
 
 6. Про запись в закрытый заказ достоверных данных нет. Поэтому ошибку
    отправки мы не переводим в совет «ответьте вручную» — движок и так
@@ -53,6 +57,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
 from marketplace import Order
@@ -146,7 +151,44 @@ class PlayerokMarketplace:
             if not cursor:
                 break
 
-        return orders
+        # Чат дочитываем после отбора: у списка и у одиночной сделки на
+        # площадке РАЗНЫЕ наборы полей, и в списке чата нет вовсе.
+        return [await self._with_chat(order) for order in orders]
+
+    async def _with_chat(self, order: Order) -> Order:
+        """Заказ с номером чата, дочитанным отдельным запросом.
+
+        Проверено на живом кабинете: «список сделок» возвращает сделку без
+        поля chat, и заказ приходит с пустым чатом — то есть выдавать код
+        некуда. Одиночный запрос сделки это поле отдаёт.
+
+        Дочитываем только оплаченные, уже отобранные: их единицы, а лишний
+        запрос на каждую сделку подряд стоил бы темпа опроса.
+        """
+        if order.chat_id:
+            return order
+
+        get_deal = getattr(self.account, "get_deal", None)
+
+        if not callable(get_deal):
+            return order
+
+        try:
+            deal = await _run(get_deal, order.id)
+        except Exception:                                  # noqa: BLE001
+            # Не достучались — отдаём как есть. Движок скажет «нет чата»
+            # и оставит заказ на ручную выдачу, а это видно и чинится.
+            return order
+
+        full = self._to_order(deal) if deal is not None else None
+
+        if full is None or not full.chat_id:
+            return order
+
+        # Берём ТОЛЬКО чат: остальное уже прочитано из списка, и подменять
+        # его целиком значит доверять второму ответу больше первого без
+        # причины.
+        return replace(order, chat_id=full.chat_id)
 
     async def get_order(self, order_id: str) -> Order | None:
         """Одна сделка по номеру — для возобновления оборванной выдачи."""

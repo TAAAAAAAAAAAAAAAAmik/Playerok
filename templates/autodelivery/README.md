@@ -23,7 +23,7 @@ code/
   delivery.py      движок: покупка, ожидание кода, отправка, возобновление
 tests/
   test_delivery.py 20 тестов движка на поддельных площадке и поставщике
-  test_playerok.py 27 тестов адаптера на поддельном аккаунте
+  test_playerok.py 32 теста адаптера на поддельном аккаунте
   test_owner.py    48 тестов связи с владельцем на поддельном телеграме
   test_auth.py     10 тестов входа в кабинет
   test_pull.py     8 тестов обновления кода без git
@@ -44,7 +44,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 120 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 125 тестов, сети не требуют
 ```
 
 ---

@@ -96,7 +96,10 @@ async def main() -> None:
         if not order.chat_id:
             log.warning("  ⚠ без чата выдача невозможна")
 
-        card = pick_card(CARDS, order.title, lambda slug: {})
+        # Считаем товар включённым: наблюдение должно показать, признает
+        # ли движок заказ своим. С пустой настройкой подбор отвергает всё,
+        # и «не наш» говорило бы лишь о самом наблюдении.
+        card = pick_card(CARDS, order.title, lambda slug: {"enabled": True})
 
         if card is None:
             log.info("  наш товар: не наш — движок пропустит")

@@ -57,13 +57,27 @@ class FakePage:
 
 
 class FakeAccount:
-    """Поддельный аккаунт площадки: отдаёт заранее заданные страницы."""
+    """Поддельный аккаунт площадки: отдаёт заранее заданные страницы.
 
-    def __init__(self, pages=None, send_error=None):
+    Умеет и одиночную сделку: у настоящей площадки список и одна сделка —
+    разные запросы с разными наборами полей, и чата в списке нет.
+    """
+
+    def __init__(self, pages=None, send_error=None, single=None):
         self.pages = pages or [FakePage([])]
         self.send_error = send_error
+        self.single = single or {}
         self.calls = []
+        self.single_calls = []
         self.sent = []
+
+    def get_deal(self, deal_id):
+        self.single_calls.append(deal_id)
+
+        if deal_id not in self.single:
+            raise RuntimeError("нет такой сделки")
+
+        return self.single[deal_id]
 
     def get_deals(self, direction=None, count=24, after_cursor=None):
         self.calls.append(after_cursor)
@@ -175,6 +189,59 @@ class PaidOrdersTest(unittest.TestCase):
         self.assertEqual([o.id for o in orders], ["2"])
 
 
+class ChatIsReadSeparatelyTest(unittest.TestCase):
+    """Найдено на живом кабинете: в ответе на «список сделок» поля chat нет,
+    и заказ приходит с пустым чатом — то есть код отправить некуда."""
+
+    def test_missing_chat_is_fetched_from_the_single_deal(self):
+        account = FakeAccount(
+            [FakePage([FakeDeal("d1", "PAID")])],          # в списке чата нет
+            single={"d1": FakeDeal("d1", "PAID", chat_id="chat-9")},
+        )
+        order = run(PlayerokMarketplace(account).paid_orders())[0]
+
+        self.assertEqual(order.chat_id, "chat-9")
+        self.assertEqual(account.single_calls, ["d1"])
+
+    def test_chat_from_the_list_is_not_refetched(self):
+        """Лишний запрос на каждую сделку стоил бы темпа опроса."""
+        account = FakeAccount([FakePage([FakeDeal("d1", "PAID", chat_id="c1")])])
+        order = run(PlayerokMarketplace(account).paid_orders())[0]
+
+        self.assertEqual(order.chat_id, "c1")
+        self.assertEqual(account.single_calls, [])
+
+    def test_only_the_chat_is_taken_from_the_second_answer(self):
+        """Остальное уже прочитано из списка; доверять второму ответу
+        больше первого без причины незачем."""
+        account = FakeAccount(
+            [FakePage([FakeDeal("d1", "PAID", title="из списка")])],
+            single={"d1": FakeDeal("d1", "PAID", title="из сделки",
+                                   chat_id="chat-9")},
+        )
+        order = run(PlayerokMarketplace(account).paid_orders())[0]
+
+        self.assertEqual(order.title, "из списка")
+        self.assertEqual(order.chat_id, "chat-9")
+
+    def test_unreachable_deal_leaves_the_order_without_a_chat(self):
+        """Заказ остаётся на ручную выдачу — это видно и чинится."""
+        account = FakeAccount([FakePage([FakeDeal("d1", "PAID")])])
+        order = run(PlayerokMarketplace(account).paid_orders())[0]
+
+        self.assertEqual(order.chat_id, "")
+
+    def test_unpaid_deals_are_not_refetched(self):
+        """Дочитываем только отобранные: их единицы."""
+        account = FakeAccount([FakePage([
+            FakeDeal("d1", "CONFIRMED"),
+            FakeDeal("d2", "ROLLED_BACK"),
+        ])])
+        run(PlayerokMarketplace(account).paid_orders())
+
+        self.assertEqual(account.single_calls, [])
+
+
 class OrderMappingTest(unittest.TestCase):
     def test_chat_id_is_not_the_order_id(self):
         """Ключевой пункт: номер чата у сделки свой."""
@@ -199,7 +266,11 @@ class OrderMappingTest(unittest.TestCase):
         self.assertEqual(order.description, "Регион кода: US")
 
     def test_missing_chat_becomes_empty_not_the_order_id(self):
-        """Подставить номер заказа вместо чата — значит отправить код в никуда."""
+        """Подставить номер заказа вместо чата — значит отправить код в никуда.
+
+        Здесь сделка недоступна и поштучно, так что чат остаётся пустым —
+        и это честнее, чем правдоподобная подстановка.
+        """
         account = FakeAccount([FakePage([FakeDeal("1", "PAID")])])
         order = run(PlayerokMarketplace(account).paid_orders())[0]
 
