@@ -4,8 +4,12 @@
 подставляются в APPROUTE_SERVICE_ROBUX_GL и подобные. Взять их можно только
 из каталога поставщика.
 
-    python3 supplier_ids.py robux          # услуги, где встречается слово
-    python3 supplier_ids.py robux --raw    # плюс сырой ответ в файл
+    python3 supplier_ids.py robux            # услуги и все их номиналы
+    python3 supplier_ids.py robux --кратко   # только названия и ID
+    python3 supplier_ids.py robux --raw      # плюс сырой ответ в файл
+
+Кратко — когда услуг много: полный список номиналов на телефон не влезает,
+а выбирать услугу всё равно надо по названию.
 
 Скрипт ТОЛЬКО ЧИТАЕТ каталог. Ничего не покупает: ни одного вызова,
 списывающего деньги, здесь нет. Чтение заказов (`by_reference`) тоже не
@@ -63,6 +67,17 @@ def text_of(node: dict) -> str:
     """Всё текстовое из записи — по нему и ищем слово."""
     return " ".join(str(v) for v in node.values()
                     if isinstance(v, (str, int, float)))
+
+
+def short(service: dict) -> None:
+    """Одна строка на услугу: название, номер и сколько номиналов."""
+    name = (service.get("name") or service.get("title")
+            or service.get("serviceName") or "без названия")
+    items = service.get("items") or service.get("denominations") or []
+    count = len(items) if isinstance(items, list) else 0
+
+    print(f"{service.get('id') or service.get('serviceId')}  "
+          f"{name}  ({count})")
 
 
 def show(service: dict) -> None:
@@ -154,6 +169,18 @@ def main() -> None:
         return
 
     print(f"Со словом «{search}»: {len(found)}")
+
+    brief = "--кратко" in sys.argv or "--short" in sys.argv
+
+    if brief:
+        print()
+
+        for service in found:
+            short(service)
+
+        print("\nПодробнее по одной услуге: python3 supplier_ids.py "
+              "<часть названия>")
+        return
 
     for service in found:
         show(service)
