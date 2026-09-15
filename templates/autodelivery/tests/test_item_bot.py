@@ -31,6 +31,7 @@ class FakeLink:
         self.asked = []
         self.screens = []
         self.deleted = []
+        self.last_buttons = None
 
     def _delete(self, message):
         self.deleted.append(message)
@@ -42,9 +43,14 @@ class FakeLink:
 
     def screen(self, text, buttons=None):
         """Экран: в жизни переписывает одно сообщение, здесь — просто
-        запоминаем, чтобы тесты видели сказанное."""
+        запоминаем, чтобы тесты видели сказанное.
+
+        Кнопки запоминаем тоже: экран без них — это тупик, из которого
+        продавцу некуда нажимать.
+        """
         self.said.append(text)
         self.screens.append(text)
+        self.last_buttons = buttons
         return True
 
     def forget_screen(self):
@@ -1107,6 +1113,49 @@ class SeriesFromSupplierTest(unittest.TestCase):
 
         self.assertFalse(any("Откуда взять" in q for q in asked))
         self.assertTrue(any("по одному в строке" in q for q in asked))
+
+
+class LastWordTest(unittest.TestCase):
+    """Команда обязана закончиться экраном с меню.
+
+    Дважды одна и та же беда. Сначала обработчик дописывал «Готов к
+    следующему» поверх — а экран переписывает ТО ЖЕ сообщение, и последнее
+    слово стиралось: «Шаблонов пока нет» показывалось и тут же исчезало.
+    Со стороны это выглядело как «нажал — сообщение сразу убралось».
+    Потом оказалось, что часть ответов и вовсе оставалась без кнопок, и
+    продавцу было некуда нажимать.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+
+    def run_command(self, word, answers=()):
+        link = FakeLink(list(answers))
+        item_bot.handle_command(link, "кабинет", word)
+
+        return link
+
+    def test_an_empty_template_list_stays_on_screen(self):
+        """Ровно тот случай, с которого всё началось."""
+        link = self.run_command("серия")
+
+        self.assertIn("Шаблонов пока нет", link.said[-1])
+        self.assertEqual(link.last_buttons, item_bot.MENU)
+
+    def test_no_command_ends_without_buttons(self):
+        for word in ("шаблон", "серия", "настройки", "меню"):
+            link = self.run_command(word, ["отмена", "отмена"])
+
+            self.assertIsNotNone(link.last_buttons, word)
+
+    def test_the_handler_does_not_write_over_its_own_answer(self):
+        """Приписка поверх — это стёртый ответ, а не вежливость."""
+        link = self.run_command("серия")
+
+        self.assertNotIn("Готов к следующему", link.said[-1])
 
 
 if __name__ == "__main__":

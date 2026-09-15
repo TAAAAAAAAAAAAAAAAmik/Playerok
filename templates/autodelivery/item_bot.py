@@ -310,7 +310,7 @@ def choose_category(link, account, draft) -> bool:
         game = account.get_game(id=draft.game["id"])
         rows = list(getattr(game, "categories", None) or [])
     except Exception as e:                                    # noqa: BLE001
-        link.screen(f"Категории прочитать не вышло: {e}")
+        link.screen(f"Категории прочитать не вышло: {e}", buttons=MENU)
         return False
 
     if not rows:
@@ -337,7 +337,8 @@ def choose_obtaining(link, account, draft) -> bool:
             draft.category["id"], count=MAX_CHOICES)
         rows = list(getattr(page, "obtaining_types", None) or [])
     except Exception as e:                                    # noqa: BLE001
-        link.screen(f"Способы получения прочитать не вышло: {e}")
+        link.screen(f"Способы получения прочитать не вышло: {e}",
+                    buttons=MENU)
         return False
 
     if not rows:
@@ -575,14 +576,15 @@ def publish_step(link, account, item_id: str, price: int) -> None:
         statuses = account.get_item_priority_statuses(item_id, price)
     except Exception as e:                                    # noqa: BLE001
         link.screen(f"Статусы приоритета прочитать не вышло: {e}\n"
-                 "Товар остался черновиком, выставьте его в кабинете.")
+                    "Товар остался черновиком, выставьте его в кабинете.",
+                    buttons=MENU)
         return
 
     rows = listing.ordered(statuses or [])
 
     if not rows:
         link.screen("Статусов приоритета нет — выставить нечем. "
-                 "Товар остался черновиком.")
+                    "Товар остался черновиком.", buttons=MENU)
         return
 
     # Столбиком: подписи длинные, в ряд не влезут. Бесплатный сверху —
@@ -596,7 +598,8 @@ def publish_step(link, account, item_id: str, price: int) -> None:
     chosen = listing.pick(rows, str(answer.get("text") or ""))
 
     if chosen is None:
-        link.screen("Оставил черновиком. Выставить можно в кабинете.")
+        link.screen("Оставил черновиком. Выставить можно в кабинете.",
+                    buttons=MENU)
         return
 
     if listing.needs_confirmation(chosen):
@@ -613,18 +616,23 @@ def publish_step(link, account, item_id: str, price: int) -> None:
                      [("✖️ Нет, оставить черновиком", "нет")]])
 
         if not listing.confirmed(str(again.get("text") or "")):
-            link.screen("Не подтверждено. Оставил черновиком.")
+            link.screen("Не подтверждено. Оставил черновиком.",
+                        buttons=MENU)
             return
 
     try:
         account.publish_item(item_id, chosen.id)
     except Exception as e:                                    # noqa: BLE001
         link.screen(f"Выставить не вышло: {e}\n"
-                 "Черновик при этом цел и виден в кабинете.")
+                    "Черновик при этом цел и виден в кабинете.",
+                    buttons=MENU)
         return
 
     link.forget_screen()
     link.say(f"Выставлено: {listing.describe(chosen)}")
+    # Экран забыт — значит следующий будет новым сообщением, и меню надо
+    # вернуть явно: без него продавцу некуда нажимать.
+    link.screen("Готов к следующему.", buttons=MENU)
 
 
 def make_item(link, account) -> None:
@@ -870,10 +878,10 @@ def offer_template(link, draft: wizard.Draft) -> None:
                    obtaining=draft.obtaining, fields=draft.fields,
                    options=draft.options)
     except Exception as e:                                    # noqa: BLE001
-        link.screen(f"Сохранить шаблон не вышло: {e}")
+        link.screen(f"Сохранить шаблон не вышло: {e}", buttons=MENU)
         return
 
-    link.screen("Шаблон сохранён.")
+    link.screen("Шаблон сохранён.", buttons=MENU)
 
 
 def from_template(link, account) -> None:
@@ -2177,24 +2185,23 @@ def handle_command(link, account, text: str):
                         "«Аккаунт».", buttons=MENU)
             return account
 
+    # Ни одна ветка не дописывает «Готов к следующему» поверх: экран
+    # переписывает ТО ЖЕ сообщение, и такая приписка стирала последнее
+    # слово обработчика. Со стороны это выглядело как «нажал — сообщение
+    # сразу убралось»: «Шаблонов пока нет» показывалось и исчезало.
+    # Поэтому каждая ветка сама заканчивает экраном с меню.
     if text in START_WORDS:
         make_item(link, account)
-        link.screen("Готов к следующему.", buttons=MENU)
     elif text in BLANK_WORDS:
         make_blank(link, account)
-        link.screen("Готов к следующему.", buttons=MENU)
     elif text in SERIES_WORDS:
         series_menu(link, account)
-        link.screen("Готов к следующему.", buttons=MENU)
     elif text in TEMPLATE_WORDS:
         from_template(link, account)
-        link.screen("Готов к следующему.", buttons=MENU)
     elif text in DRAFT_WORDS:
         drafts_menu(link, account)
-        link.screen("Готов к следующему.", buttons=MENU)
     elif text in SETTINGS_WORDS:
         settings_menu(link)
-        link.screen("Готов к следующему.", buttons=MENU)
     elif text in CHECK_WORDS:
         check_session(link, account)
     elif text in ACCOUNT_WORDS:
