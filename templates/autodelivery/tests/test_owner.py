@@ -205,6 +205,39 @@ class JsonExportTest(unittest.TestCase):
         self.assertNotIn("{", got)
 
 
+class BareTokenTest(unittest.TestCase):
+    """Голый JWT — то, что расширение показывает крупнее всего, и что
+    продавец копирует в первую очередь."""
+
+    JWT = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+           ".eyJzdWIiOiIxZjEwY2M3MS1hNjY2LTY3NjAtMDBhZi1hNzc1MWQ0YzI2MTgi"
+           ".p7BehV90KyqjFnAt0aqiVhjjAlfWT6E8HEOFK1TqcfM")
+
+    def test_bare_token_becomes_a_cookie_string(self):
+        """Библиотека разбирает строку куки в словарь, так что
+        «token=<jwt>» равнозначно отдельному параметру token."""
+        self.assertEqual(normalize_cookies(self.JWT), f"token={self.JWT}")
+
+    def test_surrounding_spaces_do_not_matter(self):
+        self.assertEqual(normalize_cookies(f"  {self.JWT}\n"),
+                         f"token={self.JWT}")
+
+    def test_sentence_with_dots_is_not_a_token(self):
+        self.assertEqual(normalize_cookies("привет.как.дела"), "")
+        self.assertEqual(normalize_cookies("a.b.c"), "")
+
+    def test_two_parts_are_not_a_token(self):
+        half = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxZjEwY2M3MSJ9"
+
+        self.assertEqual(normalize_cookies(half), "")
+
+    def test_bot_accepts_a_bare_token_sent_in_telegram(self):
+        telegram = FakeTelegram([[], [update(1, self.JWT)]])
+
+        self.assertEqual(link(telegram).ask_cookies("проверка"),
+                         f"token={self.JWT}")
+
+
 class ChatterTest(unittest.TestCase):
     def test_greeting_is_not_taken_for_cookies(self):
         self.assertFalse(looks_like_cookies("ок"))

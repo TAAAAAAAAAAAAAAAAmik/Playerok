@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from typing import Any
@@ -103,8 +104,9 @@ class OwnerLink:
         self.say(
             f"{why}\n\n"
             "Пришлите куки из браузера, где вы вошли продавцом — целиком, "
-            "как скопировали. Подойдёт и строка «token=...», и выгрузка "
-            "расширения в JSON. Сообщение я удалю сразу после прочтения."
+            "как скопировали. Подойдёт строка «token=...», выгрузка "
+            "расширения в JSON или сам токен из куки token. Сообщение я "
+            "удалю сразу после прочтения."
         )
 
         deadline = time.time() + wait_seconds
@@ -194,12 +196,15 @@ class OwnerLink:
 def normalize_cookies(text: str) -> str:
     """Строка куки из того, что прислал владелец, или пустая строка.
 
-    Принимаем два вида, потому что их два в жизни:
+    Принимаем три вида, потому что их три в жизни:
 
     * строка `name=value; name2=value2` — как копируется из инструментов
       разработчика на компьютере;
     * JSON-выгрузка расширения вроде Cookie-Editor — так куки достают с
-      телефона, где инструментов разработчика нет.
+      телефона, где инструментов разработчика нет;
+    * голый JWT — то, что лежит в самой куке `token` и что расширение
+      показывает на экране крупнее всего. Продавец копирует именно его,
+      и отвергать это значит спорить с очевидным.
 
     Второе не прихоть: у владельца может не быть компьютера вовсе, и
     требовать переделки JSON в строку руками на телефоне значит требовать
@@ -214,6 +219,11 @@ def normalize_cookies(text: str) -> str:
     if not value:
         return ""
 
+    if _looks_like_jwt(value):
+        # Библиотека разбирает строку куки в словарь, так что
+        # "token=<jwt>" даёт ровно то же, что отдельный параметр token.
+        return f"token={value}"
+
     pairs = _from_json(value)
 
     if pairs is not None:
@@ -222,6 +232,16 @@ def normalize_cookies(text: str) -> str:
         value = "; ".join(f"{name}={cookie}" for name, cookie in pairs)
 
     return value if "token=" in value and len(value) > 40 else ""
+
+
+# Три части из букв, цифр, дефиса и подчёркивания через точку — это
+# base64url, каким записывают JWT. Знака равенства в нём не бывает, и
+# по его отсутствию JWT отличается от строки куки.
+JWT = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
+
+
+def _looks_like_jwt(text: str) -> bool:
+    return len(text) > 40 and bool(JWT.match(text))
 
 
 def _from_json(text: str):
