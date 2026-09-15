@@ -60,9 +60,37 @@ def _headers(user_agent: str) -> dict:
     }
 
 
-def _explain(response) -> str:
-    """Отказ площадки — человеческой фразой."""
+def _reason(response) -> str:
+    """Что площадка сказала в теле — её словами.
+
+    Выбрасывать это нельзя: именно здесь она называет поле, которое ей не
+    понравилось. Без него отказ выглядит как «что-то не так», и искать
+    причину приходится вслепую.
+    """
+    body = _json(response)
+
+    if isinstance(body, dict):
+        for field in ("message", "error", "detail", "errorMessage"):
+            value = body.get(field)
+
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:200]
+
+            if isinstance(value, list) and value:
+                return str(value[0])[:200]
+
+    return str(getattr(response, "text", "") or "").strip()[:200]
+
+
+def _explain(response, step: str = "") -> str:
+    """Отказ площадки — человеческой фразой.
+
+    `step` меняет совет: на отправке виновата обычно почта, на
+    подтверждении — код. Один текст на оба случая уводил бы в сторону.
+    """
     code = getattr(response, "status_code", 0)
+    said = _reason(response)
+    tail = f" Площадка: {said}" if said else ""
 
     if code == 429:
         wait = str(getattr(response, "headers", {}).get("Retry-After") or "")
@@ -71,17 +99,20 @@ def _explain(response) -> str:
                 + (f", подождите {wait} с" if wait else ", подождите минуту"))
 
     if code in (400, 422):
-        return "площадка не приняла запрос: проверьте почту"
+        what = ("код не подошёл — проверьте, что ввели все шесть цифр из "
+                "последнего письма" if step == "confirm"
+                else "площадка не приняла запрос: проверьте почту")
+
+        return what + tail
 
     if code in (401, 403):
-        return "код неверный или уже истёк"
+        return "код неверный или уже истёк." + tail
 
     if code == 404:
-        return "аккаунта с такой почтой нет"
+        return ("аккаунта с такой почтой нет" if step != "confirm"
+                else "площадка не нашла этот запрос кода") + tail
 
-    body = str(getattr(response, "text", "") or "")[:200]
-
-    return f"площадка ответила {code}" + (f": {body}" if body else "")
+    return f"площадка ответила {code}." + tail
 
 
 def _json(response):
@@ -116,7 +147,7 @@ def send_code(email: str, user_agent: str, session=None) -> tuple[bool, str]:
         return False, f"не достучался до площадки: {e}"
 
     if getattr(response, "status_code", 0) >= 400:
-        return False, _explain(response)
+        return False, _explain(response, "send")
 
     # Двухсотый ответ ещё не значит, что письмо ушло. Площадка может
     # ответить страницей защиты от ботов или своей ошибкой в теле — и
@@ -182,7 +213,7 @@ def confirm(email: str, code: str, user_agent: str,
         return "", f"не достучался до площадки: {e}"
 
     if getattr(response, "status_code", 0) >= 400:
-        return "", _explain(response)
+        return "", _explain(response, "confirm")
 
     body = _json(response)
 

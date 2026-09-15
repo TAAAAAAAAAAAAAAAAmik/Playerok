@@ -165,6 +165,32 @@ class ConfirmTest(unittest.TestCase):
 
         self.assertEqual(normalize_cookies(cookies), cookies)
 
+    def test_refusal_repeats_what_the_marketplace_said(self):
+        """Именно там она называет поле, которое ей не понравилось. Без
+        этого причину ищут вслепую."""
+        platform = Platform(Response(400, {"message": "otpCode must be a string"}))
+        cookies, why = emailauth.confirm(GOOD, "123456", UA, platform)
+
+        self.assertEqual(cookies, "")
+        self.assertIn("otpCode must be a string", why)
+
+    def test_advice_differs_by_step(self):
+        """На отправке виновата почта, на подтверждении — код."""
+        sending = Platform(Response(400, {}))
+        _, why_send = emailauth.send_code(GOOD, UA, sending)
+
+        confirming = Platform(Response(400, {}))
+        _, why_confirm = emailauth.confirm(GOOD, "123456", UA, confirming)
+
+        self.assertIn("почт", why_send)
+        self.assertIn("цифр", why_confirm)
+
+    def test_plain_text_refusal_is_shown_too(self):
+        platform = Platform(Response(400, None, text="invalid otp"))
+        _, why = emailauth.confirm(GOOD, "123456", UA, platform)
+
+        self.assertIn("invalid otp", why)
+
     def test_wrong_code_is_named_plainly(self):
         platform = Platform(Response(401))
         cookies, why = emailauth.confirm(GOOD, "123456", UA, platform)
