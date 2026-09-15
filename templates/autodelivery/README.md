@@ -19,6 +19,7 @@ code/
   listing.py       выставление товара: выбор статуса приоритета
   wizard.py        диалог создания товара: вопросы и разбор ответов
   templates.py     шаблоны объявлений: сохранить и повторить
+  accounts.py      несколько кабинетов площадки и переключение
   envfile.py       чтение .env рядом со скриптом
   supplier.py      клиент поставщика кодов AppRoute — переносится как есть
   catalog.py       номинал из названия, регион из описания, подбор у поставщика
@@ -53,7 +54,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 247 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 264 теста, сети не требуют
 ```
 
 ---

@@ -12,6 +12,10 @@
 у разных игр разные, а один зашитый id уже приводил к тому, что товары
 создавались не там, где нужно.
 
+КАБИНЕТЫ. Их может быть несколько: кнопка «Аккаунт» показывает список и
+переключает. Библиотека площадки держит аккаунт синглтоном, поэтому два
+кабинета одновременно в одном процессе жить не могут — только по очереди.
+
 ШАБЛОНЫ. Созданное объявление можно сохранить шаблоном, и тогда такой же
 товар создаётся одним нажатием: название, цена, регион и фотографии уже
 внутри. Картинки хранятся копией, а не ссылкой на товар — товар продадут
@@ -42,13 +46,17 @@ from auth import sign_in                                      # noqa: E402
 from envfile import load_env_file                             # noqa: E402
 import listing                                                # noqa: E402
 import wizard                                                 # noqa: E402
+from accounts import AccountStore                             # noqa: E402
+from auth import open_account                                 # noqa: E402
+from owner import normalize_cookies                           # noqa: E402
 from templates import TemplateStore                           # noqa: E402
 
 # Кнопки, которые повторяются. Подписи для человека, значения — те же
 # слова, что понимает разбор ответов: нажатие и набранный текст должны
 # приходить в один и тот же разбор.
 MENU = [[("➕ Новый товар", "новый товар")],
-        [("⚡ Из шаблона", "шаблон")]]
+        [("⚡ Из шаблона", "шаблон")],
+        [("👤 Аккаунт", "аккаунт")]]
 CANCEL = [("✖️ Отмена", "отмена")]
 REGIONS = [("🌍 GL — глобальный", "GL"), ("🇷🇺 RU — российский", "RU")]
 SKIP = [("⏭ Пропустить", "пропустить"), ("✖️ Отмена", "отмена")]
@@ -64,6 +72,7 @@ MAX_CHOICES = 12
 
 START_WORDS = ("новый товар", "новый", "/new", "/newitem")
 TEMPLATE_WORDS = ("шаблон", "шаблоны", "из шаблона", "/tpl")
+ACCOUNT_WORDS = ("аккаунт", "аккаунты", "кабинет", "/account")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -79,6 +88,10 @@ PICK_GAME = "game:"
 PICK_CATEGORY = "cat:"
 PICK_OBTAINING = "obt:"
 PICK_OPTION = "opt:"
+PICK_ACCOUNT = "acc:"
+
+# Где живут сохранённые кабинеты.
+ACCOUNTS_DIR = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
 
 # Сколько ждать ответа на один вопрос. Полчаса: продавец может отвлечься,
 # и бот не должен ронять начатое из-за этого.
@@ -637,6 +650,107 @@ def from_template(link, account) -> None:
     send_draft(link, account, draft)
 
 
+def accounts_menu(link, account):
+    """Показать кабинеты и переключить. → аккаунт для дальнейшей работы.
+
+    Возвращает либо новый аккаунт, либо прежний: отказаться от
+    переключения не должно означать остаться без кабинета.
+    """
+    store = AccountStore(ACCOUNTS_DIR)
+    saved = store.all()
+    current = store.current()
+
+    keys = [[(("✅ " if current and a.id == current.id else "") + a.label(),
+              PICK_ACCOUNT + a.id)] for a in saved]
+    keys.append([("➕ Добавить кабинет", "добавить")])
+    keys.append([("✖️ Назад", "отмена")])
+
+    where = f"Сейчас: {current.name}\n\n" if current else ""
+    answer = link.ask(where + "Кабинеты:", ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if text == "добавить":
+        return add_account(link, store, account)
+
+    if not text.startswith(PICK_ACCOUNT):
+        return account
+
+    return switch_account(link, store, text[len(PICK_ACCOUNT):], account)
+
+
+def switch_account(link, store, account_id: str, account):
+    """Переключиться на сохранённый кабинет."""
+    saved = store.get(account_id)
+
+    if saved is None:
+        link.say("Такого кабинета больше нет.", buttons=MENU)
+        return account
+
+    try:
+        # Библиотека держит аккаунт синглтоном: этот вызов не создаёт
+        # второй кабинет, а переписывает единственный. Поэтому переключение
+        # именно заменяет, и две ссылки на разные кабинеты держать нельзя.
+        fresh = open_account(saved.cookies,
+                             saved.user_agent or os.environ.get(
+                                 "PLAYEROK_UA", ""))
+    except Exception as e:                                    # noqa: BLE001
+        link.say(f"Войти не вышло: {e}\n"
+                 "Кабинет остался прежним. Скорее всего протухли куки — "
+                 "добавьте их заново.", buttons=MENU)
+        return account
+
+    store.set_current(account_id)
+    link.say(f"Переключился: {saved.name}", buttons=MENU)
+
+    return fresh
+
+
+def add_account(link, store, account):
+    """Завести новый кабинет: имя, куки, user-agent."""
+    answer = link.ask("Как назвать кабинет? Это имя увидите только вы.",
+                      ANSWER_WAIT, buttons=[CANCEL])
+    name = " ".join(str(answer.get("text") or "").split())
+
+    if not name or wizard.cancelled(name):
+        link.say("Отменил.", buttons=MENU)
+        return account
+
+    answer = link.ask(
+        "Пришлите куки этого кабинета — строку «token=...», выгрузку "
+        "расширения в JSON или сам токен. Сообщение я удалю сразу после "
+        "прочтения.", ANSWER_WAIT, buttons=[CANCEL])
+    raw = str(answer.get("text") or "")
+
+    if wizard.cancelled(raw):
+        link.say("Отменил.", buttons=MENU)
+        return account
+
+    cookies = normalize_cookies(raw)
+
+    if not cookies:
+        link.say("Это не похоже на куки. Начнём заново.", buttons=MENU)
+        return account
+
+    # Стираем сразу: в переписке остался бы доступ к кабинету.
+    if not answer.get("from_button"):
+        link._delete(answer)
+
+    answer = link.ask(
+        "User-agent браузера, из которого взяты эти куки.\n\n"
+        "Площадка сверяет его с тем, при котором куки выданы: не совпадёт "
+        "— вход сочтут чужим. Чтобы взять тот же, что сейчас — "
+        "«пропустить».", ANSWER_WAIT, buttons=[SKIP])
+    typed = str(answer.get("text") or "").strip()
+    user_agent = ("" if wizard.skipped(typed) or wizard.cancelled(typed)
+                  else typed)
+
+    account_id = store.add(name, cookies,
+                           user_agent or os.environ.get("PLAYEROK_UA", ""))
+    link.say(f"Кабинет «{name}» добавлен.")
+
+    return switch_account(link, store, account_id, account)
+
+
 def main() -> None:
     load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
     account, _store, link = sign_in()
@@ -645,6 +759,11 @@ def main() -> None:
         raise SystemExit(
             "Не заданы TELEGRAM_BOT_TOKEN и TELEGRAM_OWNER_ID — "
             "разговаривать не с кем.")
+
+    where = AccountStore(ACCOUNTS_DIR).current()
+
+    if where is not None:
+        link.say(f"Кабинет: {where.name}")
 
     print("Жду в телеграме. Напишите боту «новый товар».")
     link.say("Готов.", buttons=MENU)
@@ -662,6 +781,8 @@ def main() -> None:
         elif text in TEMPLATE_WORDS:
             from_template(link, account)
             link.say("Готов к следующему.", buttons=MENU)
+        elif text in ACCOUNT_WORDS:
+            account = accounts_menu(link, account)
         elif not wizard.cancelled(text):
             # Молчать нельзя: продавец решит, что бот умер.
             link.say("Что делаем?", buttons=MENU)

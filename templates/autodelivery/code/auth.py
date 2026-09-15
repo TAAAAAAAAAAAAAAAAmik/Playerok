@@ -22,10 +22,16 @@ import os
 import shutil
 from typing import Any
 
+from accounts import AccountStore
 from owner import CookieStore, cookies_now, link_from_env
 
 # Где лежат присланные куки. Рядом с состоянием выдач, а не в коде.
 COOKIE_FILE = os.environ.get("PLAYEROK_COOKIE_FILE", "state/cookies.json")
+
+# Где живут сохранённые кабинеты. Если есть хоть один — вход идёт через
+# него, а не через одиночные куки: иначе переключение аккаунта ничего бы
+# не меняло.
+ACCOUNTS_DIR = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
 
 
 def user_agent_from_env() -> str:
@@ -135,12 +141,23 @@ def sign_in(session: Any = None):
     быть None — бот без телеграма работать обязан: телеграм здесь способ
     обновить куки, а не условие выдачи кодов.
 
+    Если сохранён хотя бы один кабинет, входим в текущий из них. Иначе —
+    прежним путём, одиночными куками: так продолжают работать установки,
+    где кабинет один и ничего переключать не нужно.
+
     `session` — чем ходить в Telegram. По умолчанию requests; параметр нужен
     тестам, чтобы проверить вход целиком, не выходя в сеть.
     """
+    link = link_from_env(session)
+    saved = AccountStore(ACCOUNTS_DIR).current()
+
+    if saved is not None:
+        return open_account(saved.cookies,
+                            saved.user_agent or user_agent_from_env()), \
+            CookieStore(COOKIE_FILE), link
+
     user_agent = user_agent_from_env()
     store = CookieStore(COOKIE_FILE)
-    link = link_from_env(session)
     cookies = cookies_now(store, link,
                           why="Запускаюсь, но куки площадки не заданы.")
 

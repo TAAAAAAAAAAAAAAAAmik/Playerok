@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import item_bot                                                 # noqa: E402
 import wizard                                                   # noqa: E402
+from accounts import AccountStore                               # noqa: E402
 from templates import TemplateStore                             # noqa: E402
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"pixels"
@@ -27,6 +28,11 @@ class FakeLink:
         self.answers = list(answers or [])
         self.said = []
         self.asked = []
+        self.deleted = []
+
+    def _delete(self, message):
+        self.deleted.append(message)
+        return True
 
     def say(self, text, buttons=None):
         self.said.append(text)
@@ -193,6 +199,97 @@ class OptionsTest(unittest.TestCase):
         item_bot.send_draft(FakeLink(), account, draft())
 
         self.assertEqual(account.created[0]["options"], {})
+
+
+class AccountsTest(unittest.TestCase):
+    """Библиотека площадки держит аккаунт синглтоном, поэтому переключение
+    заменяет единственный кабинет, а не заводит второй."""
+
+    COOKIES = "token=" + "j" * 60
+    UA = "Mozilla/5.0 тестовый"
+
+    def setUp(self):
+        self.folder = os.path.join(tempfile.mkdtemp(), "кабинеты")
+        item_bot.ACCOUNTS_DIR = self.folder
+        self.store = AccountStore(self.folder)
+        self.opened = []
+
+        def fake_open(cookies, user_agent):
+            self.opened.append((cookies, user_agent))
+            return f"аккаунт:{cookies[-4:]}"
+
+        self.saved_open = item_bot.open_account
+        item_bot.open_account = fake_open
+
+    def tearDown(self):
+        item_bot.open_account = self.saved_open
+
+    def test_switching_opens_the_saved_cookies(self):
+        aid = self.store.add("Второй", self.COOKIES, self.UA)
+        link = FakeLink()
+        got = item_bot.switch_account(link, self.store, aid, "прежний")
+
+        self.assertEqual(self.opened, [(self.COOKIES, self.UA)])
+        self.assertEqual(got, "аккаунт:" + self.COOKIES[-4:])
+        self.assertEqual(self.store.current().id, aid)
+
+    def test_failed_login_keeps_the_previous_cabinet(self):
+        """Остаться без кабинета хуже, чем остаться на прежнем."""
+        def broken(cookies, user_agent):
+            raise RuntimeError("куки протухли")
+
+        item_bot.open_account = broken
+        aid = self.store.add("Второй", self.COOKIES, self.UA)
+        link = FakeLink()
+
+        self.assertEqual(
+            item_bot.switch_account(link, self.store, aid, "прежний"),
+            "прежний")
+        self.assertTrue(any("не вышло" in t for t in link.said))
+
+    def test_missing_account_keeps_the_previous_one(self):
+        link = FakeLink()
+
+        self.assertEqual(
+            item_bot.switch_account(link, self.store, "deadbeef", "прежний"),
+            "прежний")
+
+    def test_adding_stores_and_switches(self):
+        link = FakeLink(["Основной", self.COOKIES, "пропустить"])
+        got = item_bot.add_account(link, self.store, "прежний")
+        saved = self.store.all()[0]
+
+        self.assertEqual(saved.name, "Основной")
+        self.assertEqual(saved.cookies, self.COOKIES)
+        self.assertEqual(self.store.current().id, saved.id)
+        self.assertTrue(got.startswith("аккаунт:"))
+
+    def test_cookie_message_is_deleted(self):
+        """В переписке остался бы доступ к кабинету."""
+        link = FakeLink(["Основной", self.COOKIES, "пропустить"])
+        item_bot.add_account(link, self.store, "прежний")
+
+        self.assertEqual(len(link.deleted), 1)
+
+    def test_junk_instead_of_cookies_saves_nothing(self):
+        link = FakeLink(["Основной", "ок"])
+        item_bot.add_account(link, self.store, "прежний")
+
+        self.assertEqual(self.store.all(), [])
+
+    def test_cancel_saves_nothing(self):
+        item_bot.add_account(FakeLink(["отмена"]), self.store, "прежний")
+
+        self.assertEqual(self.store.all(), [])
+
+    def test_json_export_is_accepted_as_cookies(self):
+        """С телефона куки достают расширением — оно отдаёт JSON."""
+        import json as js
+        export = js.dumps([{"name": "token", "value": "j" * 60}])
+        link = FakeLink(["Основной", export, "пропустить"])
+        item_bot.add_account(link, self.store, "прежний")
+
+        self.assertEqual(self.store.all()[0].cookies, "token=" + "j" * 60)
 
 
 class TemplateFlowTest(unittest.TestCase):
