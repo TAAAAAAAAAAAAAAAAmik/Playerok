@@ -12,6 +12,10 @@
 у разных игр разные, а один зашитый id уже приводил к тому, что товары
 создавались не там, где нужно.
 
+АВТОВЫДАЧА. Кнопка «Автовыдача» показывает, что бот умеет выдавать сам:
+включена ли карта, по какому слову он узнаёт ваши объявления и какими
+услугами поставщика покупает. Настройки у каждого кабинета свои.
+
 ПРОВЕРКА СЕССИИ. Кнопка «Проверить сессию» спрашивает у площадки, кто мы:
 этот вызов первым и падает, когда куки протухли. Заодно показывает, не
 заблокирован ли кабинет и разрешено ли выставлять товары.
@@ -67,6 +71,8 @@ import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
 from playerok import is_auth_error                            # noqa: E402
+from settings import REGIONS, Settings                        # noqa: E402
+from store import JsonStore                                   # noqa: E402
 from templates import TemplateStore, folder_for               # noqa: E402
 
 # Кнопки, которые повторяются. Подписи для человека, значения — те же
@@ -75,6 +81,7 @@ from templates import TemplateStore, folder_for               # noqa: E402
 MENU = [[("➕ Новый товар", "новый товар")],
         [("⚡ Из шаблона", "шаблон")],
         [("📄 Черновики", "черновики")],
+        [("⚙️ Автовыдача", "настройки")],
         [("🔑 Проверить сессию", "проверить")],
         [("👤 Аккаунт", "аккаунт")]]
 
@@ -85,6 +92,7 @@ COMMANDS = [
     ("new", "Новый товар"),
     ("tpl", "Создать из шаблона"),
     ("drafts", "Черновики"),
+    ("delivery", "Настройки автовыдачи"),
     ("check", "Проверить сессию"),
     ("account", "Кабинеты"),
 ]
@@ -107,6 +115,7 @@ CHECK_WORDS = ("проверить", "проверить сессию", "/check"
 TEMPLATE_WORDS = ("шаблон", "шаблоны", "из шаблона", "/tpl")
 ACCOUNT_WORDS = ("аккаунт", "аккаунты", "кабинет", "/account")
 DRAFT_WORDS = ("черновики", "черновик", "/drafts")
+SETTINGS_WORDS = ("настройки", "автовыдача", "/delivery")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -127,6 +136,13 @@ PICK_FIX = "fix:"
 PICK_ACT = "act:"
 PICK_DRAFT = "drf:"
 PICK_WAY = "way:"
+PICK_CARD = "crd:"
+PICK_SET = "set:"
+
+# Где лежит состояние выдачи: и настройки, и журнал выданных заказов. На
+# кабинет: товары и слова-опознаватели у разных кабинетов разные, а
+# смешать журналы двух кабинетов означало бы не выдать оплаченный заказ.
+SETTINGS_DIR = os.environ.get("PLAYEROK_STATE", "state/delivery")
 
 # User-agent, которым бот входит и работает. Раз сессию выдаём мы сами,
 # он наш: площадка сверяет его с тем, при котором сессия выдана, и
@@ -870,6 +886,122 @@ def make_from_template(link, account, store, template_id: str) -> None:
     send_draft(link, account, draft)
 
 
+def settings_of() -> Settings:
+    """Настройки автовыдачи текущего кабинета.
+
+    Поверх того самого файла состояния, который читает движок выдачи: свой
+    файл настроек стал бы вторым источником правды, и получилось бы
+    «поменял в боте, а выдача по-старому».
+    """
+    current = AccountStore(ACCOUNTS_DIR).current()
+    name = current.id if current else "default"
+
+    return Settings(JsonStore(os.path.join(SETTINGS_DIR, f"{name}.json")))
+
+
+def settings_menu(link) -> None:
+    """Что бот умеет выдавать сам и чем покупает."""
+    conf = settings_of()
+    keys = []
+
+    for card in CARDS:
+        ok, why = conf.ready(card.slug)
+        mark = "✅" if ok and not why else ("⚠️" if ok else "⛔")
+        keys.append([(f"{mark} {card.emoji} {card.title}",
+                      PICK_CARD + card.slug)])
+
+    keys.append([("✖️ Назад", "отмена")])
+    answer = link.ask(
+        "Автовыдача кодов.\n\n"
+        "✅ готово · ⚠️ настроено не до конца · ⛔ выключено",
+        ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "")
+
+    if not text.startswith(PICK_CARD):
+        link.screen("Отменил.", buttons=MENU)
+        return
+
+    card_menu(link, conf, text[len(PICK_CARD):])
+
+
+def card_menu(link, conf, slug: str) -> None:
+    """Настройки одной карты."""
+    card = next((c for c in CARDS if c.slug == slug), None)
+
+    if card is None:
+        link.screen("Такого товара нет.", buttons=MENU)
+        return
+
+    saved = conf.card(slug)
+    ok, why = conf.ready(slug)
+    lines = [f"{card.emoji} {card.title}",
+             "",
+             f"Выдача: {'включена' if saved['enabled'] else 'выключена'}",
+             f"Слово продавца: {saved['keyword'] or '— (по умолчанию)'}"]
+
+    for region in REGIONS:
+        got = conf.service_id(slug, region)
+        lines.append(f"Услуга {region}: {got or '— не задана'}")
+
+    if why:
+        lines += ["", f"⚠️ {why}"]
+
+    keys = [[(("⛔ Выключить" if saved["enabled"] else "✅ Включить"),
+              PICK_SET + "on")],
+            [("🔤 Слово продавца", PICK_SET + "word")]]
+
+    for region in REGIONS:
+        keys.append([(f"🧾 Услуга {region}", PICK_SET + "svc" + region)])
+
+    keys.append([("✖️ Назад", "отмена")])
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
+    what = str(answer.get("text") or "")
+
+    if not what.startswith(PICK_SET):
+        link.screen("Готово.", buttons=MENU)
+        return
+
+    what = what[len(PICK_SET):]
+
+    if what == "on":
+        conf.set_enabled(slug, not saved["enabled"])
+        card_menu(link, conf, slug)
+        return
+
+    if what == "word":
+        answer = link.ask(
+            "Слово, по которому бот узнаёт ВАШИ объявления.\n\n"
+            "Пока оно задано, встроенные опознаватели не работают — так вы "
+            "отделяете свои товары от чужих с похожими названиями.\n\n"
+            "Чтобы убрать — «пропустить».", ANSWER_WAIT, buttons=[SKIP])
+        word = str(answer.get("text") or "")
+
+        if wizard.cancelled(word):
+            card_menu(link, conf, slug)
+            return
+
+        conf.set_keyword(slug, "" if wizard.skipped(word) else word)
+        card_menu(link, conf, slug)
+        return
+
+    if what.startswith("svc"):
+        region = what[3:]
+        answer = link.ask(
+            f"Номер услуги поставщика для региона {region}.\n\n"
+            "Его показывает supplier_ids.py на сервере. Чтобы убрать — "
+            "«пропустить».", ANSWER_WAIT, buttons=[SKIP])
+        value = str(answer.get("text") or "")
+
+        if wizard.cancelled(value):
+            card_menu(link, conf, slug)
+            return
+
+        conf.set_service(slug, region,
+                         "" if wizard.skipped(value) else value)
+
+    card_menu(link, conf, slug)
+
+
 def drafts_menu(link, account) -> None:
     """Показать черновики кабинета и выставить выбранный.
 
@@ -1304,6 +1436,9 @@ def main() -> None:
             link.screen("Готов к следующему.", buttons=MENU)
         elif text in DRAFT_WORDS:
             drafts_menu(link, account)
+            link.screen("Готов к следующему.", buttons=MENU)
+        elif text in SETTINGS_WORDS:
+            settings_menu(link)
             link.screen("Готов к следующему.", buttons=MENU)
         elif text in CHECK_WORDS:
             check_session(link, account)

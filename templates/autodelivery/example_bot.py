@@ -28,6 +28,7 @@ from delivery import DeliveryEngine               # noqa: E402
 from envfile import load_env_file                 # noqa: E402
 from owner import link_from_env, renew_cookies    # noqa: E402
 from playerok import PlayerokMarketplace, is_auth_error   # noqa: E402
+from settings import Settings                     # noqa: E402
 from store import JsonStore                       # noqa: E402
 from supplier import ApprouteSupplier             # noqa: E402
 
@@ -53,8 +54,9 @@ class Catalog:
 
     TTL = 120.0
 
-    def __init__(self, supplier: ApprouteSupplier):
+    def __init__(self, supplier: ApprouteSupplier, conf: Settings):
         self.supplier = supplier
+        self.conf = conf
         self._at = 0.0
         self._raw = None
 
@@ -71,7 +73,9 @@ class Catalog:
         return self._raw
 
     def __call__(self, card: Card, region: str) -> list[Denomination]:
-        service_id = card.services.get(region.upper(), "")
+        # Из настроек кабинета, а если там пусто — из окружения: так
+        # продолжают работать установки, настроенные до появления меню.
+        service_id = self.conf.service_id(card.slug, region)
 
         if not service_id:
             # Услуга для этого региона не настроена. Молчим: движок скажет
@@ -115,9 +119,14 @@ async def main() -> None:
         proxy=os.environ.get("APPROUTE_PROXY", ""),
     )
     store = JsonStore("state/seller-1.json")
+
+    # Настройки поверх того же хранилища: что включено, по какому слову
+    # узнавать свои объявления и какими услугами поставщика покупать.
+    # Движок читает их оттуда же сам.
+    conf = Settings(store)
     engine = DeliveryEngine(
         market=market, supplier=supplier, store=store, cards=CARDS,
-        notify=notify, catalog_of=Catalog(supplier),
+        notify=notify, catalog_of=Catalog(supplier, conf),
         # Префикс ссылки покупки. У каждой площадки СВОЙ: ссылка уникальна в
         # пределах кабинета поставщика, а кабинет один на все площадки.
         reference_prefix="pk",
