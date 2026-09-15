@@ -66,13 +66,14 @@ from envfile import load_env_file                             # noqa: E402
 from owner import link_from_env                               # noqa: E402
 import listing                                                # noqa: E402
 import oneshot                                                # noqa: E402
+import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
 from cards import CARDS, card_by_slug                         # noqa: E402
-from catalog import (card_for_title, nominal_from_title,      # noqa: E402
-                     render)
+from catalog import (card_for_title, denominations_for,       # noqa: E402
+                     nominal_from_title, render)
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
@@ -1087,8 +1088,68 @@ def series_menu(link, account) -> None:
     make_series(link, account, store, text[len(PICK_SERIES):])
 
 
+# Каталог поставщика читается не чаще двух раз в минуту, а ответ — больше
+# тысячи услуг. Держим прочитанное на два экрана подряд: продавец, нажавший
+# «взять номиналы» дважды, иначе выберет лимит сам себе.
+_CATALOG: dict = {"at": 0.0, "raw": None}
+CATALOG_TTL = 120.0
+
+
+def supplier_catalog():
+    """Каталог поставщика → (каталог, причина отказа)."""
+    key = os.environ.get("APPROUTE_KEY", "").strip()
+
+    if not key:
+        return None, ("в .env нет APPROUTE_KEY — это ключ из кабинета "
+                      "AppRoute. Без него номиналы взять неоткуда")
+
+    if _CATALOG["raw"] is not None \
+            and time.time() - _CATALOG["at"] < CATALOG_TTL:
+        return _CATALOG["raw"], ""
+
+    try:
+        from supplier import ApprouteSupplier
+    except ImportError as e:                                  # noqa: BLE001
+        return None, f"не подключается клиент поставщика: {e}"
+
+    try:
+        raw = ApprouteSupplier(
+            api_key=key,
+            proxy=os.environ.get("APPROUTE_PROXY", "")).services()
+    except Exception as e:                                    # noqa: BLE001
+        return None, str(e)
+
+    _CATALOG["raw"], _CATALOG["at"] = raw, time.time()
+
+    return raw, ""
+
+
+def supplier_nominals(link, card, region: str):
+    """Номиналы карты у поставщика → пары (номинал, закупка) или None."""
+    link.screen("Читаю каталог поставщика…")
+    catalog, why = supplier_catalog()
+
+    if catalog is None:
+        link.screen(f"Каталог не прочитан: {why}", buttons=MENU)
+        return None
+
+    rows = [r for r in denominations_for(card, catalog)
+            if not r.region or not region or r.region == region.upper()]
+    costs = pricing.costs_from(rows)
+
+    if not costs:
+        link.screen(
+            f"У поставщика нет номиналов «{card.title}» в наличии"
+            + (f" для региона {region}" if region else "")
+            + ".\n\nПроверьте подкатегорию на экране карты: "
+              f"«{card.subcategory}».", buttons=MENU)
+        return None
+
+    return costs
+
+
 def make_series(link, account, store, template_id: str) -> None:
-    """Спросить номиналы с ценами, показать план, создать по согласию."""
+    """Собрать номиналы с ценами, показать план, создать по согласию."""
     template = store.get(template_id)
 
     if template is None:
@@ -1116,17 +1177,12 @@ def make_series(link, account, store, template_id: str) -> None:
             f"номинал был в названии.", buttons=MENU)
         return
 
-    answer = link.ask(
-        f"Образец: «{template.name}» — номинал {old:g}, цена "
-        f"{template.price} ₽.\n\n"
-        f"Пришлите остальные номиналы с ценами, по одному в строке:\n\n"
-        f"200 = 140\n400 = 280\n800 = 560\n\n"
-        f"Всё остальное — категория, характеристики, картинки, описание — "
-        f"возьму из образца.", ANSWER_WAIT, buttons=[CANCEL])
-    text = str(answer.get("text") or "")
+    card = card_for_title(CARDS, template.name) \
+        or card_for_title(CARDS, str((template.game or {}).get("name") or ""))
 
-    if not text.strip() or wizard.cancelled(text):
-        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+    text = ask_series_rows(link, template, card, old)
+
+    if text is None:
         return
 
     rows, bad = series.parse(text)
@@ -1137,8 +1193,7 @@ def make_series(link, account, store, template_id: str) -> None:
                     + "\n".join(bad + refused), buttons=MENU)
         return
 
-    count = plural(len(jobs), "объявление", "объявления",
-                    "объявлений")
+    count = plural(len(jobs), "объявление", "объявления", "объявлений")
     lines = [f"Создам {count}:", ""]
     lines += [f"• {j['name']} — {j['price']} ₽" for j in jobs]
 
@@ -1155,6 +1210,130 @@ def make_series(link, account, store, template_id: str) -> None:
         return
 
     run_series(link, account, template, photos, jobs)
+
+
+def ask_series_rows(link, template, card, old: float):
+    """Получить строки «номинал = цена». → текст или None, если отменили.
+
+    Номиналы у поставщика уже перечислены — переписывать их руками
+    незачем. Решает продавец только цену, её одну и вводит.
+    """
+    head = (f"Образец: «{template.name}» — номинал {old:g}, цена "
+            f"{template.price} ₽.\n\n")
+    keys = [[("📥 Взять номиналы у поставщика", "взять")],
+            [("✍️ Вписать самому", "сам")], CANCEL]
+
+    if card is None:
+        # Карта не узнана — брать номиналы неоткуда: подкатегория живёт в
+        # карте. Остаётся ручной ввод, и незачем предлагать несбыточное.
+        answer = link.ask(
+            head + "Пришлите номиналы с ценами, по одному в строке:\n\n"
+                   "200 = 140\n400 = 280\n800 = 560",
+            ANSWER_WAIT, buttons=[CANCEL])
+
+        return _series_text(link, answer)
+
+    answer = link.ask(head + "Откуда взять номиналы?", ANSWER_WAIT,
+                      buttons=keys)
+    chosen = str(answer.get("text") or "").strip().lower()
+
+    if wizard.cancelled(chosen):
+        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+        return None
+
+    if chosen != "взять":
+        answer = link.ask(
+            "Пришлите номиналы с ценами, по одному в строке:\n\n"
+            "200 = 140\n400 = 280\n800 = 560", ANSWER_WAIT, buttons=[CANCEL])
+
+        return _series_text(link, answer)
+
+    costs = supplier_nominals(link, card, template.region)
+
+    if costs is None:
+        return None
+
+    return ask_prices(link, card, template, costs)
+
+
+def ask_prices(link, card, template, costs: list):
+    """Показать номиналы поставщика и получить цены. → текст или None."""
+    answer = link.ask(
+        f"У поставщика {plural(len(costs), 'номинал', 'номинала', 'номиналов')}"
+        f" «{card.title}»"
+        + (f" ({template.region})" if template.region else "")
+        + ".\n\nЦены посчитать от закупки или впишете сами?",
+        ANSWER_WAIT,
+        buttons=[[("💱 Посчитать от закупки", "посчитать")],
+                 [("✍️ Вписать цены самому", "сам")], CANCEL])
+    chosen = str(answer.get("text") or "").strip().lower()
+
+    if wizard.cancelled(chosen):
+        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+        return None
+
+    rows = [(nominal, None) for nominal, _ in costs]
+
+    if chosen == "посчитать":
+        rows = ask_markup(link, costs)
+
+        if rows is None:
+            return None
+
+    # Список отдельным сообщением: продавец копирует его целиком, правит у
+    # себя и присылает обратно. Экран под ним перепишется вопросом.
+    link.forget_screen()
+    link.say(pricing.sheet(rows))
+
+    answer = link.ask(
+        "Скопируйте список, поставьте свои цены в рублях и пришлите "
+        "обратно.\n\n"
+        "Лишние номиналы удалите — объявления по ним не появятся.",
+        ANSWER_WAIT, buttons=[CANCEL])
+
+    return _series_text(link, answer)
+
+
+def ask_markup(link, costs: list):
+    """Курс и наценка → посчитанные цены. → пары или None."""
+    answer = link.ask(
+        "Курс рубля к доллару — сколько рублей за 1 $.\n\n"
+        "Закупка у поставщика в долларах, а цена на витрине в рублях. "
+        "Курс нигде не сохраняется: он меняется, и вчерашний хуже, чем "
+        "спрошенный сегодня.", ANSWER_WAIT, buttons=[CANCEL])
+    rate, why = wizard.accept_number(str(answer.get("text") or ""))
+
+    if why:
+        link.screen(f"{why}\n\nНачнём сначала, когда будете готовы.",
+                    buttons=MENU)
+        return None
+
+    answer = link.ask(
+        "Наценка в процентах.\n\n"
+        "40 значит «дороже закупки в 1.4 раза». Комиссия площадки сюда не "
+        "входит — заложите её сами.", ANSWER_WAIT, buttons=[CANCEL])
+    markup, why = wizard.accept_number(str(answer.get("text") or ""),
+                                       allow_zero=True)
+
+    if why:
+        link.screen(f"{why}\n\nНачнём сначала, когда будете готовы.",
+                    buttons=MENU)
+        return None
+
+    # Округляем вверх до десятки: цены вида «537 ₽» на витрине выглядят
+    # случайными, а вниз округлять — это продавать дешевле задуманного.
+    return pricing.suggest(costs, rate, markup, step=10)
+
+
+def _series_text(link, answer):
+    """Ответ со списком → текст или None, если отменили."""
+    text = str(answer.get("text") or "")
+
+    if not text.strip() or wizard.cancelled(text):
+        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+        return None
+
+    return text
 
 
 def run_series(link, account, template, photos, jobs) -> None:

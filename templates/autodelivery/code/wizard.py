@@ -306,6 +306,31 @@ def accept_nominal(text: str) -> tuple[float, str]:
     return value, ""
 
 
+def accept_number(text: str, allow_zero: bool = False) -> tuple[float, str]:
+    """Просто число: курс, наценка. → (число, причина отказа).
+
+    Дробное принимаем: курс редко бывает целым. А вот пустое и словами —
+    нет: из «примерно сотня» цены не посчитать, а молча взять ноль значит
+    выставить товар по закупке.
+    """
+    clean = " ".join(str(text or "").strip().split())
+    clean = clean.replace("\u00a0", "").replace(" ", "").replace(
+        ",", ".").replace("%", "")
+
+    try:
+        value = float(clean)
+    except ValueError:
+        return 0.0, f"Не понял «{str(text).strip()}». Напишите число."
+
+    if value < 0:
+        return 0.0, "Отрицательное не подойдёт."
+
+    if value == 0 and not allow_zero:
+        return 0.0, "Ноль не подойдёт."
+
+    return value, ""
+
+
 def accept_region(text: str) -> tuple[str, str]:
     """→ (регион, причина отказа).
 

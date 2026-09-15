@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
@@ -1004,6 +1005,108 @@ class CardRegistryTest(unittest.TestCase):
 
         for card in item_bot.CARDS:
             self.assertFalse(conf.card(card.slug)["enabled"], card.slug)
+
+
+class SeriesFromSupplierTest(unittest.TestCase):
+    """Номиналы берутся у поставщика — продавец вводит только цены."""
+
+    CATALOG = {"services": [
+        {"id": "s-gl", "name": "Roblox Gift Cards Global",
+         "subcategoryName": "Roblox Gift Cards",
+         "items": [{"id": "i100", "value": 100, "inStock": 9, "price": 1.1},
+                   {"id": "i400", "value": 400, "inStock": 9, "price": 4.0},
+                   {"id": "i800", "value": 800, "inStock": 0, "price": 7.9}]},
+        {"id": "s-ru", "name": "Roblox Gift Cards RU",
+         "subcategoryName": "Roblox Gift Cards",
+         "items": [{"id": "r700", "value": 700, "inStock": 9, "price": 9.9}]},
+    ]}
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        os.environ["APPROUTE_KEY"] = "ключ"
+        item_bot._CATALOG["raw"] = self.CATALOG
+        item_bot._CATALOG["at"] = time.time()
+
+    def tearDown(self):
+        item_bot._CATALOG["raw"] = None
+        os.environ.pop("APPROUTE_KEY", None)
+
+    def template(self, name="100 Robux Global", region="GL", game="Roblox"):
+        return item_bot.templates_of().save(
+            name, 150, region, [PNG], description="Выдаём 100 робуксов",
+            game={"id": "g", "name": game},
+            category={"id": "c", "name": "Валюта"},
+            obtaining={"id": "o", "name": "Без входа"})
+
+    def test_the_supplier_nominals_are_offered_for_pricing(self):
+        link = FakeLink([item_bot.PICK_SERIES + self.template(),
+                         "взять", "сам", "отмена"])
+        item_bot.series_menu(link, "кабинет")
+        sheet = next(t for t in link.said if t.startswith("100 ="))
+
+        self.assertIn("100 =", sheet)
+        self.assertIn("400 =", sheet)
+
+    def test_what_is_out_of_stock_is_not_offered(self):
+        """Объявление по такому номиналу бот выдать не сможет, а покупатель
+        заплатит и будет ждать."""
+        link = FakeLink([item_bot.PICK_SERIES + self.template(),
+                         "взять", "сам", "отмена"])
+        item_bot.series_menu(link, "кабинет")
+        sheet = next(t for t in link.said if t.startswith("100 ="))
+
+        self.assertNotIn("800", sheet)
+
+    def test_another_regions_nominals_are_not_offered(self):
+        """Код чужого региона покупатель не активирует — объявление по
+        нему стало бы спором, а не продажей."""
+        link = FakeLink([item_bot.PICK_SERIES + self.template(),
+                         "взять", "сам", "отмена"])
+        item_bot.series_menu(link, "кабинет")
+        sheet = next(t for t in link.said if t.startswith("100 ="))
+
+        self.assertNotIn("700", sheet)
+
+    def test_prices_can_be_counted_from_the_purchase(self):
+        link = FakeLink([item_bot.PICK_SERIES + self.template(),
+                         "взять", "посчитать", "100", "40", "отмена"])
+        item_bot.series_menu(link, "кабинет")
+        sheet = next(t for t in link.said if t.startswith("100 ="))
+
+        # 1.1 $ × 100 ₽ × 1.4 = 154 → вверх до десятки.
+        self.assertIn("100 = 160", sheet)
+        self.assertIn("400 = 560", sheet)
+
+    def test_without_a_key_the_seller_is_told_why(self):
+        os.environ.pop("APPROUTE_KEY", None)
+        item_bot._CATALOG["raw"] = None
+        link = FakeLink([item_bot.PICK_SERIES + self.template(), "взять"])
+        item_bot.series_menu(link, "кабинет")
+
+        self.assertIn("APPROUTE_KEY", link.said[-1])
+
+    def test_the_card_is_recognised_by_the_game_when_the_name_is_odd(self):
+        """Продавец назвал товар по-своему — но игра в шаблоне записана, и
+        по ней карта узнаётся."""
+        link = FakeLink([item_bot.PICK_SERIES + self.template("Валюта 100"),
+                         "взять", "сам", "отмена"])
+        item_bot.series_menu(link, "кабинет")
+
+        self.assertTrue(any(t.startswith("100 =") for t in link.said))
+
+    def test_an_unknown_card_still_allows_typing_by_hand(self):
+        """Подкатегория живёт в карте: не узнав её, брать номиналы неоткуда
+        — и предлагать несбыточное незачем."""
+        link = FakeLink([item_bot.PICK_SERIES + self.template(
+            "Валюта 100", game="Arizona RP"), "отмена"])
+        item_bot.series_menu(link, "кабинет")
+        asked = [q for q, _ in link.asked]
+
+        self.assertFalse(any("Откуда взять" in q for q in asked))
+        self.assertTrue(any("по одному в строке" in q for q in asked))
 
 
 if __name__ == "__main__":
