@@ -13,6 +13,10 @@
 
     PLAYEROK_COOKIES=... PLAYEROK_UA=... python3 watch.py
 
+Куки можно и не задавать: если настроены TELEGRAM_BOT_TOKEN и
+TELEGRAM_OWNER_ID, бот попросит их в телеграме — и там же попросит новые,
+когда прежние истекут.
+
 Когда увиденное совпадёт с ожидаемым — можно запускать боевой цикл.
 """
 from __future__ import annotations
@@ -24,9 +28,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
+from auth import open_account, sign_in, user_agent_from_env  # noqa: E402
 from catalog import (nominal_from_title, pick_card,           # noqa: E402
                      region_from_description)
-from playerok import PAID_STATUSES, PlayerokMarketplace       # noqa: E402
+from owner import renew_cookies                              # noqa: E402
+from playerok import (PAID_STATUSES, PlayerokMarketplace,     # noqa: E402
+                      is_auth_error)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("watch")
@@ -36,41 +43,9 @@ log = logging.getLogger("watch")
 from cards import CARDS                                        # noqa: E402
 
 
-def account_from_env():
-    """Аккаунт площадки из переменных окружения.
-
-    Куки и user-agent живут только в окружении: положить их в код значило бы
-    выложить доступ к кабинету продавца в репозиторий.
-    """
-    cookies = os.environ.get("PLAYEROK_COOKIES", "").strip()
-    user_agent = os.environ.get("PLAYEROK_UA", "").strip()
-
-    if not cookies:
-        raise SystemExit(
-            "Нет PLAYEROK_COOKIES. Это строка куки целиком из браузера, где "
-            "вы вошли продавцом — со всем содержимым, включая token и куку "
-            "защиты от DDoS-Guard. Библиотека разберёт её сама.")
-
-    if not user_agent:
-        raise SystemExit(
-            "Нет PLAYEROK_UA. Нужен тот же user-agent, что у браузера, из "
-            "которого взяты куки: иначе площадка сочтёт вход чужим.")
-
-    try:
-        from playerokapi.account import Account
-    except ImportError:
-        raise SystemExit(
-            "Не установлена библиотека playerokapi. "
-            "Поставьте: pip install -r requirements.txt")
-
-    # Передаём строку куки целиком: библиотека разберёт её на пары сама.
-    # Отдельный параметр token ждёт только JWT, и подсунуть ему всю строку
-    # значит молча остаться неавторизованным.
-    return Account(cookies=cookies, user_agent=user_agent).get()
-
-
 async def main() -> None:
-    market = PlayerokMarketplace(account_from_env())
+    account, store, link = sign_in()
+    market = PlayerokMarketplace(account)
 
     log.info("Наблюдение. Покупок не будет — поставщик не вызывается вовсе.")
     log.info("Оплаченными считаем статусы: %s", ", ".join(sorted(PAID_STATUSES)))
@@ -79,9 +54,25 @@ async def main() -> None:
         orders = await market.paid_orders()
     except Exception as e:                                     # noqa: BLE001
         log.error("Не удалось прочитать заказы: %s", e)
-        raise SystemExit(
-            "Проверьте куки и user-agent. Если площадка просит сбавить темп "
-            "— подождите и повторите.")
+
+        if not (is_auth_error(e) and link):
+            raise SystemExit(
+                "Проверьте куки и user-agent. Если площадка просит сбавить "
+                "темп — подождите и повторите.")
+
+        # Куки протухли, а спросить есть у кого — спрашиваем и пробуем ещё
+        # раз. Один раз: если и новые не подошли, дело не в них.
+        log.info("Куки не приняты. Спрашиваю новые в телеграме.")
+        cookies = renew_cookies(
+            store, link,
+            "Площадка не приняла вход: куки истекли.")
+
+        if not cookies:
+            raise SystemExit("Новых куки не пришло — останавливаюсь.")
+
+        market = PlayerokMarketplace(
+            open_account(cookies, user_agent_from_env()))
+        orders = await market.paid_orders()
 
     if not orders:
         log.info("Оплаченных сделок сейчас нет.")

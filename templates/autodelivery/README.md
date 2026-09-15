@@ -14,6 +14,8 @@
 code/
   marketplace.py   порт площадки: протокол Order/Marketplace
   playerok.py      адаптер PlayerOK поверх библиотеки playerokapi
+  owner.py         связь с владельцем в Telegram и хранение куки
+  auth.py          вход в кабинет: откуда берутся куки и как обновляются
   supplier.py      клиент поставщика кодов AppRoute — переносится как есть
   catalog.py       номинал из названия, регион из описания, подбор у поставщика
   store.py         состояние выдачи, атомарная запись, журнал
@@ -21,6 +23,8 @@ code/
 tests/
   test_delivery.py 20 тестов движка на поддельных площадке и поставщике
   test_playerok.py 27 тестов адаптера на поддельном аккаунте
+  test_owner.py    32 теста связи с владельцем на поддельном телеграме
+  test_auth.py     6 тестов входа в кабинет
 docs/
   01_ARCHITECTURE.md   конвейер, состояния, инварианты
   02_MARKETPLACE_PORT.md что именно писать под PlayerOK
@@ -34,7 +38,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 47 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 85 тестов, сети не требуют
 ```
 
 ---

@@ -19,12 +19,16 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
+from auth import (open_account, sign_in,           # noqa: E402
+                  user_agent_from_env)
 from cards import CARDS                           # noqa: E402
 from catalog import Denomination                  # noqa: E402
 from delivery import DeliveryEngine               # noqa: E402
-from playerok import PlayerokMarketplace          # noqa: E402
+from owner import link_from_env, renew_cookies    # noqa: E402
+from playerok import PlayerokMarketplace, is_auth_error   # noqa: E402
 from store import JsonStore                       # noqa: E402
 from supplier import ApprouteSupplier             # noqa: E402
+
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -67,17 +71,19 @@ class Catalog:
         return rows
 
 
-async def notify(text: str) -> None:
-    """Сообщить продавцу. В боевом боте — отправка в Telegram."""
-    print("[продавцу]", text)
-
-
 async def main() -> None:
-    from playerokapi.account import Account
+    # Вход в кабинет: куки с диска, из окружения или спросив у владельца в
+    # телеграме. Оттуда же берутся новые, когда прежние истекут.
+    account, cookie_store, link = sign_in()
+    market = PlayerokMarketplace(account)
 
-    market = PlayerokMarketplace(
-        Account(cookies=os.environ["PLAYEROK_COOKIES"],
-                user_agent=os.environ["PLAYEROK_UA"]).get())
+    async def notify(text: str) -> None:
+        """Сообщить продавцу. Телеграм есть — пишем туда, нет — в журнал."""
+        if link and await to_thread(link.say, text):
+            return
+
+        logging.info("[продавцу] %s", text)
+
     supplier = ApprouteSupplier(
         api_key=os.environ["APPROUTE_KEY"],
         # Прокси с ПОСТОЯННЫМ адресом: у поставщика белый список IP, а адрес
@@ -110,7 +116,46 @@ async def main() -> None:
             # Исключение не убивает цикл: один упавший заказ не должен
             # уносить с собой остальные.
             logging.error("проход не удался: %s", e)
+
+            if is_auth_error(e) and link:
+                # Куки истекли. Пока владелец не пришлёт новые, площадка
+                # будет отказывать каждый проход, а покупатели — ждать.
+                account = await ask_for_new_cookies(cookie_store, link)
+
+                if account is not None:
+                    market.account = account
+
         await asyncio.sleep(PERIOD)
+
+
+async def ask_for_new_cookies(cookie_store, link):
+    """Попросить у владельца новые куки и войти заново.
+
+    Ожидание живёт в отдельном потоке, чтобы не держать цикл asyncio: сам
+    проход по заказам всё равно ждёт — с отказанными куками опрашивать
+    площадку бессмысленно, она ответит тем же отказом.
+    """
+    logging.warning("Площадка не приняла вход — прошу новые куки в телеграме")
+
+    cookies = await to_thread(
+        renew_cookies, cookie_store, link,
+        "Площадка не приняла вход: куки истекли. Выдача кодов стоит.")
+
+    if not cookies:
+        logging.error("Новых куки не пришло — пробую прежние дальше")
+        return None
+
+    try:
+        return open_account(cookies, user_agent_from_env())
+    except Exception as e:                           # noqa: BLE001
+        logging.error("новые куки не подошли: %s", e)
+        return None
+
+
+async def to_thread(fn, *args):
+    """Синхронный вызов — в поток, чтобы не держать цикл заказов."""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, lambda: fn(*args))
 
 
 if __name__ == "__main__":

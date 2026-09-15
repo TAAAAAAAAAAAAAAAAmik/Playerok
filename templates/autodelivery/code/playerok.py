@@ -297,6 +297,19 @@ def _amount(deal: Any) -> float | None:
         return None
 
 
+def is_auth_error(error: Any) -> bool:
+    """Отказ именно во входе, а не любая ошибка площадки.
+
+    Отдельная проверка нужна тем, кто по ней принимает решение — например
+    просит у владельца новые куки. Разбирать русскую фразу из _explain для
+    этого нельзя: текст пишется человеку и меняется вместе с формулировкой.
+    """
+    low = str(error).lower()
+
+    return ("401" in low or "403" in low
+            or "unauthor" in low or "forbidden" in low)
+
+
 def _explain(error: Exception) -> str:
     """Ошибка площадки — человеческой фразой.
 
@@ -307,7 +320,7 @@ def _explain(error: Exception) -> str:
     text = str(error).strip()
     low = text.lower()
 
-    if "401" in low or "unauthor" in low or "forbidden" in low or "403" in low:
+    if is_auth_error(error):
         return "площадка не приняла вход: истекли куки продавца, нужно войти заново"
 
     if "429" in low or "too many" in low or "rate" in low:
