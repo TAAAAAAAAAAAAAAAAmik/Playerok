@@ -16,6 +16,7 @@ code/
   playerok.py      адаптер PlayerOK поверх библиотеки playerokapi
   owner.py         связь с владельцем в Telegram и хранение куки
   auth.py          вход в кабинет: откуда берутся куки и как обновляются
+  envfile.py       чтение .env рядом со скриптом
   supplier.py      клиент поставщика кодов AppRoute — переносится как есть
   catalog.py       номинал из названия, регион из описания, подбор у поставщика
   store.py         состояние выдачи, атомарная запись, журнал
@@ -26,6 +27,7 @@ tests/
   test_owner.py    41 тест связи с владельцем на поддельном телеграме
   test_auth.py     6 тестов входа в кабинет
   test_pull.py     8 тестов обновления кода без git
+  test_envfile.py  7 тестов чтения .env
 docs/
   01_ARCHITECTURE.md   конвейер, состояния, инварианты
   02_MARKETPLACE_PORT.md что именно писать под PlayerOK
@@ -42,7 +44,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 102 теста, сети не требуют
+python3 -m unittest discover tests -v      # 109 тестов, сети не требуют
 ```
 
 ---

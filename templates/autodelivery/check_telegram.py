@@ -8,7 +8,6 @@
        написали боту первым, Telegram не даёт ботам писать людям, и
        первая же просьба о куки уйдёт в никуда.
 
-    set -a && . /etc/autodelivery.env && set +a
     python3 check_telegram.py
 
 Запускать на том же сервере, где живёт бот: проверяется в том числе, что
@@ -23,10 +22,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
 import requests                                               # noqa: E402
 
+from envfile import load_env_file                             # noqa: E402
 from owner import link_from_env                              # noqa: E402
 
 
 def main() -> None:
+    load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
     link = link_from_env()
 
     if link is None:

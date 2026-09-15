@@ -11,7 +11,7 @@
 чтения заказов по ссылке (у последнего есть побочное действие: поставщик
 помечает коды полученными).
 
-    PLAYEROK_COOKIES=... PLAYEROK_UA=... python3 watch.py
+    python3 watch.py        # ключи берутся из .env рядом
 
 Куки можно и не задавать: если настроены TELEGRAM_BOT_TOKEN и
 TELEGRAM_OWNER_ID, бот попросит их в телеграме — и там же попросит новые,
@@ -29,6 +29,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
 from auth import open_account, sign_in, user_agent_from_env  # noqa: E402
+from envfile import load_env_file                             # noqa: E402
 from catalog import (nominal_from_title, pick_card,           # noqa: E402
                      region_from_description)
 from owner import renew_cookies                              # noqa: E402
@@ -44,6 +45,7 @@ from cards import CARDS                                        # noqa: E402
 
 
 async def main() -> None:
+    load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
     account, store, link = sign_in()
     market = PlayerokMarketplace(account)
 

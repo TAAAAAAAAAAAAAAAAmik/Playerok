@@ -4,7 +4,10 @@
 Этот скрипт заменяет `git pull`: скачивает архив ветки через GitHub API и
 раскладывает файлы поверх установленных.
 
-    GITHUB_TOKEN=... python3 pull.py
+    python3 pull.py
+
+Токен читается из .env рядом со скриптом, так что помнить про `set -a`
+перед запуском не нужно.
 
 Токен — «fine-grained», только на чтение (Contents: Read-only) и только
 этого репозитория. Держать его удобно там же, где остальные секреты:
@@ -38,6 +41,36 @@ SUBDIR = "templates/autodelivery"
 KEEP = {".env", "state", "__pycache__", ".venv"}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_env_file(path: str) -> None:
+    """Прочитать .env в окружение. Уже заданное не трогаем.
+
+    Свой разбор, а не общий из code/envfile.py, нарочно: этот файл
+    скачивают одиночкой, когда на сервере ещё ничего нет, и зависимость от
+    соседнего модуля сделала бы его незапускаемым ровно в тот момент, ради
+    которого он существует.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+
+    for line in lines:
+        line = line.strip()
+
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        name, _, value = line.partition("=")
+        name, value = name.strip(), value.strip()
+
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+
+        if name and name not in os.environ:
+            os.environ[name] = value
 
 
 def download(token: str, into: str) -> str:
@@ -146,14 +179,15 @@ def _same(one: str, other: str) -> bool:
 
 
 def main() -> None:
+    load_env_file(os.path.join(HERE, ".env"))
     token = os.environ.get("GITHUB_TOKEN", "").strip()
 
     if not token:
         raise SystemExit(
             "Нет GITHUB_TOKEN. Заведите fine-grained токен на github.com "
             "(Settings → Developer settings → Personal access tokens), дайте "
-            "ему Contents: Read-only на этот репозиторий и положите в .env "
-            "строкой GITHUB_TOKEN=...")
+            "ему Contents: Read-only на этот репозиторий и положите в "
+            f"{os.path.join(HERE, '.env')} строкой GITHUB_TOKEN=...")
 
     with tempfile.TemporaryDirectory() as workspace:
         print(f"Скачиваю {REPO}, ветка {BRANCH}…")

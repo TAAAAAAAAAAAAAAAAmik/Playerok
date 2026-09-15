@@ -24,6 +24,7 @@ from auth import (open_account, sign_in,           # noqa: E402
 from cards import CARDS                           # noqa: E402
 from catalog import Denomination                  # noqa: E402
 from delivery import DeliveryEngine               # noqa: E402
+from envfile import load_env_file                 # noqa: E402
 from owner import link_from_env, renew_cookies    # noqa: E402
 from playerok import PlayerokMarketplace, is_auth_error   # noqa: E402
 from store import JsonStore                       # noqa: E402
@@ -72,6 +73,7 @@ class Catalog:
 
 
 async def main() -> None:
+    load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
     # Вход в кабинет: куки с диска, из окружения или спросив у владельца в
     # телеграме. Оттуда же берутся новые, когда прежние истекут.
     account, cookie_store, link = sign_in()
