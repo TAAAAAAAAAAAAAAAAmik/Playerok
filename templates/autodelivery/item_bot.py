@@ -12,6 +12,10 @@
 у разных игр разные, а один зашитый id уже приводил к тому, что товары
 создавались не там, где нужно.
 
+ШАБЛОНЫ У КАЖДОГО КАБИНЕТА СВОИ: товары у разных кабинетов разные, и
+перемешанные шаблоны означают объявление, созданное не там, где хотели.
+Шаблон можно повторить, изменить по одному полю или удалить.
+
 КАБИНЕТЫ. Их может быть несколько: кнопка «Аккаунт» показывает список и
 переключает. Библиотека площадки держит аккаунт синглтоном, поэтому два
 кабинета одновременно в одном процессе жить не могут — только по очереди.
@@ -49,7 +53,7 @@ import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
-from templates import TemplateStore                           # noqa: E402
+from templates import TemplateStore, folder_for               # noqa: E402
 
 # Кнопки, которые повторяются. Подписи для человека, значения — те же
 # слова, что понимает разбор ответов: нажатие и набранный текст должны
@@ -90,6 +94,7 @@ PICK_OBTAINING = "obt:"
 PICK_OPTION = "opt:"
 PICK_ACCOUNT = "acc:"
 PICK_FIX = "fix:"
+PICK_ACT = "act:"
 
 # Где живут сохранённые кабинеты.
 ACCOUNTS_DIR = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
@@ -565,6 +570,19 @@ def send_draft(link, account, draft: wizard.Draft) -> bool:
     return True
 
 
+def templates_of(account_id: str = "") -> TemplateStore:
+    """Шаблоны текущего кабинета.
+
+    Папка на кабинет, а не общая: у разных кабинетов разные товары, и
+    перемешанные шаблоны означают объявление, созданное не там, где хотели.
+    """
+    if not account_id:
+        current = AccountStore(ACCOUNTS_DIR).current()
+        account_id = current.id if current else ""
+
+    return TemplateStore(folder_for(TEMPLATE_DIR, account_id))
+
+
 def offer_template(link, draft: wizard.Draft) -> None:
     """Предложить сохранить объявление шаблоном.
 
@@ -579,7 +597,7 @@ def offer_template(link, draft: wizard.Draft) -> None:
     if str(answer.get("text") or "").strip().lower() not in ("да", "сохранить"):
         return
 
-    store = TemplateStore(TEMPLATE_DIR)
+    store = templates_of()
 
     try:
         store.save(draft.name, draft.price, draft.region, draft.photos,
@@ -595,26 +613,154 @@ def offer_template(link, draft: wizard.Draft) -> None:
 
 
 def from_template(link, account) -> None:
-    """Повторить сохранённое объявление одним нажатием."""
-    store = TemplateStore(TEMPLATE_DIR)
+    """Список шаблонов кабинета: повторить, изменить или удалить."""
+    store = templates_of()
     saved = store.all()
 
     if not saved:
-        link.say("Шаблонов пока нет. Создайте товар и сохраните его "
-                 "шаблоном — дальше он будет создаваться одним нажатием.",
-                 buttons=MENU)
+        link.say("У этого кабинета шаблонов пока нет. Создайте товар и "
+                 "сохраните его шаблоном — дальше он будет создаваться "
+                 "одним нажатием.", buttons=MENU)
         return
 
     keys = [[(t.label(), PICK + t.id)] for t in saved]
     keys.append([("✖️ Отмена", "отмена")])
-    answer = link.ask("Какой повторяем?", ANSWER_WAIT, buttons=keys)
+    answer = link.ask("Шаблоны этого кабинета:", ANSWER_WAIT, buttons=keys)
     text = str(answer.get("text") or "").strip()
 
     if not text.startswith(PICK):
         link.say("Отменил.", buttons=MENU)
         return
 
-    template = store.get(text[len(PICK):])
+    template_id = text[len(PICK):]
+    template = store.get(template_id)
+
+    if template is None:
+        link.say("Такого шаблона больше нет.", buttons=MENU)
+        return
+
+    answer = link.ask(
+        f"{template.label()}\n\nЧто делаем?", ANSWER_WAIT,
+        buttons=[[("⚡ Создать товар", PICK_ACT + "make")],
+                 [("✏️ Изменить", PICK_ACT + "edit")],
+                 [("🗑 Удалить", PICK_ACT + "drop")],
+                 [("✖️ Назад", "отмена")]])
+    what = str(answer.get("text") or "")
+
+    if not what.startswith(PICK_ACT):
+        link.say("Отменил.", buttons=MENU)
+        return
+
+    what = what[len(PICK_ACT):]
+
+    if what == "drop":
+        drop_template(link, store, template)
+        return
+
+    if what == "edit":
+        edit_template(link, store, template_id)
+        return
+
+    make_from_template(link, account, store, template_id)
+
+
+def drop_template(link, store, template) -> None:
+    """Удалить шаблон, переспросив: восстановить его нечем."""
+    answer = link.ask(
+        f"Удалить «{template.label()}»?\n\n"
+        "Вместе с картинками. Восстановить будет нечем.", ANSWER_WAIT,
+        buttons=[[("🗑 Да, удалить", "да")], [("✖️ Нет", "отмена")]])
+
+    if str(answer.get("text") or "").strip().lower() != "да":
+        link.say("Оставил.", buttons=MENU)
+        return
+
+    if store.remove(template.id):
+        link.say("Удалил.", buttons=MENU)
+    else:
+        link.say("Удалить не вышло.", buttons=MENU)
+
+
+def edit_template(link, store, template_id: str) -> None:
+    """Поправить одно поле шаблона."""
+    template = store.get(template_id)
+
+    if template is None:
+        link.say("Такого шаблона больше нет.", buttons=MENU)
+        return
+
+    answer = link.ask(
+        "Что меняем?", ANSWER_WAIT,
+        buttons=[[("📝 Название", PICK_ACT + "name")],
+                 [("💰 Цену", PICK_ACT + "price")],
+                 [("🌍 Регион", PICK_ACT + "region")],
+                 [("📄 Описание", PICK_ACT + "description")],
+                 [("🖼 Фотографии", PICK_ACT + "photos")],
+                 [("✖️ Назад", "отмена")]])
+    what = str(answer.get("text") or "")
+
+    if not what.startswith(PICK_ACT):
+        link.say("Отменил.", buttons=MENU)
+        return
+
+    what = what[len(PICK_ACT):]
+
+    if what == "photos":
+        edit_photos(link, store, template_id)
+        return
+
+    if what == "region":
+        answer = link.ask("Новый регион:", ANSWER_WAIT,
+                          buttons=[REGIONS, CANCEL])
+        value, why = wizard.accept_region(str(answer.get("text") or ""))
+    elif what == "price":
+        answer = link.ask("Новая цена:", ANSWER_WAIT, buttons=[CANCEL])
+        value, why = wizard.accept_price(str(answer.get("text") or ""))
+    elif what == "name":
+        answer = link.ask("Новое название:", ANSWER_WAIT, buttons=[CANCEL])
+        value, why = wizard.accept_name(str(answer.get("text") or ""))
+    else:
+        answer = link.ask("Новое описание:", ANSWER_WAIT, buttons=[SKIP])
+        value, why = wizard.accept_description(str(answer.get("text") or ""))
+
+    if wizard.cancelled(str(answer.get("text") or "")):
+        link.say("Отменил.", buttons=MENU)
+        return
+
+    if why:
+        link.say(why + "\n\nОставил как было.", buttons=MENU)
+        return
+
+    if store.update(template_id, **{what: value}):
+        link.say("Поправил.", buttons=MENU)
+    else:
+        link.say("Сохранить не вышло.", buttons=MENU)
+
+
+def edit_photos(link, store, template_id: str) -> None:
+    """Заменить картинки шаблона целиком."""
+    draft = wizard.Draft()
+    link.say("Пришлите новые фотографии — они заменят прежние целиком.",
+             buttons=[PHOTOS_DONE])
+    message = link.wait_answer(ANSWER_WAIT)
+
+    if not message:
+        link.say("Не дождался.", buttons=MENU)
+        return
+
+    if not collect_photos(link, draft, message):
+        return
+
+    if store.set_photos(template_id, draft.photos):
+        link.say(f"Заменил. Теперь фотографий: {len(draft.photos)}.",
+                 buttons=MENU)
+    else:
+        link.say("Сохранить не вышло.", buttons=MENU)
+
+
+def make_from_template(link, account, store, template_id: str) -> None:
+    """Повторить сохранённое объявление одним нажатием."""
+    template = store.get(template_id)
 
     if template is None:
         link.say("Такого шаблона больше нет.", buttons=MENU)

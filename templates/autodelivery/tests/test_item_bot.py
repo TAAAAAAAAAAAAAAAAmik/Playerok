@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import item_bot                                                 # noqa: E402
 import wizard                                                   # noqa: E402
 from accounts import AccountStore                               # noqa: E402
-from templates import TemplateStore                             # noqa: E402
+from templates import TemplateStore, folder_for                 # noqa: E402
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"pixels"
 
@@ -344,14 +344,10 @@ class AccountsTest(unittest.TestCase):
 
 class TemplateFlowTest(unittest.TestCase):
     def setUp(self):
-        self.folder = os.path.join(tempfile.mkdtemp(), "шаблоны")
-        self.saved = os.environ.get("PLAYEROK_TEMPLATES")
-        item_bot.TEMPLATE_DIR = self.folder
-        self.store = TemplateStore(self.folder)
-
-    def tearDown(self):
-        if self.saved:
-            os.environ["PLAYEROK_TEMPLATES"] = self.saved
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        self.store = TemplateStore(folder_for(item_bot.TEMPLATE_DIR, ""))
 
     def test_saving_keeps_everything_needed(self):
         link = FakeLink(["да"])
@@ -383,7 +379,7 @@ class TemplateFlowTest(unittest.TestCase):
     def test_old_template_without_a_category_is_refused(self):
         """Повторять его нечем: товар ушёл бы не туда."""
         tid = self.store.save("старый", 1, "GL", [PNG])
-        link = FakeLink([item_bot.PICK + tid])
+        link = FakeLink([item_bot.PICK + tid, item_bot.PICK_ACT + "make"])
         account = FakeAccount()
         item_bot.from_template(link, account)
 
@@ -398,7 +394,9 @@ class TemplateFlowTest(unittest.TestCase):
                               fields=[{"id": "f1", "label": "Комментарий",
                                        "required": False, "value": "пометка"}])
         account = FakeAccount()
-        item_bot.from_template(FakeLink([item_bot.PICK + tid]), account)
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + tid, item_bot.PICK_ACT + "make"]),
+            account)
 
         sent = account.created[0]
         self.assertEqual(sent["name"], "80 Robux")
@@ -430,7 +428,8 @@ class TemplateFlowTest(unittest.TestCase):
         account = FakeAccount()
 
         for bad in ("tpl:../../etc", "tpl:", "tpl:deadbeef", "что попало"):
-            item_bot.from_template(FakeLink([bad]), account)
+            item_bot.from_template(
+                FakeLink([bad, item_bot.PICK_ACT + "make"]), account)
 
         self.assertEqual(account.created, [])
 
@@ -441,12 +440,113 @@ class TemplateFlowTest(unittest.TestCase):
         template = self.store.get(tid)
         os.unlink(os.path.join(template.folder, template.files[0]))
 
-        link = FakeLink([item_bot.PICK + tid])
+        link = FakeLink([item_bot.PICK + tid, item_bot.PICK_ACT + "make"])
         account = FakeAccount()
         item_bot.from_template(link, account)
 
         self.assertEqual(account.created, [])
         self.assertTrue(any("картинк" in t.lower() for t in link.said))
+
+
+class TemplateEditTest(unittest.TestCase):
+    """Шаблон живёт долго, а цены и тексты меняются."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        self.store = TemplateStore(folder_for(item_bot.TEMPLATE_DIR, ""))
+        self.tid = self.store.save("80 Robux", 149, "GL", [PNG],
+                                   description="Старый текст.",
+                                   category=CATEGORY, obtaining=OBTAINING)
+
+    def edit(self, *answers):
+        item_bot.edit_template(FakeLink(list(answers)), self.store, self.tid)
+
+        return self.store.get(self.tid)
+
+    def test_price_can_be_changed(self):
+        self.assertEqual(self.edit(item_bot.PICK_ACT + "price", "199").price,
+                         199)
+
+    def test_name_can_be_changed(self):
+        got = self.edit(item_bot.PICK_ACT + "name", "100 Robux")
+
+        self.assertEqual(got.name, "100 Robux")
+
+    def test_region_can_be_changed(self):
+        self.assertEqual(self.edit(item_bot.PICK_ACT + "region", "RU").region,
+                         "RU")
+
+    def test_description_can_be_changed(self):
+        got = self.edit(item_bot.PICK_ACT + "description", "Новый текст.")
+
+        self.assertIn("Новый текст.", got.description)
+
+    def test_other_fields_survive_an_edit(self):
+        """Правят по одному полю; переписать целиком — потерять остальное."""
+        got = self.edit(item_bot.PICK_ACT + "price", "199")
+
+        self.assertEqual(got.name, "80 Robux")
+        self.assertEqual(got.category, CATEGORY)
+        self.assertEqual(got.photos(), [PNG])
+
+    def test_bad_value_changes_nothing(self):
+        got = self.edit(item_bot.PICK_ACT + "price", "дорого")
+
+        self.assertEqual(got.price, 149)
+
+    def test_cancel_changes_nothing(self):
+        got = self.edit("отмена")
+
+        self.assertEqual(got.price, 149)
+
+    def test_photos_are_replaced_wholesale(self):
+        """Дописывать к старым значит копить мусор."""
+        item_bot.edit_photos(FakeLink(["готово"]), self.store, self.tid)
+        self.assertEqual(self.store.get(self.tid).photos(), [PNG])
+
+    def test_deleting_asks_first(self):
+        template = self.store.get(self.tid)
+        item_bot.drop_template(FakeLink(["отмена"]), self.store, template)
+
+        self.assertIsNotNone(self.store.get(self.tid))
+
+    def test_confirmed_deletion_removes_it(self):
+        template = self.store.get(self.tid)
+        item_bot.drop_template(FakeLink(["да"]), self.store, template)
+
+        self.assertIsNone(self.store.get(self.tid))
+
+
+class TemplatesPerAccountTest(unittest.TestCase):
+    """Перемешанные шаблоны — это объявление, созданное не в том кабинете."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        self.accounts = AccountStore(item_bot.ACCOUNTS_DIR)
+
+    def test_each_account_sees_only_its_own(self):
+        first = self.accounts.add("Первый", "token=" + "a" * 60, "ua")
+        second = self.accounts.add("Второй", "token=" + "b" * 60, "ua")
+
+        self.accounts.set_current(first)
+        item_bot.templates_of().save("Товар первого", 1, "GL", [PNG])
+
+        self.accounts.set_current(second)
+        item_bot.templates_of().save("Товар второго", 2, "RU", [PNG])
+
+        self.accounts.set_current(first)
+        names = [t.name for t in item_bot.templates_of().all()]
+
+        self.assertEqual(names, ["Товар первого"])
+
+    def test_without_accounts_templates_still_work(self):
+        item_bot.templates_of().save("Без кабинета", 1, "GL", [PNG])
+
+        self.assertEqual(len(item_bot.templates_of().all()), 1)
 
 
 if __name__ == "__main__":

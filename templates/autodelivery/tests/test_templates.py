@@ -127,3 +127,55 @@ class DangerousIdTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PerAccountFolderTest(unittest.TestCase):
+    """Номер кабинета тоже приходит снаружи и тоже идёт в путь."""
+
+    def test_each_account_gets_its_own_folder(self):
+        from templates import folder_for
+
+        self.assertTrue(folder_for("корень", "deadbeef").endswith("deadbeef"))
+
+    def test_bad_account_id_falls_back_instead_of_escaping(self):
+        from templates import NO_ACCOUNT, folder_for
+
+        for bad in ("../../etc", "/tmp", "", None, "DEADBEEF"):
+            self.assertTrue(folder_for("корень", bad).endswith(NO_ACCOUNT), bad)
+
+
+class EditTest(unittest.TestCase):
+    def setUp(self):
+        self.store = TemplateStore(os.path.join(tempfile.mkdtemp(), "шаблоны"))
+        self.tid = self.store.save("80 Robux", 149, "GL", [PNG],
+                                   description="Старый текст.")
+
+    def test_one_field_changes_and_the_rest_stays(self):
+        self.assertTrue(self.store.update(self.tid, price=199))
+        got = self.store.get(self.tid)
+
+        self.assertEqual(got.price, 199)
+        self.assertEqual(got.name, "80 Robux")
+        self.assertEqual(got.description, "Старый текст.")
+
+    def test_none_does_not_erase_a_field(self):
+        """Иначе непереданное поле стирало бы сохранённое."""
+        self.store.update(self.tid, name=None)
+
+        self.assertEqual(self.store.get(self.tid).name, "80 Robux")
+
+    def test_missing_template_is_not_updated(self):
+        self.assertFalse(self.store.update("deadbeef", price=1))
+
+    def test_photos_are_replaced_and_old_files_go(self):
+        self.store.set_photos(self.tid, [JPG])
+        template = self.store.get(self.tid)
+
+        self.assertEqual(template.photos(), [JPG])
+        self.assertEqual(sorted(os.listdir(template.folder)),
+                         ["photo-1.jpg", "template.json"])
+
+    def test_bad_id_never_touches_files(self):
+        for bad in ("../../etc", "", None):
+            self.assertFalse(self.store.update(bad, price=1), bad)
+            self.assertFalse(self.store.set_photos(bad, [JPG]), bad)

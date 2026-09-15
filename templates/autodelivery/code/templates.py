@@ -9,9 +9,14 @@
 Картинки именно копией, а не ссылкой на товар: товар продадут, снимут или
 отклонят, а шаблон должен работать и через полгода.
 
+ШАБЛОНЫ У КАЖДОГО КАБИНЕТА СВОИ. Папка на кабинет, а не общая куча:
+товары у разных кабинетов разные, и перемешанные шаблоны означают
+объявление, созданное не там, где хотели. Путь собирает `folder_for`.
+
 БЕЗОПАСНОСТЬ. Номер шаблона приходит из кнопки, то есть снаружи. Он
 проверяется перед тем, как попасть в путь к файлу: без этого «../../» в
-номере читало и писало бы что угодно на диске.
+номере читало и писало бы что угодно на диске. То же и для номера
+кабинета, из которого собирается путь к его шаблонам.
 """
 from __future__ import annotations
 
@@ -44,6 +49,21 @@ def new_id() -> str:
 
 def valid_id(value: str) -> bool:
     return bool(ID.match(str(value or "")))
+
+
+# Куда складывать шаблоны, пока кабинетов не заведено ни одного.
+NO_ACCOUNT = "default"
+
+
+def folder_for(root: str, account_id: str = "") -> str:
+    """Папка шаблонов кабинета.
+
+    Номер кабинета тоже приходит снаружи, поэтому непроверенный не
+    попадает в путь: такие шаблоны просто лягут в общую папку, а не в
+    произвольное место на диске.
+    """
+    return os.path.join(root, account_id if valid_id(account_id)
+                        else NO_ACCOUNT)
 
 
 def extension(data: bytes) -> str:
@@ -174,6 +194,72 @@ class TemplateStore:
         found = [t for t in (self.get(n) for n in names if valid_id(n)) if t]
 
         return sorted(found, key=lambda t: t.at, reverse=True)
+
+    def update(self, template_id: str, **changes) -> bool:
+        """Поправить сохранённое. → получилось ли.
+
+        Меняем только названное: шаблон правят по одному полю, и переписать
+        его целиком значило бы потерять всё остальное при первой же
+        опечатке.
+        """
+        template = self.get(template_id)
+
+        if template is None:
+            return False
+
+        path = os.path.join(self.folder, template_id, CARD)
+
+        try:
+            with open(path, encoding="utf-8") as f:
+                card = json.load(f)
+        except (OSError, ValueError):
+            return False
+
+        for key, value in changes.items():
+            if value is not None:
+                card[key] = value
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(card, f, ensure_ascii=False)
+        except OSError:
+            return False
+
+        return True
+
+    def set_photos(self, template_id: str, photos: list) -> bool:
+        """Заменить картинки шаблона целиком.
+
+        Именно целиком: дописывать к старым — значит копить мусор, который
+        никто не разберёт, а удалять по одной с телефона мучительно.
+        """
+        template = self.get(template_id)
+
+        if template is None:
+            return False
+
+        path = os.path.join(self.folder, template_id)
+
+        for old in template.files:
+            try:
+                os.unlink(os.path.join(path, os.path.basename(old)))
+            except OSError:
+                pass
+
+        files = []
+
+        for number, data in enumerate(photos or [], start=1):
+            if not data:
+                continue
+
+            name = f"photo-{number}.{extension(data)}"
+
+            with open(os.path.join(path, name), "wb") as f:
+                f.write(data)
+
+            files.append(name)
+
+        return self.update(template_id, photos=files)
 
     def remove(self, template_id: str) -> bool:
         """Удалить шаблон. → получилось ли."""
