@@ -37,7 +37,7 @@ python3 -m venv .venv
 
 ```bash
 .venv/bin/python -m unittest discover tests
-# 317 тестов, сети не требуют
+# 328 тестов, сети не требуют
 ```
 
 ---
@@ -176,6 +176,7 @@ cd ~/playerok/templates/autodelivery
 ./run_bot.sh                   # бот создания товаров
 ./run_bot.sh restore_bot.py    # восстановление проданных
 ./run_bot.sh notify_bot.py     # уведомления о событиях
+./status_bot.sh                # что работает
 ./stop_bot.sh                  # остановить первого
 ./stop_bot.sh restore_bot.py   # остановить второго
 ```

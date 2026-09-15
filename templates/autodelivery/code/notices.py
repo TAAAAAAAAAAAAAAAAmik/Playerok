@@ -3,11 +3,20 @@
 Здесь только тексты и решения, без сети — иначе проверить их можно было бы
 только дождавшись настоящей продажи.
 
+ПОВТОРЫ. Библиотека помнит показанное внутри объекта слушателя, и эта
+память исчезает вместе с ним — при обрыве связи или перезапуске бота
+недавние события приходят заново. Поэтому помним и сами, по опознавателю
+события, и память эта переживает перезапуск.
+
 ЧЕГО НЕ ДЕЛАЕМ. Не пишем о своих же действиях: продавец знает, что он
 только что ответил в чат, и уведомление об этом превращает поток в шум, а
 шум перестают читать. Отличаем по номеру пользователя.
 """
 from __future__ import annotations
+
+import json
+import os
+import tempfile
 
 # Сколько текста сообщения показывать. Длинные полотна в уведомлении
 # бесполезны: читать их всё равно идут в чат.
@@ -154,3 +163,100 @@ def _message(event, me_id: str) -> str:
         body = body[:TEXT_LIMIT] + "…"
 
     return f"💬 {_who(message)}:\n{body}"
+
+
+def identity(event) -> str:
+    """Опознаватель события: что считать тем же самым.
+
+    У сообщения — его номер. У событий сделки — вид плюс номер сделки:
+    одна сделка проходит через покупку, подтверждение и отзыв, и это
+    разные события, а вот два «подтверждено» по одной сделке — повтор.
+    """
+    kind = kind_of(event)
+
+    if not kind:
+        return ""
+
+    if kind == "message":
+        message = getattr(event, "message", None)
+        number = _text(getattr(message, "id", ""))
+
+        return f"message:{number}" if number else ""
+
+    deal = getattr(event, "deal", None)
+    number = _text(getattr(deal, "id", ""))
+
+    return f"{kind}:{number}" if number else ""
+
+
+class Seen:
+    """Показанные события. Переживает перезапуск.
+
+    Без записи на диск перезапуск бота — а он перезапускается сторожем при
+    каждом сбое — снова показывал бы последние события. Для продавца это
+    выглядит как бот, который дублирует сообщения.
+    """
+
+    def __init__(self, path: str = "", limit: int = 400):
+        self.path = path
+        self.limit = limit
+        self.ids = self._read()
+
+    def _read(self) -> list:
+        if not self.path:
+            return []
+
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return [str(x) for x in (json.load(f).get("ids") or [])]
+        except (OSError, ValueError):
+            return []
+
+    def __contains__(self, key) -> bool:
+        return str(key) in self.ids
+
+    def add(self, key) -> None:
+        key = str(key)
+
+        if not key or key in self.ids:
+            return
+
+        self.ids.append(key)
+        self.ids = self.ids[-self.limit:]
+        self._write()
+
+    def fresh(self, event) -> bool:
+        """Новое ли это событие. Заодно запоминает его.
+
+        Событие без опознавателя считаем новым: пропустить настоящую
+        покупку хуже, чем показать её дважды.
+        """
+        key = identity(event)
+
+        if not key:
+            return True
+
+        if key in self.ids:
+            return False
+
+        self.add(key)
+
+        return True
+
+    def _write(self) -> None:
+        if not self.path:
+            return
+
+        folder = os.path.dirname(os.path.abspath(self.path)) or "."
+        os.makedirs(folder, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp")
+
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"ids": self.ids}, f)
+
+            os.replace(tmp, self.path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise

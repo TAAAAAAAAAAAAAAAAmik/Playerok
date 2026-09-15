@@ -39,6 +39,8 @@ log = logging.getLogger("notify")
 PAUSE = 5
 MAX_PAUSE = 120
 
+SEEN_FILE = os.environ.get("PLAYEROK_SEEN", "state/seen.json")
+
 
 def wanted() -> tuple:
     """Какие уведомления показывать."""
@@ -71,15 +73,26 @@ def main() -> None:
     link.say("👂 Слежу за площадкой: покупки, сообщения, отзывы, проблемы.")
 
     pause = PAUSE
+    seen = notices.Seen(SEEN_FILE)
+
+    # Слушатель создаётся ОДИН раз и переживает обрывы. Внутри у него своя
+    # память о показанном, и создавая его заново на каждом переподключении,
+    # мы стирали её — после любого сбоя сети недавние события приходили
+    # повторно, и выглядело это как бот, который дублирует сообщения.
+    listener = EventListener(account)
 
     while True:
         try:
-            for event in EventListener(account).listen():
+            for event in listener.listen():
                 pause = PAUSE          # дожили до события — значит связь есть
+
+                if not seen.fresh(event):
+                    continue
+
                 text = notices.describe(event, me, show)
 
                 if text:
-                    log.info("%s", text.split("\\n")[0])
+                    log.info("%s", text.splitlines()[0])
                     link.say(text)
         except KeyboardInterrupt:
             raise

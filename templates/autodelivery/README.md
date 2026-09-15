@@ -51,6 +51,7 @@ item_bot.py        создание товара разговором в Telegra
 run_bot.sh         поднять бота (запускает сторожа)
 keep_bot.sh        сторож: поднимает бота после падения
 stop_bot.sh        остановить бота
+status_bot.sh      что из ботов работает и не задвоилось ли
 restore_bot.py     следит за проданными и выставляет их заново
 notify_bot.py      уведомления о покупках, сообщениях, проблемах
 pull.py            обновление кода с GitHub там, где git не установлен
@@ -61,7 +62,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 317 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 328 тестов, сети не требуют
 ```
 
 ---

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
@@ -158,6 +159,94 @@ class NoiseTest(unittest.TestCase):
                                 enabled=("sent",))
 
         self.assertIn("Отправлено", text)
+
+
+class IdentityTest(unittest.TestCase):
+    """Что считать тем же самым событием."""
+
+    def test_message_is_known_by_its_number(self):
+        one = event("NewMessageEvent", message=Message())
+        one.message.id = "m-1"
+
+        self.assertEqual(notices.identity(one), "message:m-1")
+
+    def test_deal_events_differ_by_kind(self):
+        """Одна сделка проходит покупку, подтверждение и отзыв — это разные
+        события, а два «подтверждено» подряд уже повтор."""
+        deal = Deal("d-1")
+        buy = notices.identity(event("ItemPaidEvent", deal=deal))
+        done = notices.identity(event("DealConfirmedEvent", deal=deal))
+
+        self.assertNotEqual(buy, done)
+        self.assertIn("d-1", buy)
+
+    def test_unknown_event_has_no_identity(self):
+        self.assertEqual(notices.identity(event("ЧтоТоНовое")), "")
+
+
+class SeenTest(unittest.TestCase):
+    """Память слушателя живёт внутри него и исчезает при обрыве связи.
+    Без своей бот показывал бы недавнее заново после каждого сбоя."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "state", "seen.json")
+        self.seen = notices.Seen(self.path)
+
+    def message(self, number):
+        one = event("NewMessageEvent", message=Message())
+        one.message.id = number
+
+        return one
+
+    def test_first_time_is_fresh(self):
+        self.assertTrue(self.seen.fresh(self.message("m-1")))
+
+    def test_second_time_is_not(self):
+        self.seen.fresh(self.message("m-1"))
+
+        self.assertFalse(self.seen.fresh(self.message("m-1")))
+
+    def test_different_events_do_not_shadow_each_other(self):
+        self.seen.fresh(self.message("m-1"))
+
+        self.assertTrue(self.seen.fresh(self.message("m-2")))
+
+    def test_memory_survives_a_restart(self):
+        """Сторож перезапускает бота при каждом сбое."""
+        self.seen.fresh(self.message("m-1"))
+
+        self.assertFalse(notices.Seen(self.path).fresh(self.message("m-1")))
+
+    def test_event_without_identity_is_let_through(self):
+        """Пропустить настоящую покупку хуже, чем показать её дважды."""
+        odd = event("ItemPaidEvent", deal=Deal(id=""))
+
+        self.assertTrue(self.seen.fresh(odd))
+        self.assertTrue(self.seen.fresh(odd))
+
+    def test_memory_does_not_grow_forever(self):
+        small = notices.Seen(self.path, limit=3)
+
+        for number in range(10):
+            small.fresh(self.message(f"m-{number}"))
+
+        self.assertEqual(len(small.ids), 3)
+        self.assertFalse(small.fresh(self.message("m-9")))
+        self.assertTrue(small.fresh(self.message("m-0")))
+
+    def test_broken_file_is_not_a_crash(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("{сломано")
+
+        self.assertEqual(notices.Seen(self.path).ids, [])
+
+    def test_without_a_file_it_still_works_in_memory(self):
+        memory = notices.Seen("")
+        memory.fresh(self.message("m-1"))
+
+        self.assertFalse(memory.fresh(self.message("m-1")))
 
 
 if __name__ == "__main__":
