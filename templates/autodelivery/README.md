@@ -22,6 +22,7 @@ code/
   restore.py       восстановление проданного: решения без вызовов
   notices.py       уведомления: что сказать владельцу о событии
   alarm.py         сообщить о поломке один раз, и о починке тоже
+  emailauth.py     вход по коду на почту: сессия без браузера
   accounts.py      несколько кабинетов площадки и переключение
   envfile.py       чтение .env рядом со скриптом
   supplier.py      клиент поставщика кодов AppRoute — переносится как есть
@@ -63,7 +64,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 361 тест, сети не требуют
+python3 -m unittest discover tests -v      # 381 тест, сети не требуют
 ```
 
 ---

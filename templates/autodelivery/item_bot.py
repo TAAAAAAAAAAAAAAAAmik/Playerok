@@ -23,6 +23,10 @@
 перемешанные шаблоны означают объявление, созданное не там, где хотели.
 Шаблон можно повторить, изменить по одному полю или удалить.
 
+ВХОД. Кабинет добавляется двумя путями: кодом на почту — бот получает
+сессию сам, браузер и расширения не нужны — либо куками из браузера, как
+раньше. Тем же кодом чинится и кабинет, у которого сессия истекла.
+
 КАБИНЕТЫ. Их может быть несколько: кнопка «Аккаунт» показывает список и
 переключает. Библиотека площадки держит аккаунт синглтоном, поэтому два
 кабинета одновременно в одном процессе жить не могут — только по очереди.
@@ -59,6 +63,7 @@ import listing                                                # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
+import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
 from playerok import is_auth_error                            # noqa: E402
@@ -121,6 +126,15 @@ PICK_ACCOUNT = "acc:"
 PICK_FIX = "fix:"
 PICK_ACT = "act:"
 PICK_DRAFT = "drf:"
+PICK_WAY = "way:"
+
+# User-agent, которым бот входит и работает. Раз сессию выдаём мы сами,
+# он наш: площадка сверяет его с тем, при котором сессия выдана, и
+# разойтись они не должны.
+DEFAULT_UA = os.environ.get(
+    "PLAYEROK_UA",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
 
 # Где живут сохранённые кабинеты.
 ACCOUNTS_DIR = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
@@ -1014,12 +1028,17 @@ def offer_new_cookies(link, store, saved, account, why):
     """
     answer = link.ask(
         f"Войти в «{saved.name}» не вышло: {why}\n\n"
-        "Обычно это значит, что куки протухли. Пришлёте свежие?",
+        "Обычно это значит, что сессия истекла. Как чиним?",
         ANSWER_WAIT,
-        buttons=[[("🔑 Прислать куки", PICK_FIX + saved.id)],
+        buttons=[[("📧 Кодом на почту", PICK_WAY + "mail")],
+                 [("🍪 Прислать куки", PICK_FIX + saved.id)],
                  [("✖️ Не сейчас", "отмена")]])
+    chosen = str(answer.get("text") or "")
 
-    if not str(answer.get("text") or "").startswith(PICK_FIX):
+    if chosen == PICK_WAY + "mail":
+        return renew_by_email(link, store, saved, account)
+
+    if not chosen.startswith(PICK_FIX):
         link.screen("Оставил как есть.", buttons=MENU)
         return account
 
@@ -1053,8 +1072,56 @@ def offer_new_cookies(link, store, saved, account, why):
     return fresh
 
 
+def renew_by_email(link, store, saved, account):
+    """Обновить сессию кабинета кодом на почту, сохранив имя и шаблоны."""
+    answer = link.ask(f"Почта кабинета «{saved.name}»:", ANSWER_WAIT,
+                      buttons=[CANCEL])
+    email = str(answer.get("text") or "").strip()
+
+    if wizard.cancelled(email):
+        link.screen("Оставил как есть.", buttons=MENU)
+        return account
+
+    user_agent = saved.user_agent or DEFAULT_UA
+    link.screen(f"Прошу код для {email}…")
+    sent, why = emailauth.send_code(email, user_agent)
+
+    if not sent:
+        link.screen(f"Код не отправлен: {why}", buttons=MENU)
+        return account
+
+    answer = link.ask(f"Код отправлен на {email}. Введите шесть цифр.",
+                      ANSWER_WAIT, buttons=[CANCEL])
+    code = str(answer.get("text") or "").strip()
+
+    if wizard.cancelled(code):
+        link.screen("Оставил как есть.", buttons=MENU)
+        return account
+
+    link.screen("Проверяю код…")
+    cookies, why = emailauth.confirm(email, code, user_agent)
+
+    if not cookies:
+        link.screen(f"Войти не вышло: {why}", buttons=MENU)
+        return account
+
+    store.update_cookies(saved.id, cookies)
+
+    try:
+        fresh = open_account(cookies, user_agent)
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Сессия получена, но кабинет не открылся: {e}",
+                    buttons=MENU)
+        return account
+
+    store.set_current(saved.id)
+    link.screen(f"Готово, «{saved.name}» снова работает.", buttons=MENU)
+
+    return fresh
+
+
 def add_account(link, store, account):
-    """Завести новый кабинет: имя, куки, user-agent."""
+    """Завести новый кабинет: почтой или куками."""
     answer = link.ask("Как назвать кабинет? Это имя увидите только вы.",
                       ANSWER_WAIT, buttons=[CANCEL])
     name = " ".join(str(answer.get("text") or "").split())
@@ -1063,6 +1130,70 @@ def add_account(link, store, account):
         link.screen("Отменил.", buttons=MENU)
         return account
 
+    answer = link.ask(
+        f"Кабинет «{name}».\n\nКак входим?",
+        ANSWER_WAIT,
+        buttons=[[("📧 Кодом на почту", PICK_WAY + "mail")],
+                 [("🍪 Куками из браузера", PICK_WAY + "cookies")],
+                 [("✖️ Отмена", "отмена")]])
+    way = str(answer.get("text") or "")
+
+    if way == PICK_WAY + "mail":
+        return add_by_email(link, store, account, name)
+
+    if way != PICK_WAY + "cookies":
+        link.screen("Отменил.", buttons=MENU)
+        return account
+
+    return add_by_cookies(link, store, account, name)
+
+
+def add_by_email(link, store, account, name: str):
+    """Вход по коду на почту: сессию получаем сами, браузер не нужен."""
+    answer = link.ask(
+        "Почта аккаунта на площадке.\n\n"
+        "Пришлю на неё код — его и введёте. Куки доставать не придётся.",
+        ANSWER_WAIT, buttons=[CANCEL])
+    email = str(answer.get("text") or "").strip()
+
+    if wizard.cancelled(email):
+        link.screen("Отменил.", buttons=MENU)
+        return account
+
+    link.screen(f"Прошу код для {email}…")
+    sent, why = emailauth.send_code(email, DEFAULT_UA)
+
+    if not sent:
+        link.screen(f"Код не отправлен: {why}", buttons=MENU)
+        return account
+
+    answer = link.ask(
+        f"Код отправлен на {email}.\n\n"
+        "Введите шесть цифр из письма. Письмо может идти пару минут и "
+        "попасть в спам.", ANSWER_WAIT, buttons=[CANCEL])
+    code = str(answer.get("text") or "").strip()
+
+    if wizard.cancelled(code):
+        link.screen("Отменил.", buttons=MENU)
+        return account
+
+    link.screen("Проверяю код…")
+    cookies, why = emailauth.confirm(email, code, DEFAULT_UA)
+
+    if not cookies:
+        link.screen(f"Войти не вышло: {why}", buttons=MENU)
+        return account
+
+    # User-agent сохраняем тот же, которым входили: площадка сверяет его с
+    # тем, при котором сессия выдана.
+    account_id = store.add(name, cookies, DEFAULT_UA)
+    link.screen(f"Кабинет «{name}» добавлен.")
+
+    return switch_account(link, store, account_id, account)
+
+
+def add_by_cookies(link, store, account, name: str):
+    """Старый путь: куки из браузера."""
     answer = link.ask(
         "Пришлите куки этого кабинета — строку «token=...», выгрузку "
         "расширения в JSON или сам токен. Сообщение я удалю сразу после "
@@ -1092,8 +1223,7 @@ def add_account(link, store, account):
     user_agent = ("" if wizard.skipped(typed) or wizard.cancelled(typed)
                   else typed)
 
-    account_id = store.add(name, cookies,
-                           user_agent or os.environ.get("PLAYEROK_UA", ""))
+    account_id = store.add(name, cookies, user_agent or DEFAULT_UA)
     link.screen(f"Кабинет «{name}» добавлен.")
 
     return switch_account(link, store, account_id, account)

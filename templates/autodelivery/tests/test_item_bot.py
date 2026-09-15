@@ -316,7 +316,8 @@ class AccountsTest(unittest.TestCase):
             "прежний")
 
     def test_adding_stores_and_switches(self):
-        link = FakeLink(["Основной", self.COOKIES, "пропустить"])
+        link = FakeLink(["Основной", item_bot.PICK_WAY + "cookies",
+                         self.COOKIES, "пропустить"])
         got = item_bot.add_account(link, self.store, "прежний")
         saved = self.store.all()[0]
 
@@ -327,13 +328,14 @@ class AccountsTest(unittest.TestCase):
 
     def test_cookie_message_is_deleted(self):
         """В переписке остался бы доступ к кабинету."""
-        link = FakeLink(["Основной", self.COOKIES, "пропустить"])
+        link = FakeLink(["Основной", item_bot.PICK_WAY + "cookies",
+                         self.COOKIES, "пропустить"])
         item_bot.add_account(link, self.store, "прежний")
 
         self.assertEqual(len(link.deleted), 1)
 
     def test_junk_instead_of_cookies_saves_nothing(self):
-        link = FakeLink(["Основной", "ок"])
+        link = FakeLink(["Основной", item_bot.PICK_WAY + "cookies", "ок"])
         item_bot.add_account(link, self.store, "прежний")
 
         self.assertEqual(self.store.all(), [])
@@ -347,7 +349,8 @@ class AccountsTest(unittest.TestCase):
         """С телефона куки достают расширением — оно отдаёт JSON."""
         import json as js
         export = js.dumps([{"name": "token", "value": "j" * 60}])
-        link = FakeLink(["Основной", export, "пропустить"])
+        link = FakeLink(["Основной", item_bot.PICK_WAY + "cookies", export,
+                         "пропустить"])
         item_bot.add_account(link, self.store, "прежний")
 
         self.assertEqual(self.store.all()[0].cookies, "token=" + "j" * 60)
@@ -431,6 +434,104 @@ class CheckSessionTest(unittest.TestCase):
         item_bot.check_session(link, None)
 
         self.assertIn("не выбран", link.said[-1])
+
+
+class EmailLoginTest(unittest.TestCase):
+    """Вход по коду на почту: сессию получаем сами, браузер не нужен."""
+
+    COOKIES = "token=" + "j" * 60
+
+    def setUp(self):
+        self.folder = os.path.join(tempfile.mkdtemp(), "кабинеты")
+        item_bot.ACCOUNTS_DIR = self.folder
+        self.store = AccountStore(self.folder)
+        self.sent = []
+        self.saved_open = item_bot.open_account
+        self.saved_send = item_bot.emailauth.send_code
+        self.saved_confirm = item_bot.emailauth.confirm
+        item_bot.open_account = lambda c, u: f"аккаунт:{c[-4:]}"
+
+    def tearDown(self):
+        item_bot.open_account = self.saved_open
+        item_bot.emailauth.send_code = self.saved_send
+        item_bot.emailauth.confirm = self.saved_confirm
+
+    def works(self):
+        def send(email, ua, session=None):
+            self.sent.append((email, ua))
+            return True, ""
+
+        item_bot.emailauth.send_code = send
+        item_bot.emailauth.confirm = \
+            lambda email, code, ua, session=None: (self.COOKIES, "")
+
+    def test_account_is_created_without_any_cookies_from_the_user(self):
+        self.works()
+        link = FakeLink(["Основной", item_bot.PICK_WAY + "mail",
+                         "seller@example.com", "123456"])
+        got = item_bot.add_account(link, self.store, "прежний")
+        saved = self.store.all()[0]
+
+        self.assertEqual(saved.name, "Основной")
+        self.assertEqual(saved.cookies, self.COOKIES)
+        self.assertTrue(got.startswith("аккаунт:"))
+
+    def test_the_same_user_agent_is_used_for_login_and_work(self):
+        """Площадка сверяет его с тем, при котором сессия выдана."""
+        self.works()
+        link = FakeLink(["Основной", item_bot.PICK_WAY + "mail",
+                         "seller@example.com", "123456"])
+        item_bot.add_account(link, self.store, "прежний")
+
+        self.assertEqual(self.sent[0][1], self.store.all()[0].user_agent)
+
+    def test_refused_code_saves_nothing_and_says_why(self):
+        item_bot.emailauth.send_code = \
+            lambda email, ua, session=None: (True, "")
+        item_bot.emailauth.confirm = \
+            lambda email, code, ua, session=None: ("", "код неверный или уже истёк")
+
+        link = FakeLink(["Основной", item_bot.PICK_WAY + "mail",
+                         "seller@example.com", "000000"])
+        item_bot.add_account(link, self.store, "прежний")
+
+        self.assertEqual(self.store.all(), [])
+        self.assertIn("неверный", link.said[-1])
+
+    def test_unsent_code_does_not_ask_for_it(self):
+        """Спрашивать код, которого не отправляли, — издевательство."""
+        item_bot.emailauth.send_code = \
+            lambda email, ua, session=None: (False, "аккаунта с такой почтой нет")
+
+        link = FakeLink(["Основной", item_bot.PICK_WAY + "mail",
+                         "нет@example.com"])
+        item_bot.add_account(link, self.store, "прежний")
+
+        self.assertEqual(self.store.all(), [])
+        self.assertIn("не отправлен", link.said[-1])
+
+    def test_cancel_at_any_step_saves_nothing(self):
+        self.works()
+
+        for answers in (["Основной", "отмена"],
+                        ["Основной", item_bot.PICK_WAY + "mail", "отмена"],
+                        ["Основной", item_bot.PICK_WAY + "mail",
+                         "seller@example.com", "отмена"]):
+            item_bot.add_account(FakeLink(answers), self.store, "прежний")
+
+        self.assertEqual(self.store.all(), [])
+
+    def test_expired_cabinet_is_renewed_keeping_its_name(self):
+        """Иначе пришлось бы заводить кабинет заново, теряя шаблоны."""
+        self.works()
+        aid = self.store.add("Основной", "token=" + "o" * 60, "ua")
+        saved = self.store.get(aid)
+        link = FakeLink(["seller@example.com", "123456"])
+        got = item_bot.renew_by_email(link, self.store, saved, "прежний")
+
+        self.assertEqual(self.store.get(aid).cookies, self.COOKIES)
+        self.assertEqual(self.store.get(aid).name, "Основной")
+        self.assertTrue(got.startswith("аккаунт:"))
 
 
 class TemplateFlowTest(unittest.TestCase):
