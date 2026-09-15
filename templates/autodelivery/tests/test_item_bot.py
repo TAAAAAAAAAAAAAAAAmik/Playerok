@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import item_bot                                                 # noqa: E402
 import wizard                                                   # noqa: E402
 from accounts import AccountStore                               # noqa: E402
+import vary                                                     # noqa: E402
 from templates import TemplateStore, folder_for                 # noqa: E402
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"pixels"
@@ -603,7 +604,9 @@ class TemplateFlowTest(unittest.TestCase):
         self.assertEqual(sent["attachments"], [PNG])
         self.assertIn("Регион кода: GL", sent["description"])
         self.assertIn("Мой текст.", sent["description"])
-        self.assertEqual(sent["data_fields"][0].value, "пометка")
+        # Пометка продавца на месте — её не выбрасывают, а дополняют:
+        # он её для чего-то ставил.
+        self.assertTrue(sent["data_fields"][0].value.startswith("пометка"))
         self.assertEqual(sent["game_category_id"], "c1")
 
     def test_no_templates_is_explained_not_silent(self):
@@ -1188,6 +1191,111 @@ class LastWordTest(unittest.TestCase):
         link = self.run_command("серия")
 
         self.assertNotIn("Готов к следующему", link.said[-1])
+
+
+class VariedFieldsTest(unittest.TestCase):
+    """Копии не должны совпадать до буквы.
+
+    Шаблон повторяет товар дословно, а площадки не любят одинаковые
+    объявления: десяток товаров с совпадающими полями выглядит накруткой,
+    даже когда это просто разные номиналы одного кода.
+    """
+
+    CATALOG = {"services": [
+        {"id": "s", "name": "Roblox Gift Cards Global",
+         "subcategoryName": "Roblox Gift Cards",
+         "items": [{"id": f"i{v}", "value": v, "inStock": 9, "price": 1.0}
+                   for v in (100, 200, 400, 800)]}]}
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot._CATALOG["raw"] = self.CATALOG
+        item_bot._CATALOG["at"] = time.time()
+
+    def tearDown(self):
+        item_bot._CATALOG["raw"] = None
+
+    def series(self, rows="200 = 140\n400 = 280\n800 = 560"):
+        tid = item_bot.templates_of().save(
+            "100 Robux", 70, "GL", [PNG], description="Коды сразу",
+            game=GAME, category=CATEGORY, obtaining=OBTAINING,
+            fields=[{"id": "f1", "label": "Комментарий",
+                     "required": False, "value": ""},
+                    {"id": "f2", "label": "Промокод",
+                     "required": False, "value": ""}])
+        account = FakeAccount()
+        link = FakeLink([item_bot.PICK_SERIES + tid, "сам", rows, "да"])
+        item_bot.series_menu(link, account)
+
+        return account.created
+
+    def values(self, created, index=0):
+        return [c["data_fields"][index].value for c in created]
+
+    def test_a_batch_does_not_repeat_itself(self):
+        created = self.series()
+
+        self.assertEqual(len(created), 3)
+        self.assertEqual(len(set(self.values(created))), 3)
+
+    def test_the_promo_field_never_looks_like_a_code(self):
+        """Случайная строка там читается как код на скидку, которого нет:
+        покупатель попробует применить, не выйдет — и это уже не
+        разнообразие, а обман."""
+        created = self.series()
+
+        for value in self.values(created, index=1):
+            # Не код: у кода нет пробелов и точки в конце.
+            self.assertIn(" ", value)
+            self.assertTrue(value.endswith("."))
+            # И ни слова о том, есть промокод или нет: это решает
+            # продавец — его объявление так и называется.
+            self.assertNotIn("промокод", value.lower())
+
+    def test_fields_that_are_not_free_text_are_left_alone(self):
+        """Площадка принимает в них только свои значения — вписав туда
+        фразу, мы получили бы отказ на последнем шаге."""
+        fields = [{"id": "f1", "label": "Регион", "value": "GL"}]
+        vary.apply(fields)
+
+        self.assertEqual(fields[0]["value"], "GL")
+
+    def test_the_sellers_own_text_survives(self):
+        fields = [{"id": "f1", "label": "Комментарий", "value": "моё"}]
+        vary.apply(fields)
+
+        self.assertTrue(fields[0]["value"].startswith("моё"))
+
+    def test_two_presses_in_a_row_differ(self):
+        """Без общего чередования соседние нажатия легко дают одну фразу —
+        а это ровно та копия, которой мы и избегаем."""
+        tid = item_bot.templates_of().save(
+            "100 Robux", 70, "GL", [PNG], description="Коды сразу",
+            game=GAME, category=CATEGORY, obtaining=OBTAINING,
+            fields=[{"id": "f1", "label": "Комментарий",
+                     "required": False, "value": ""}])
+        account = FakeAccount()
+
+        for _ in range(4):
+            item_bot.from_template(
+                FakeLink([item_bot.PICK + tid, item_bot.PICK_ACT + "make"]),
+                account)
+
+        got = [c["data_fields"][0].value for c in account.created]
+
+        self.assertEqual(len(set(got)), 4)
+
+    def test_applying_twice_does_not_stack_the_same_phrase(self):
+        fields = [{"id": "f1", "label": "Комментарий", "value": ""}]
+        vary.apply(fields)
+        once = fields[0]["value"]
+        fields[0]["value"] = once
+        vary.apply(fields)
+
+        self.assertEqual(fields[0]["value"].count(once), 1)
 
 
 if __name__ == "__main__":

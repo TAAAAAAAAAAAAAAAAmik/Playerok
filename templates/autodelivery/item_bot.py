@@ -68,6 +68,7 @@ import listing                                                # noqa: E402
 import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
+import vary                                                   # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
@@ -1031,6 +1032,11 @@ def edit_photos(link, store, template_id: str) -> None:
         link.screen("Сохранить не вышло.", buttons=MENU)
 
 
+# Чередование фраз для повторов из шаблона. Одно на процесс: соседние
+# нажатия должны давать разные фразы, а не каждое своё случайное.
+ROTATION = vary.Rotation()
+
+
 def make_from_template(link, account, store, template_id: str) -> None:
     """Повторить сохранённое объявление одним нажатием."""
     template = store.get(template_id)
@@ -1063,9 +1069,20 @@ def make_from_template(link, account, store, template_id: str) -> None:
     draft.game = template.game
     draft.category = template.category
     draft.obtaining = template.obtaining
-    draft.fields = template.fields
-    draft.options = template.options
+    # Копия полей, а не тот же список: шаблон повторяют много раз, и
+    # правка в одном повторе не должна менять сам шаблон.
+    draft.fields = copy.deepcopy(template.fields)
+    draft.options = copy.deepcopy(template.options)
     draft.photos = photos
+
+    # Свободные поля слегка меняем: площадки не любят объявления,
+    # совпадающие до буквы. Что именно вписано — видно в сводке ниже, это
+    # не делается втихую.
+    #
+    # Чередование общее на всё время работы бота: без него два нажатия
+    # подряд легко дают одну фразу, а это ровно та копия, которой мы и
+    # избегаем.
+    vary.apply(draft.fields, ROTATION)
 
     link.screen(f"Повторяю:\n\n{draft.summary()}\n\nСоздаю черновик…")
     send_draft(link, account, draft)
@@ -1386,6 +1403,9 @@ def _series_text(link, answer):
 def run_series(link, account, template, photos, jobs) -> None:
     """Создать объявления по плану, показывая ход одним экраном."""
     done, failed = [], []
+    # Одно чередование на всю партию: иначе две соседние копии легко
+    # получают одну фразу, а ровно этого мы и избегаем.
+    rotation = vary.Rotation()
 
     for number, job in enumerate(jobs, start=1):
         link.screen(f"Создаю {number} из {len(jobs)}: {job['name']}…")
@@ -1404,6 +1424,7 @@ def run_series(link, account, template, photos, jobs) -> None:
         draft.fields = copy.deepcopy(template.fields)
         draft.options = copy.deepcopy(template.options)
         draft.photos = list(photos)
+        vary.apply(draft.fields, rotation)
 
         item_id, why = create_item(account, draft)
 
