@@ -15,17 +15,25 @@ import re
 # Выбор игры и категории идёт первым: от категории зависит и способ
 # получения, и какие поля площадка потребует заполнить. Спрашивать их
 # после названия значит однажды выбросить уже написанное.
-STEPS = ("game", "category", "obtaining", "name", "price", "region",
-         "description", "photos")
+STEPS = ("game", "category", "obtaining", "options", "name", "price",
+         "region", "description", "photos")
 
 # Приставка у шага, который спрашивает поле с данными. Полей у разных
 # категорий разное число, поэтому шаг не постоянный, а собирается из id.
 FIELD = "field:"
 
+# Приставка у шага, который спрашивает характеристику товара. Площадка
+# называет их атрибутами и часть требует обязательно — с пустыми она
+# отвечает «заполните все обязательные характеристики».
+OPTION = "option:"
+
 QUESTIONS = {
     "game": ("Для какой игры или приложения товар?\n\n"
              "Напишите название или его часть — покажу, что нашлось."),
     "category": "Какая категория?",
+    # Название характеристики приходит с площадки; этот текст — запасной,
+    # на случай если она не назовёт группу.
+    "options": "Характеристика товара.",
     "obtaining": ("Как покупатель получает товар?\n\n"
                   "Для кодов это «без входа в аккаунт»: вы отдаёте код, а "
                   "в чужой аккаунт не заходите."),
@@ -84,6 +92,8 @@ class Draft:
         self.game = None
         self.category = None
         self.obtaining = None
+        # Характеристики категории: что предлагает площадка и что выбрано.
+        self.options: list = []
         # Поля с данными выбранной категории: что спросить и что ответили.
         self.fields: list = []
         self.name = ""
@@ -105,6 +115,12 @@ class Draft:
 
         if not self.obtaining:
             return "obtaining"
+
+        # Характеристики спрашиваем сразу после категории: их состав от неё
+        # и зависит, а каждая — это одно нажатие.
+        for option in self.options:
+            if option.get("value") is None:
+                return OPTION + str(option.get("field"))
 
         if not self.name:
             return "name"
@@ -129,6 +145,19 @@ class Draft:
 
         return ""
 
+    def option(self, field: str):
+        """Характеристика по имени поля, или None."""
+        for option in self.options:
+            if str(option.get("field")) == str(field):
+                return option
+
+        return None
+
+    def attributes(self) -> dict:
+        """Характеристики так, как их ждёт площадка: поле → значение."""
+        return {str(o["field"]): o["value"] for o in self.options
+                if o.get("value") not in (None, "")}
+
     def field(self, field_id: str):
         """Описание поля по его id, или None."""
         for field in self.fields:
@@ -144,10 +173,16 @@ class Draft:
     def summary(self) -> str:
         lines = [f"Игра: {(self.game or {}).get('name', '')}",
                  f"Категория: {(self.category or {}).get('name', '')}",
-                 f"Получение: {(self.obtaining or {}).get('name', '')}",
-                 f"Название: {self.name}",
-                 f"Цена: {self.price} ₽",
-                 f"Регион: {self.region}"]
+                 f"Получение: {(self.obtaining or {}).get('name', '')}"]
+
+        for option in self.options:
+            if option.get("value") not in (None, ""):
+                lines.append(f"{option.get('group') or 'Характеристика'}: "
+                             f"{option.get('chosen') or option['value']}")
+
+        lines += [f"Название: {self.name}",
+                  f"Цена: {self.price} ₽",
+                  f"Регион: {self.region}"]
 
         for field in self.filled_fields():
             lines.append(f"{field.get('label') or 'Поле'}: {field['value']}")

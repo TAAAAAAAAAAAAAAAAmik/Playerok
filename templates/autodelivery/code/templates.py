@@ -3,8 +3,8 @@
 Продавец выставляет одно и то же по многу раз. Собирать каждый раз
 название, цену, регион и фотографии заново — это минуты вместо секунд.
 
-Что лежит в шаблоне. Игра, категория, способ получения, название, цена,
-регион, описание, поля площадки и сами картинки файлами. Категория
+Что лежит в шаблоне. Игра, категория, способ получения, характеристики,
+название, цена, регион, описание, поля площадки и сами картинки файлами. Категория
 особенно важна: из-за неё шаблон и экономит больше всего нажатий.
 Картинки именно копией, а не ссылкой на товар: товар продадут, снимут или
 отклонят, а шаблон должен работать и через полгода.
@@ -71,6 +71,7 @@ class Template:
         self.category = card.get("category") or None
         self.obtaining = card.get("obtaining") or None
         self.fields = list(card.get("fields") or [])
+        self.options = list(card.get("options") or [])
         self.files = [str(f) for f in (card.get("photos") or [])]
         self.at = float(card.get("at") or 0)
 
@@ -121,7 +122,7 @@ class TemplateStore:
 
     def save(self, name: str, price: int, region: str, photos: list,
              description: str = "", game=None, category=None,
-             obtaining=None, fields=None) -> str:
+             obtaining=None, fields=None, options=None) -> str:
         """Сохранить объявление шаблоном. → номер."""
         template_id = new_id()
         path = self._path(template_id)
@@ -142,7 +143,8 @@ class TemplateStore:
         card = {"name": name, "price": int(price), "region": region,
                 "description": description or "", "photos": files,
                 "game": game, "category": category, "obtaining": obtaining,
-                "fields": list(fields or []), "at": time.time()}
+                "fields": list(fields or []),
+                "options": list(options or []), "at": time.time()}
 
         with open(os.path.join(path, CARD), "w", encoding="utf-8") as f:
             json.dump(card, f, ensure_ascii=False)

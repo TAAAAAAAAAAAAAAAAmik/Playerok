@@ -138,6 +138,63 @@ class SendDraftTest(unittest.TestCase):
         self.assertTrue(any("не вышло" in t for t in link.said))
 
 
+class OptionsTest(unittest.TestCase):
+    """Площадка отвечает «заполните все обязательные характеристики», не
+    уточняя какие. Поэтому спрашиваем все и шлём выбранное."""
+
+    class Row:
+        def __init__(self, field, group, label, value):
+            self.field, self.group = field, group
+            self.label, self.value = label, value
+
+    class Acc:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def get_game_category(self, id=None):
+            return type("C", (), {"options": self.rows})()
+
+    def test_options_are_grouped_by_field(self):
+        rows = [self.Row("platform", "Платформа", "ПК", "PC"),
+                self.Row("platform", "Платформа", "Телефон", "MOBILE"),
+                self.Row("kind", "Вид", "Код", "CODE")]
+        groups = item_bot.category_options(self.Acc(rows), "c1")
+
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(len(groups[0]["choices"]), 2)
+        self.assertEqual(groups[0]["group"], "Платформа")
+
+    def test_unreadable_options_are_not_a_crash(self):
+        class Broken:
+            def get_game_category(self, id=None):
+                raise RuntimeError("площадка молчит")
+
+        self.assertEqual(item_bot.category_options(Broken(), "c1"), [])
+
+    def test_choice_reaches_the_marketplace(self):
+        d = draft()
+        d.options = [{"field": "platform", "group": "Платформа",
+                      "value": None,
+                      "choices": [{"label": "ПК", "value": "PC"},
+                                  {"label": "Телефон", "value": "MOBILE"}]}]
+        link = FakeLink([item_bot.PICK_OPTION + "1"])
+
+        self.assertTrue(item_bot.choose_option(link, None, d))
+        self.assertEqual(d.attributes(), {"platform": "MOBILE"})
+
+        account = FakeAccount()
+        item_bot.send_draft(FakeLink(), account, d)
+
+        self.assertEqual(account.created[0]["options"],
+                         {"platform": "MOBILE"})
+
+    def test_empty_attributes_are_not_sent_as_chosen(self):
+        account = FakeAccount()
+        item_bot.send_draft(FakeLink(), account, draft())
+
+        self.assertEqual(account.created[0]["options"], {})
+
+
 class TemplateFlowTest(unittest.TestCase):
     def setUp(self):
         self.folder = os.path.join(tempfile.mkdtemp(), "шаблоны")

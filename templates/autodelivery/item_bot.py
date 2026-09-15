@@ -6,7 +6,8 @@
 
     python3 item_bot.py
 
-ЧТО СПРАШИВАЕТСЯ. Игра, категория, способ получения, название, цена,
+ЧТО СПРАШИВАЕТСЯ. Игра, категория, способ получения, характеристики,
+название, цена,
 регион, описание, поля площадки и фотографии. Ничего не зашито: категории
 у разных игр разные, а один зашитый id уже приводил к тому, что товары
 создавались не там, где нужно.
@@ -77,6 +78,7 @@ PICK = "tpl:"
 PICK_GAME = "game:"
 PICK_CATEGORY = "cat:"
 PICK_OBTAINING = "obt:"
+PICK_OPTION = "opt:"
 
 # Сколько ждать ответа на один вопрос. Полчаса: продавец может отвлечься,
 # и бот не должен ронять начатое из-за этого.
@@ -241,6 +243,85 @@ def choose_obtaining(link, account, draft) -> bool:
 
     draft.obtaining = chosen
     draft.fields = item_fields(account, draft.category["id"], chosen["id"])
+    draft.options = category_options(account, draft.category["id"])
+
+    return True
+
+
+def category_options(account, category_id: str) -> list:
+    """Характеристики категории, сгруппированные по полю.
+
+    Площадка называет их атрибутами и часть требует обязательно: с пустыми
+    она отвечает «заполните все обязательные характеристики», не уточняя
+    какие. Поэтому спрашиваем все — лишний вопрос дешевле отказа.
+
+    Группируем по `field`, потому что именно оно уходит в запрос, а
+    значений у одного поля бывает много.
+    """
+    try:
+        category = account.get_game_category(id=category_id)
+        rows = list(getattr(category, "options", None) or [])
+    except Exception:                                         # noqa: BLE001
+        return []
+
+    groups: dict = {}
+
+    for row in rows:
+        field = str(getattr(row, "field", "") or "")
+
+        if not field:
+            continue
+
+        group = groups.setdefault(field, {
+            "field": field,
+            "group": str(getattr(row, "group", "") or field),
+            "choices": [],
+            "value": None,
+        })
+        group["choices"].append({
+            "label": str(getattr(row, "label", "") or "—"),
+            "value": getattr(row, "value", None),
+        })
+
+    return list(groups.values())
+
+
+def choose_option(link, account, draft) -> bool:
+    """Спросить одну характеристику. → продолжать ли."""
+    step = draft.step
+    option = draft.option(step[len(wizard.OPTION):])
+
+    if option is None:
+        return True
+
+    choices = option.get("choices") or []
+
+    if not choices:
+        # Спрашивать нечего — считаем незаполненной и идём дальше.
+        option["value"] = ""
+        return True
+
+    keys = [[(c["label"], PICK_OPTION + str(number))]
+            for number, c in enumerate(choices[:MAX_CHOICES])]
+    keys.append([("✖️ Отмена", "отмена")])
+    title = option.get("group") or wizard.QUESTIONS["options"]
+    answer = link.ask(f"{title}?" if not title.endswith(".") else title,
+                      ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_OPTION):
+        link.say("Отменил.", buttons=MENU)
+        return False
+
+    number = text[len(PICK_OPTION):]
+
+    if not number.isdigit() or int(number) >= len(choices):
+        link.say("Не понял выбор.")
+        return True
+
+    picked = choices[int(number)]
+    option["value"] = picked["value"]
+    option["chosen"] = picked["label"]
 
     return True
 
@@ -290,6 +371,12 @@ def collect(link, account, draft: wizard.Draft) -> bool:
         # Замечание и вопрос — одним сообщением, а не двумя. Каждый лишний
         # обмен с Telegram это задержка на ровном месте, и в переписке от
         # них рябит.
+        if step.startswith(wizard.OPTION):
+            if not choose_option(link, account, draft):
+                return False
+
+            continue
+
         if step in CHOOSE:
             if not CHOOSE[step](link, account, draft):
                 return False
@@ -449,7 +536,7 @@ def send_draft(link, account, draft: wizard.Draft) -> bool:
             name=draft.name,
             price=draft.price,
             description=wizard.description_for(draft),
-            options={},
+            options=draft.attributes(),
             data_fields=fields,
             attachments=list(draft.photos),
         )
@@ -484,7 +571,8 @@ def offer_template(link, draft: wizard.Draft) -> None:
         store.save(draft.name, draft.price, draft.region, draft.photos,
                    description=draft.description,
                    game=draft.game, category=draft.category,
-                   obtaining=draft.obtaining, fields=draft.fields)
+                   obtaining=draft.obtaining, fields=draft.fields,
+                   options=draft.options)
     except Exception as e:                                    # noqa: BLE001
         link.say(f"Сохранить шаблон не вышло: {e}")
         return
@@ -542,6 +630,7 @@ def from_template(link, account) -> None:
     draft.category = template.category
     draft.obtaining = template.obtaining
     draft.fields = template.fields
+    draft.options = template.options
     draft.photos = photos
 
     link.say(f"Повторяю:\n\n{draft.summary()}\n\nСоздаю черновик…")
