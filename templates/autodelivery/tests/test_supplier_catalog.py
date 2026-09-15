@@ -11,8 +11,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 
-from catalog import (denominations_from, find_service,          # noqa: E402
-                     items_of, match_denomination)
+from catalog import (Card, denominations_for,                   # noqa: E402
+                     denominations_from, find_service, items_of,
+                     is_card_order, match_denomination, matches_service,
+                     region_of_service, services_for)
 
 
 class ShapeTest(unittest.TestCase):
@@ -137,6 +139,178 @@ class TogetherTest(unittest.TestCase):
 
         self.assertIsNone(got)
         self.assertIn("80", why)
+
+
+
+
+# Кусок живого каталога, из-за которого отбор идёт по подкатегории, а не по
+# слову: слово «xbox» встречается во всех четырёх записях, а гифт-карта
+# среди них одна.
+XBOX_LIKE = {"services": [
+    {"id": "s-card", "name": "Xbox Gift Card 10 USD",
+     "subcategoryName": "Xbox Gift Cards",
+     "items": [{"id": "i1", "value": 10, "inStock": 5, "price": 8.4}]},
+    {"id": "s-pass", "name": "Xbox Game Pass Ultimate 1 месяц",
+     "subcategoryName": "Xbox Gift Cards",
+     "items": [{"id": "i2", "value": 1, "inStock": 5, "price": 9.9}]},
+    {"id": "s-robux", "name": "Roblox Wallet Code | XBox",
+     "subcategoryName": "Roblox Gift Cards",
+     "items": [{"id": "i3", "value": 800, "inStock": 5, "price": 7.0}]},
+    {"id": "s-acc", "name": "Xbox аккаунт с играми",
+     "subcategoryName": "Game Accounts",
+     "items": [{"id": "i4", "value": 1, "inStock": 5, "price": 20.0}]},
+]}
+
+XBOX = Card(slug="xbox", title="Xbox", subcategory="Xbox Gift Cards",
+            name_must_not_have="game pass")
+ROBUX = Card(slug="robux", title="Roblox", subcategory="Roblox Gift Cards")
+
+
+class SubcategoryTest(unittest.TestCase):
+    """Отбор услуги: по точной подкатегории, не по слову.
+
+    На живом каталоге слово «xbox» находит 47 услуг, гифт-карт среди них 16.
+    Остальное — подписки, ключи игр, аккаунты и `Roblox Wallet Code | XBox`,
+    то есть товар соседней карты. Взяв его, бот выдал бы покупателю код
+    Roblox вместо карты Xbox — на деньги продавца.
+    """
+
+    def test_only_the_gift_card_is_taken(self):
+        got = services_for(XBOX, XBOX_LIKE)
+
+        self.assertEqual([s["id"] for s in got], ["s-card"])
+
+    def test_the_neighbours_code_is_not_stolen(self):
+        got = services_for(ROBUX, XBOX_LIKE)
+
+        self.assertEqual([s["id"] for s in got], ["s-robux"])
+
+    def test_a_word_in_the_name_is_not_enough(self):
+        card = Card(slug="x", title="X", subcategory="Xbox Gift Cards")
+
+        self.assertFalse(matches_service(
+            card, {"name": "Xbox Gift Card", "subcategoryName": "Other"}))
+
+    def test_must_not_have_separates_two_plugins_in_one_subcategory(self):
+        pass_service = XBOX_LIKE["services"][1]
+
+        self.assertFalse(matches_service(XBOX, pass_service))
+
+    def test_the_veto_also_keeps_the_wrong_ORDER_away(self):
+        """Не только услугу поставщика, но и заказ на витрине.
+
+        «Xbox Game Pass Ultimate 1 месяц» узнаётся по слову «xbox», а
+        номинал из названия — 1: без запрета бот купил бы гифт-карту на
+        доллар вместо подписки. Деньги списаны, покупатель без подписки.
+        """
+        card = Card(slug="xbox", title="Xbox", keywords=("xbox", "иксбокс"),
+                    name_must_not_have=("game pass", "геймпасс"))
+
+        self.assertTrue(is_card_order(card, "Xbox Gift Card 10 USD"))
+        self.assertFalse(is_card_order(card, "Xbox Game Pass 1 месяц"))
+        self.assertFalse(is_card_order(card, "Иксбокс геймпасс 12 мес"))
+
+    def test_the_veto_outranks_the_sellers_own_keyword(self):
+        """Слово продавца отделяет его товары от чужих, а запрет говорит
+        о другом: «здесь другой товар». Второе сильнее."""
+        card = Card(slug="xbox", title="Xbox",
+                    name_must_not_have="game pass")
+
+        self.assertFalse(is_card_order(card, "мой xbox game pass", "мой"))
+        self.assertTrue(is_card_order(card, "мой xbox 10$", "мой"))
+
+    def test_several_spellings_of_must_have(self):
+        card = Card(slug="n", title="N", subcategory="Nintendo",
+                    name_must_have=("gift", "подарочн"))
+        shared = {"subcategoryName": "Nintendo"}
+
+        self.assertTrue(matches_service(
+            card, dict(shared, name="Nintendo eShop Gift Card")))
+        self.assertTrue(matches_service(
+            card, dict(shared, name="Nintendo подарочная карта")))
+        self.assertFalse(matches_service(
+            card, dict(shared, name="Nintendo Switch Online")))
+
+    def test_must_have_narrows_a_shared_subcategory(self):
+        card = Card(slug="n", title="N", subcategory="Nintendo",
+                    name_must_have="gift")
+        shared = {"subcategoryName": "Nintendo"}
+
+        self.assertTrue(matches_service(
+            card, dict(shared, name="Nintendo eShop Gift Card")))
+        self.assertFalse(matches_service(
+            card, dict(shared, name="Nintendo Switch Online 12 месяцев")))
+
+    def test_a_card_without_a_subcategory_matches_nothing(self):
+        card = Card(slug="x", title="X")
+
+        self.assertEqual(services_for(card, XBOX_LIKE), [])
+
+    def test_the_subcategory_name_is_read_under_any_known_field(self):
+        for field in ("subcategoryName", "subCategoryName", "subcategory"):
+            self.assertTrue(
+                matches_service(XBOX, {field: "Xbox Gift Cards", "name": "X"}),
+                field)
+
+
+class ServiceRegionTest(unittest.TestCase):
+    """Регион берётся из названия услуги — но только знакомый.
+
+    «Любые две заглавные буквы» поймали бы и «PS», и «GB» в «10 GB», и
+    номинал уехал бы в чужой регион. Не узнать регион безопаснее: номинал
+    без региона подойдёт любому, а выдуманный отсечёт верный.
+    """
+
+    def test_a_country_code_is_recognised(self):
+        self.assertEqual(
+            region_of_service({"name": "Apple Gift Cards US"}), "US")
+
+    def test_a_word_is_recognised_too(self):
+        self.assertEqual(
+            region_of_service({"name": "Roblox 1000 Robux (Global)"}), "GL")
+
+    def test_uk_is_normalised_to_gb(self):
+        self.assertEqual(
+            region_of_service({"name": "Steam Wallet UK"}), "GB")
+
+    def test_an_unknown_name_gives_no_region(self):
+        self.assertEqual(region_of_service({"name": "Apple Gift Card"}), "")
+
+
+class DenominationsForTest(unittest.TestCase):
+    """Номиналы карты по всему каталогу — замена ручной привязке услуг."""
+
+    def test_nominals_come_from_the_matching_service_only(self):
+        rows = denominations_for(XBOX, XBOX_LIKE)
+
+        self.assertEqual([r.item_id for r in rows], ["i1"])
+        self.assertEqual(rows[0].service_id, "s-card")
+
+    def test_the_region_is_taken_from_the_service_name(self):
+        catalog = {"services": [
+            {"id": "s1", "name": "Apple Gift Cards US",
+             "subcategoryName": "Apple Gift Cards",
+             "items": [{"id": "i1", "value": 10, "inStock": 1}]},
+            {"id": "s2", "name": "Apple Gift Cards TR",
+             "subcategoryName": "Apple Gift Cards",
+             "items": [{"id": "i2", "value": 10, "inStock": 1}]},
+        ]}
+        card = Card(slug="apple", title="Apple",
+                    subcategory="Apple Gift Cards")
+
+        self.assertEqual([r.item_id for r in denominations_for(
+            card, catalog, "TR")], ["i2"])
+
+    def test_nominals_without_a_region_suit_any_region(self):
+        catalog = {"services": [
+            {"id": "s1", "name": "Apple Gift Cards",
+             "subcategoryName": "Apple Gift Cards",
+             "items": [{"id": "i1", "value": 10, "inStock": 1}]},
+        ]}
+        card = Card(slug="apple", title="Apple",
+                    subcategory="Apple Gift Cards")
+
+        self.assertEqual(len(denominations_for(card, catalog, "TR")), 1)
 
 
 if __name__ == "__main__":

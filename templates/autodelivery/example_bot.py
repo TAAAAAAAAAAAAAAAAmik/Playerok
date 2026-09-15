@@ -16,6 +16,8 @@ import asyncio
 import logging
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
@@ -23,7 +25,7 @@ from auth import (open_account, sign_in,           # noqa: E402
                   user_agent_from_env)
 from cards import CARDS                           # noqa: E402
 from catalog import (Card, Denomination,           # noqa: E402
-                     denominations_from, find_service)
+                     denominations_for, denominations_from, find_service)
 from delivery import DeliveryEngine               # noqa: E402
 from envfile import load_env_file                 # noqa: E402
 from owner import link_from_env, renew_cookies    # noqa: E402
@@ -44,12 +46,23 @@ class Catalog:
     """Каталог поставщика с кешем.
 
     Кеш не для скорости, а по необходимости: `GET /services` разрешён
-    **2 раза в минуту**. Без кеша два оплаченных заказа подряд означают два
-    тяжёлых чтения, и всё это время опрос заказов стоит.
+    **2 раза в минуту**, а ответ — больше тысячи услуг одним куском. Без
+    кеша два оплаченных заказа подряд выбирают лимит, и третий покупатель
+    ждёт минуту ни за что.
 
     Кешируется весь ответ, а не отдельные услуги: он приходит одним куском
-    на все услуги сразу, и просить его повторно ради второй карты — это
-    тот же тяжёлый вызов из того же лимита.
+    на все услуги сразу, и просить его повторно ради второй карты — тот же
+    тяжёлый вызов из того же лимита.
+
+    Три вещи здесь не для красоты:
+
+    * **возраст отдаётся наружу** (`age`). Показать вчерашние остатки, не
+      сказав об этом, — то же враньё, что бодрый отчёт о непроверенном;
+    * **при отказе отдаётся просроченный каталог**, если он есть: список
+      двухминутной давности полезнее пустого экрана;
+    * **покупка всё равно перечитывает свой номинал** отдельным запросом
+      (`GET /services/{id}/items/{id}`, 120 в минуту) — на нём кеша нет, и
+      цена с остатком берутся свежими.
     """
 
     TTL = 120.0
@@ -59,43 +72,73 @@ class Catalog:
         self.conf = conf
         self._at = 0.0
         self._raw = None
+        # Замок на кабинет: два экрана, нажатых подряд, иначе выберут лимит
+        # сами себе — каждый своим чтением каталога.
+        self._lock = threading.Lock()
+
+    @property
+    def age(self) -> float | None:
+        """Сколько секунд каталогу. None — не читали ещё ни разу."""
+        return None if self._raw is None else time.time() - self._at
 
     def _catalog(self):
         """Каталог целиком, не чаще чем раз в TTL."""
-        import time
+        with self._lock:
+            fresh = self._raw is not None and time.time() - self._at < self.TTL
 
-        if self._raw is not None and time.time() - self._at < self.TTL:
+            if fresh:
+                return self._raw
+
+            try:
+                self._raw = self.supplier.services()
+                self._at = time.time()
+            except Exception:
+                # Просроченный каталог лучше пустого: остатки в нём могли
+                # устареть, но номиналы и номера услуг — вряд ли, а покупка
+                # всё равно перечитает свой номинал отдельным запросом.
+                if self._raw is None:
+                    raise
+
+                logging.warning("каталог поставщика не обновился, работаем "
+                                "по списку %.0f с давности", self.age or 0)
+
             return self._raw
 
-        self._raw = self.supplier.services()
-        self._at = time.time()
-
-        return self._raw
-
     def __call__(self, card: Card, region: str) -> list[Denomination]:
-        # Из настроек кабинета, а если там пусто — из окружения: так
-        # продолжают работать установки, настроенные до появления меню.
-        service_id = self.conf.service_id(card.slug, region)
-
-        if not service_id:
-            # Услуга для этого региона не настроена. Молчим: движок скажет
-            # об этом понятнее, с названием карты и регионом.
-            return []
-
         try:
-            service = find_service(self._catalog(), service_id)
+            catalog = self._catalog()
         except Exception as e:                           # noqa: BLE001
             logging.error("каталог поставщика не прочитался: %s", e)
             # Пустой список честнее выдумки: движок остановится и скажет
             # «номинал не найден», а не купит не то.
-            self._raw = None
             return []
 
-        if service is None:
-            logging.error("услуги %s нет в каталоге поставщика", service_id)
+        # Ручная привязка сильнее отбора по подкатегории: продавец задал её
+        # руками, значит у него была причина, и наши догадки её не отменяют.
+        service_id = self.conf.service_id(card.slug, region)
+
+        if service_id:
+            service = find_service(catalog, service_id)
+
+            if service is None:
+                logging.error("услуги %s нет в каталоге поставщика",
+                              service_id)
+                return []
+
+            return denominations_from(service, service_id, region)
+
+        if not card.subcategory:
+            # Ни привязки, ни подкатегории — искать нечем. Молчим: движок
+            # скажет об этом понятнее, с названием карты и регионом.
             return []
 
-        return denominations_from(service, service_id, region)
+        rows = denominations_for(card, catalog, region)
+
+        if not rows:
+            logging.error("в каталоге нет услуг подкатегории «%s» — "
+                          "проверьте её имя у поставщика", card.subcategory)
+
+        return rows
 
 
 async def main() -> None:

@@ -753,12 +753,15 @@ class SettingsMenuTest(unittest.TestCase):
         item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
         item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
 
+    def buttons(self, keys):
+        """Все подписи кнопок экрана — раскладка кладёт их по две в ряд."""
+        return [name for row in keys for name, _ in row]
+
     def test_menu_lists_every_card_we_can_deliver(self):
         link = FakeLink(["отмена"])
         item_bot.settings_menu(link)
-        question = link.asked[0][0]
-        keys = link.asked[0][1]
-        names = [row[0][0] for row in keys]
+        question, keys = link.asked[0]
+        names = self.buttons(keys)
 
         self.assertIn("Автовыдача", question)
 
@@ -773,6 +776,18 @@ class SettingsMenuTest(unittest.TestCase):
 
         self.assertTrue(any("Выдача: выключена" in said for said in link.said))
 
+    def test_card_screen_says_whether_nominals_were_measured(self):
+        measured = next(c for c in item_bot.CARDS if c.measured)
+        unmeasured = next(c for c in item_bot.CARDS if not c.measured)
+
+        link = FakeLink([item_bot.PICK_CARD + measured.slug, "отмена"])
+        item_bot.settings_menu(link)
+        self.assertTrue(any("мерен" in said for said in link.said))
+
+        link = FakeLink([item_bot.PICK_CARD + unmeasured.slug, "отмена"])
+        item_bot.settings_menu(link)
+        self.assertTrue(any("не проверяли" in said for said in link.said))
+
     def test_switching_delivery_on_is_saved(self):
         slug = item_bot.CARDS[0].slug
         link = FakeLink([item_bot.PICK_CARD + slug,
@@ -781,12 +796,64 @@ class SettingsMenuTest(unittest.TestCase):
 
         self.assertTrue(item_bot.settings_of().card(slug)["enabled"])
 
+    def test_every_setting_has_its_own_button(self):
+        slug = item_bot.CARDS[0].slug
+        link = FakeLink([item_bot.PICK_CARD + slug,
+                         item_bot.PICK_SET + "cfg", "отмена", "отмена"])
+        item_bot.settings_menu(link)
+        screen = next(keys for question, keys in link.asked
+                      if "настройки" in question)
+
+        for _, label, _ in item_bot.FIELDS:
+            self.assertIn(label, self.buttons(screen))
+
+    def test_a_setting_is_saved(self):
+        slug = item_bot.CARDS[0].slug
+        link = FakeLink([item_bot.PICK_CARD + slug,
+                         item_bot.PICK_SET + "cfg",
+                         item_bot.PICK_SET + "greeting",
+                         "Принял заказ, код будет через минуту",
+                         "отмена", "отмена"])
+        item_bot.settings_menu(link)
+
+        self.assertEqual(item_bot.settings_of().card(slug)["greeting"],
+                         "Принял заказ, код будет через минуту")
+
+    def test_a_dot_clears_a_setting_instead_of_storing_a_dot(self):
+        """Точка-текстом в `keyword` — это карта, переставшая узнавать свои
+        заказы и забирающая чужие: точка есть в любом названии."""
+        slug = item_bot.CARDS[0].slug
+        conf = item_bot.settings_of()
+        conf.set_keyword(slug, "эпл")
+
+        link = FakeLink([item_bot.PICK_CARD + slug,
+                         item_bot.PICK_SET + "cfg",
+                         item_bot.PICK_SET + "keyword", ".",
+                         "отмена", "отмена"])
+        item_bot.settings_menu(link)
+
+        self.assertEqual(item_bot.settings_of().card(slug)["keyword"], "")
+
+    def test_skipping_leaves_the_setting_alone(self):
+        slug = item_bot.CARDS[0].slug
+        item_bot.settings_of().set_note(slug, "было")
+
+        link = FakeLink([item_bot.PICK_CARD + slug,
+                         item_bot.PICK_SET + "cfg",
+                         item_bot.PICK_SET + "note", "пропустить",
+                         "отмена", "отмена"])
+        item_bot.settings_menu(link)
+
+        self.assertEqual(item_bot.settings_of().card(slug)["note"], "было")
+
     def test_service_id_is_saved_for_the_region(self):
         slug = item_bot.CARDS[0].slug
         region = item_bot.REGIONS[0]
         link = FakeLink([item_bot.PICK_CARD + slug,
+                         item_bot.PICK_SET + "cfg",
+                         item_bot.PICK_SET + "svc",
                          item_bot.PICK_SET + "svc" + region,
-                         "abc-123", "отмена"])
+                         "abc-123", "отмена", "отмена", "отмена"])
         item_bot.settings_menu(link)
 
         self.assertEqual(item_bot.settings_of().service_id(slug, region),
@@ -846,6 +913,96 @@ class BrokenCommandTest(unittest.TestCase):
 
         self.assertEqual(kept, "кабинет")
         self.assertTrue(any("Что делаем?" in said for said in link.said))
+
+
+class CardTemplateTest(unittest.TestCase):
+    """Описание берётся от узнанной карты, а не одно на все тринадцать."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+
+    def draft(self, name, region="US", price=900):
+        d = wizard.Draft()
+        d.name = name
+        d.region = region
+        d.price = price
+        d.description = ""
+        return d
+
+    def test_an_apple_listing_does_not_mention_roblox(self):
+        d = self.draft("Apple Gift Card 10$")
+        item_bot.apply_card_template(d)
+        text = wizard.description_for(d)
+
+        self.assertIn("App Store", text)
+        self.assertNotIn("roblox", text.lower())
+
+    def test_a_roblox_listing_keeps_its_own_activation(self):
+        d = self.draft("Roblox 1000 Robux", region="GL")
+        item_bot.apply_card_template(d)
+
+        self.assertIn("roblox.com/redeem", wizard.description_for(d))
+
+    def test_the_sellers_own_template_wins(self):
+        item_bot.settings_of().set_ad_text("apple", "Мой текст про {номинал}")
+        d = self.draft("Apple Gift Card 10$")
+        item_bot.apply_card_template(d)
+
+        self.assertIn("Мой текст про 10$", wizard.description_for(d))
+
+    def test_an_unknown_name_changes_nothing(self):
+        d = self.draft("Валюта в какой-то игре")
+        item_bot.apply_card_template(d)
+
+        self.assertEqual(d.tail, "")
+
+    def test_what_the_seller_wrote_is_never_overwritten(self):
+        d = self.draft("Apple Gift Card 10$")
+        d.description = "Свои условия"
+        item_bot.apply_card_template(d)
+
+        self.assertIn("Свои условия", wizard.description_for(d))
+
+
+class CardRegistryTest(unittest.TestCase):
+    """Реестр карт: опечатка здесь тихо выключает целое семейство."""
+
+    def setUp(self):
+        # Свой каталог настроек: иначе проверка «по умолчанию выключено»
+        # зависела бы от того, включил ли карту соседний тест.
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+
+    def test_slugs_are_unique(self):
+        slugs = [c.slug for c in item_bot.CARDS]
+
+        self.assertEqual(len(slugs), len(set(slugs)))
+
+    def test_every_card_can_be_found_and_delivered(self):
+        for card in item_bot.CARDS:
+            self.assertTrue(card.subcategory, f"{card.slug}: нет подкатегории")
+            self.assertTrue(card.keywords, f"{card.slug}: нет слов")
+            self.assertTrue(card.activation, f"{card.slug}: нет активации")
+            self.assertTrue(card.title, f"{card.slug}: нет названия")
+
+    def test_every_card_is_recognised_by_its_own_title(self):
+        """Иначе продавец, назвавший товар как карту, не получит ни
+        заготовки, ни выдачи."""
+        for card in item_bot.CARDS:
+            got = item_bot.card_for_title(item_bot.CARDS,
+                                          f"{card.title} 10")
+
+            self.assertIsNotNone(got, card.slug)
+
+    def test_delivery_is_off_for_every_card_by_default(self):
+        """Включённая карта тратит деньги продавца у поставщика."""
+        conf = item_bot.settings_of()
+
+        for card in item_bot.CARDS:
+            self.assertFalse(conf.card(card.slug)["enabled"], card.slug)
 
 
 if __name__ == "__main__":

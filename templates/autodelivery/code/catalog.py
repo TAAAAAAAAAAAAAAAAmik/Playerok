@@ -14,6 +14,13 @@ import re
 from dataclasses import dataclass, field
 
 
+# Три вида номинала. От вида зависит, как номинал показывается покупателю и
+# как читается из названия товара.
+MONEY = "money"      # номинал — деньги: «10$»
+UNITS = "units"      # номинал — штуки: «1000 робуксов»
+PERIOD = "period"    # номинал — срок подписки
+
+
 @dataclass
 class Card:
     """Вид товара, который умеем выдавать."""
@@ -24,10 +31,34 @@ class Card:
     keywords: tuple[str, ...] = ()
     # Как называется единица номинала: "робуксов", "₽", "$".
     measure: str = ""
+    unit: str = MONEY               # MONEY / UNITS / PERIOD
     # Что написать покупателю вместе с кодом.
     activation: str = "Активируйте код на официальном сайте."
-    # Услуги поставщика, где искать номиналы: {регион: service_id}
+    # Услуги поставщика, где искать номиналы: {регион: service_id}.
+    # Ручная привязка — на случай, когда отбор по подкатегории не подходит.
     services: dict[str, str] = field(default_factory=dict)
+
+    # ТОЧНОЕ имя подкатегории у поставщика. Главное поле отбора: см.
+    # `matches_service` — по слову брать нельзя.
+    subcategory: str = ""
+    # Уточнение словом, когда одна подкатегория кормит два вида товара
+    # (у Nintendo это карты и подписки). Одна строка или несколько: у
+    # поставщика название английское, а продавец пишет своё по-русски, и
+    # одного написания на оба случая не хватает.
+    name_must_have: str | tuple[str, ...] = ""
+    name_must_not_have: str | tuple[str, ...] = ()
+
+    # Одна строка про товар для экрана настроек — про товар, а не про
+    # доходы: «покупают чаще всего» проверить нельзя, а «код пополняет
+    # Apple ID» покупатель проверит сам.
+    pitch: str = ""
+    # Дата, когда разбор номиналов этого семейства проверяли на живом
+    # каталоге. Пусто — значит не проверяли, и продавцу это видно.
+    measured: str = ""
+
+    # Заготовки для мастера создания товара.
+    ad_title: str = ""
+    ad_text: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -40,11 +71,77 @@ def is_card_order(card: Card, title: str, keyword: str = "") -> bool:
     Своё слово продавца (`keyword`) означает «только оно»: он задал его,
     чтобы отделить свои товары от чужих, и подмешивать к нему наши догадки
     значит отменять его решение.
+
+    А вот `name_must_not_have` сильнее и слова продавца, потому что оно про
+    другое: это слово означает «здесь другой товар». «Xbox Game Pass
+    Ultimate 1 месяц» узнаётся по слову «xbox», номинал из названия — 1, и
+    бот купил бы гифт-карту на доллар вместо подписки. Деньги продавца
+    списаны, покупатель без подписки.
     """
     text = " ".join(str(title or "").lower().split())
+
+    if any(w in text for w in _spellings(card.name_must_not_have)):
+        return False
+
     if keyword.strip():
         return keyword.strip().lower() in text
+
     return any(k.lower() in text for k in card.keywords)
+
+
+def card_for_title(cards: list[Card], title: str) -> Card | None:
+    """Какая карта узнаёт это название. Без оглядки на настройки.
+
+    Отличие от `pick_card` в том, что выдача сюда не смотрит: это подсказка
+    продавцу, пока он создаёт товар, а не решение потратить его деньги.
+    Поэтому выключенные карты тоже считаются — иначе заготовка описания
+    появлялась бы только после включения выдачи, то есть позже, чем нужна.
+    """
+    for card in cards:
+        if is_card_order(card, title):
+            return card
+
+    return None
+
+
+def render(template: str, card: Card | None = None, nominal="",
+           region: str = "", price="") -> str:
+    """Подставить значения в заготовку названия или описания.
+
+    Незаполненное не оставляем в фигурных скобках: «Apple {регион}» на
+    витрине выглядит поломкой магазина, а не пропуском настройки.
+    """
+    values = {
+        "{номинал}": _shown_nominal(card, nominal),
+        "{регион}": str(region or ""),
+        "{цена}": "" if price in (None, "") else f"{price} ₽",
+        "{карта}": card.title if card else "",
+    }
+    text = str(template or "")
+
+    for key, value in values.items():
+        text = text.replace(key, value)
+
+    # Пустая подстановка оставляет после себя двойные пробелы и висящие
+    # разделители — их убираем, иначе заготовка выглядит небрежной.
+    return re.sub(r"[ \t]{2,}", " ", text).strip(" -—·,").strip()
+
+
+def _shown_nominal(card: Card | None, nominal) -> str:
+    """Номинал так, как его читает покупатель: «10$», «1000 Robux»."""
+    if nominal in (None, ""):
+        return ""
+
+    value = f"{float(nominal):g}" if isinstance(nominal, (int, float)) \
+        else str(nominal)
+    measure = card.measure if card else ""
+
+    if not measure:
+        return value
+
+    # Валютный знак пишется вплотную, название единицы — через пробел:
+    # «10$», но «1000 Robux».
+    return f"{value}{measure}" if len(measure) == 1 else f"{value} {measure}"
 
 
 def pick_card(cards: list[Card], title: str, conf_of) -> Card | None:
@@ -274,6 +371,120 @@ def denominations_from(service: dict, service_id: str = "",
             in_stock=max(0, int(stock)),
             region=region.upper(),
         ))
+
+    return rows
+
+
+# Где поставщик держит имя подкатегории. Имя поля у разных версий API
+# разное, а промах здесь означает «подкатегория не совпала ни разу», то
+# есть карта не найдёт ни одной услуги и молча ничего не выдаст.
+SUBCATEGORY_FIELDS = ("subcategoryName", "subCategoryName", "subcategory",
+                      "subCategory", "categoryName")
+
+# Регионы, которые узнаём в названии услуги. Список закрытый нарочно:
+# «любые две заглавные буквы» поймали бы и «PS», и «GB» в «10 GB», и товар
+# уехал бы в чужой регион. Лучше не узнать регион, чем узнать неверный.
+REGION_CODES = frozenset((
+    "US", "RU", "EU", "GB", "UK", "TR", "AE", "SA", "KW", "QA", "IN", "BR",
+    "CA", "AU", "NZ", "JP", "KR", "CN", "HK", "TW", "SG", "MY", "TH", "ID",
+    "PH", "VN", "MX", "AR", "CL", "CO", "PE", "DE", "FR", "IT", "ES", "PT",
+    "NL", "BE", "AT", "CH", "SE", "NO", "DK", "FI", "IE", "PL", "CZ", "HU",
+    "RO", "GR", "IL", "ZA", "NG", "EG", "UA", "KZ", "BY", "AM", "GE", "AZ",
+))
+
+_WORD = re.compile(r"[A-Za-zА-Яа-яЁё]{2,12}")
+
+
+def _spellings(value) -> tuple:
+    """Написания уточняющего слова — одно или несколько."""
+    if not value:
+        return ()
+
+    if isinstance(value, str):
+        return (value.lower(),)
+
+    return tuple(str(v).lower() for v in value if str(v).strip())
+
+
+def matches_service(card: Card, service: dict) -> bool:
+    """Наша ли это услуга поставщика.
+
+    Отбор идёт по ТОЧНОМУ имени подкатегории, а не по слову в названии, и
+    это не придирка. На живом каталоге слово «xbox» находит 47 услуг, а
+    гифт-карт среди них 16: остальное — подписки Game Pass, ключи игр,
+    аккаунты и `Roblox Wallet Code | XBox`, то есть товар другой карты.
+    Подбор по слову увёл бы его, и покупатель получил бы код Roblox вместо
+    карты Xbox — на свои деньги.
+    """
+    if not isinstance(service, dict) or not card.subcategory:
+        return False
+
+    if str(_first(service, SUBCATEGORY_FIELDS, "") or "") != card.subcategory:
+        return False
+
+    low = str(_first(service, NAME_FIELDS, "") or "").lower()
+
+    wanted = _spellings(card.name_must_have)
+
+    if wanted and not any(w in low for w in wanted):
+        return False
+
+    if any(w in low for w in _spellings(card.name_must_not_have)):
+        return False
+
+    return True
+
+
+def region_of_service(service: dict) -> str:
+    """Регион из названия услуги: «Apple Gift Cards US» → "US".
+
+    Не нашли — пусто, и это нормально: номинал без региона подойдёт любому
+    региону, а выдуманный регион отсёк бы верный номинал.
+    """
+    name = str(_first(service, NAME_FIELDS, "") or "")
+
+    for word in _WORD.findall(name):
+        code = word.upper()
+
+        if code in _ALIASES:
+            return _ALIASES[code]
+
+        if code in REGION_CODES:
+            return "GB" if code == "UK" else code
+
+    return ""
+
+
+def services_for(card: Card, catalog) -> list:
+    """Услуги поставщика, принадлежащие карте."""
+    return [s for s in _services(catalog) if matches_service(card, s)]
+
+
+def denominations_for(card: Card, catalog, region: str = "") -> list:
+    """Номиналы карты во всём каталоге поставщика.
+
+    Заменяет ручную привязку «карта → номер услуги»: номера у поставщика
+    свои на каждый регион, их десятки, и переписывать их руками с телефона
+    продавец не должен. Подкатегория же одна и меняется редко.
+
+    Регион берётся из названия услуги. Когда его там нет, номиналы
+    остаются без региона — и подойдут любому: отбор по региону делает
+    `match_denomination`, и пустой регион он считает подходящим.
+    """
+    rows = []
+
+    for service in services_for(card, catalog):
+        service_id = str(_first(service, ("id", "serviceId"), "") or "")
+
+        if not service_id:
+            continue
+
+        rows.extend(denominations_from(service, service_id,
+                                       region_of_service(service)))
+
+    if region:
+        want = region.upper()
+        rows = [r for r in rows if not r.region or r.region == want]
 
     return rows
 

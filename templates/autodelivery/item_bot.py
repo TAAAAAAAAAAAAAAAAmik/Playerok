@@ -67,13 +67,15 @@ import listing                                                # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
-from cards import CARDS                                       # noqa: E402
+from cards import CARDS, card_by_slug                         # noqa: E402
+from catalog import (card_for_title, nominal_from_title,      # noqa: E402
+                     render)
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
 from playerok import is_auth_error                            # noqa: E402
 from settings import REGIONS, Settings                        # noqa: E402
-from store import JsonStore                                   # noqa: E402
+from store import STATE_DONE, JsonStore                       # noqa: E402
 from templates import TemplateStore, folder_for               # noqa: E402
 
 # Кнопки, которые повторяются. Подписи для человека, значения — те же
@@ -617,6 +619,8 @@ def make_item(link, account) -> None:
     if not collect(link, account, draft):
         return
 
+    apply_card_template(draft)
+
     link.screen("Проверьте:\n\n" + draft.summary()
              + "\n\n— описание —\n" + wizard.description_for(draft)
              + "\n\nСоздаю черновик…")
@@ -625,6 +629,27 @@ def make_item(link, account) -> None:
         return
 
     offer_template(link, draft)
+
+
+def apply_card_template(draft: wizard.Draft) -> None:
+    """Подставить описание узнанной карты, если продавец своё не писал.
+
+    Узнаём карту по названию товара — тому же, по которому потом узнаёт
+    заказ выдача. Одно описание на все карты давало бы объявлению Apple
+    строку «Активация: roblox.com/redeem»: у каждой карты активация своя.
+
+    Заготовка продавца сильнее нашей: он её для того и задавал.
+    """
+    card = card_for_title(CARDS, draft.name)
+
+    if card is None:
+        return
+
+    saved = settings_of().card(card.slug)
+    template = saved.get("ad_text") or card.ad_text or card.activation
+
+    draft.tail = render(template, card, nominal_from_title(draft.name),
+                        draft.region, draft.price)
 
 
 def send_draft(link, account, draft: wizard.Draft) -> bool:
@@ -904,20 +929,31 @@ def settings_of() -> Settings:
 
 
 def settings_menu(link) -> None:
-    """Что бот умеет выдавать сам и чем покупает."""
+    """Что бот умеет выдавать сам. Список карт."""
     conf = settings_of()
     keys = []
+    row = []
 
     for card in CARDS:
-        ok, why = conf.ready(card.slug)
+        ok, why = conf.ready(card.slug, card)
         mark = "✅" if ok and not why else ("⚠️" if ok else "⛔")
-        keys.append([(f"{mark} {card.emoji} {card.title}",
-                      PICK_CARD + card.slug)])
+        row.append((f"{mark} {card.emoji} {card.title}",
+                    PICK_CARD + card.slug))
+
+        # По две в ряд: тринадцать кнопок в столбик не помещаются на экран
+        # телефона, а листать список настроек продавцу незачем.
+        if len(row) == 2:
+            keys.append(row)
+            row = []
+
+    if row:
+        keys.append(row)
 
     keys.append([("✖️ Назад", "отмена")])
     answer = link.ask(
         "Автовыдача кодов.\n\n"
-        "✅ готово · ⚠️ настроено не до конца · ⛔ выключено",
+        "✅ готово · ⚠️ настроено не до конца · ⛔ выключено\n\n"
+        "Выключенная карта не тратит ни копейки: бот к ней не подходит.",
         ANSWER_WAIT, buttons=keys)
     text = str(answer.get("text") or "")
 
@@ -929,35 +965,40 @@ def settings_menu(link) -> None:
 
 
 def card_menu(link, conf, slug: str) -> None:
-    """Настройки одной карты."""
-    card = next((c for c in CARDS if c.slug == slug), None)
+    """Экран одной карты: включить, настроить, посмотреть журнал."""
+    card = card_by_slug(slug)
 
     if card is None:
         link.screen("Такого товара нет.", buttons=MENU)
         return
 
     saved = conf.card(slug)
-    ok, why = conf.ready(slug)
-    lines = [f"{card.emoji} {card.title}",
-             "",
-             f"Выдача: {'включена' if saved['enabled'] else 'выключена'}",
-             f"Слово продавца: {saved['keyword'] or '— (по умолчанию)'}"]
+    ok, why = conf.ready(slug, card)
+    lines = [f"{card.emoji} {card.title}"]
 
-    for region in REGIONS:
-        got = conf.service_id(slug, region)
-        lines.append(f"Услуга {region}: {got or '— не задана'}")
+    if card.pitch:
+        lines += ["", card.pitch]
+
+    lines += ["", f"Выдача: {'включена' if saved['enabled'] else 'выключена'}"]
+
+    if card.subcategory:
+        lines.append(f"Ищем у поставщика: {card.subcategory}")
+
+    # Честность про разбор номиналов. «Мерено» значит, что все названия
+    # семейства разобрались на живом каталоге, а не «похоже, разберутся».
+    lines.append("Разбор номиналов: "
+                 + (f"мерен {card.measured}" if card.measured
+                    else "не проверяли — прогоните вручную до включения"))
 
     if why:
         lines += ["", f"⚠️ {why}"]
 
-    keys = [[(("⛔ Выключить" if saved["enabled"] else "✅ Включить"),
-              PICK_SET + "on")],
-            [("🔤 Слово продавца", PICK_SET + "word")]]
+    keys = [[(("⏸ Выключить" if saved["enabled"] else "▶️ Включить"),
+              PICK_SET + "on"),
+             ("⚙️ Настройки", PICK_SET + "cfg")],
+            [("📜 Журнал выдач", PICK_SET + "log"),
+             ("✖️ Назад", "отмена")]]
 
-    for region in REGIONS:
-        keys.append([(f"🧾 Услуга {region}", PICK_SET + "svc" + region)])
-
-    keys.append([("✖️ Назад", "отмена")])
     answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
     what = str(answer.get("text") or "")
 
@@ -969,41 +1010,201 @@ def card_menu(link, conf, slug: str) -> None:
 
     if what == "on":
         conf.set_enabled(slug, not saved["enabled"])
-        card_menu(link, conf, slug)
+    elif what == "cfg":
+        card_settings(link, conf, card)
         return
-
-    if what == "word":
-        answer = link.ask(
-            "Слово, по которому бот узнаёт ВАШИ объявления.\n\n"
-            "Пока оно задано, встроенные опознаватели не работают — так вы "
-            "отделяете свои товары от чужих с похожими названиями.\n\n"
-            "Чтобы убрать — «пропустить».", ANSWER_WAIT, buttons=[SKIP])
-        word = str(answer.get("text") or "")
-
-        if wizard.cancelled(word):
-            card_menu(link, conf, slug)
-            return
-
-        conf.set_keyword(slug, "" if wizard.skipped(word) else word)
-        card_menu(link, conf, slug)
+    elif what == "log":
+        card_log(link, conf, card)
         return
-
-    if what.startswith("svc"):
-        region = what[3:]
-        answer = link.ask(
-            f"Номер услуги поставщика для региона {region}.\n\n"
-            "Его показывает supplier_ids.py на сервере. Чтобы убрать — "
-            "«пропустить».", ANSWER_WAIT, buttons=[SKIP])
-        value = str(answer.get("text") or "")
-
-        if wizard.cancelled(value):
-            card_menu(link, conf, slug)
-            return
-
-        conf.set_service(slug, region,
-                         "" if wizard.skipped(value) else value)
 
     card_menu(link, conf, slug)
+
+
+# Настройки карты: что спрашиваем и куда кладём ответ. Порядок — тот же,
+# что на экране.
+FIELDS = [
+    ("region", "🌐 Регион", "set_region"),
+    ("keyword", "🔤 Слово-опознаватель", "set_keyword"),
+    ("greeting", "💬 Автоответ", "set_greeting"),
+    ("note", "📝 Заметка", "set_note"),
+    ("ad_title", "🏷 Название товара", "set_ad_title"),
+    ("ad_text", "📄 Описание товара", "set_ad_text"),
+]
+
+# Подсказки. Каждая написана после того, как продавец понял настройку
+# неправильно, — поэтому объяснение начинается с того, ГДЕ бот смотрит, и
+# показывает пример на его же товаре.
+HINTS = {
+    "region": (
+        "Регион кода — две буквы, как у поставщика (US, TR, AE…).\n\n"
+        "Можно не задавать: тогда бот возьмёт регион из описания товара, "
+        "где сам его и пишет. Настройка — запасная, для товаров, "
+        "заведённых до того, как регион стали писать в описании."),
+    "keyword": (
+        "Бот смотрит на НАЗВАНИЕ ОБЪЯВЛЕНИЯ на витрине и решает, этой ли "
+        "карте отдать заказ.\n\n"
+        "Например, слово «эпл»:\n"
+        "   ✅ «Эпл гифт карта 10$» — заберёт\n"
+        "   ❌ «Apple Gift Card 10$» — пропустит, слова нет\n\n"
+        "Пока слово не задано, бот узнаёт заказ по обычным написаниям "
+        "названия карты. Задавать своё стоит, только если у вас есть другие "
+        "товары с тем же словом — скажем, аккаунты, — и они попадают в "
+        "выдачу по ошибке."),
+    "greeting": (
+        "Уходит в чат заказа сразу, как заказ взят в работу — ДО кода.\n\n"
+        "Нужен не всегда: обычно код приходит через секунды, и «принял "
+        "заказ» следом за ним выглядит лишним. Но у долгих номиналов "
+        "поставщик отвечает «принято, код будет позже», и ожидание тянется "
+        "минутами — вот там молчание похоже на поломку."),
+    "note": "Заметка уйдёт покупателю вместе с кодом.",
+    "ad_title": (
+        "Заготовка названия для мастера создания товара.\n\n"
+        "Подстановки: {номинал}, {регион}, {цена}, {карта}."),
+    "ad_text": (
+        "Заготовка описания для мастера создания товара.\n\n"
+        "Подстановки: {номинал}, {регион}, {цена}, {карта}.\n\n"
+        "⚠️ Ссылки площадка не принимает — отказ придёт на последнем шаге "
+        "мастера."),
+}
+
+
+def card_settings(link, conf, card) -> None:
+    """Шесть настроек карты. Точка очищает любую из них."""
+    saved = conf.card(card.slug)
+    lines = [f"{card.emoji} {card.title} — настройки", ""]
+
+    for key, label, _ in FIELDS:
+        value = saved.get(key) or ""
+        lines.append(f"{label}: {shorten(value) if value else '— не задано'}")
+
+    lines += ["", "Точка «.» очищает любое поле."]
+
+    keys = []
+    row = []
+
+    for key, label, _ in FIELDS:
+        row.append((label, PICK_SET + key))
+
+        if len(row) == 2:
+            keys.append(row)
+            row = []
+
+    if row:
+        keys.append(row)
+
+    keys.append([("🧾 Услуги вручную", PICK_SET + "svc"),
+                 ("✖️ Назад", "отмена")])
+
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
+    what = str(answer.get("text") or "")
+
+    if not what.startswith(PICK_SET):
+        card_menu(link, conf, card.slug)
+        return
+
+    what = what[len(PICK_SET):]
+
+    if what == "svc":
+        services_menu(link, conf, card)
+        return
+
+    field = next((f for f in FIELDS if f[0] == what), None)
+
+    if field is None:
+        card_settings(link, conf, card)
+        return
+
+    key, label, setter = field
+    answer = link.ask(
+        f"{label}\n\n{HINTS[key]}\n\n"
+        f"Сейчас: {shorten(saved.get(key) or '') or '— не задано'}",
+        ANSWER_WAIT, buttons=[SKIP])
+    value = str(answer.get("text") or "")
+
+    # «Пропустить» и «отмена» — это «ничего не менять». Очистка — точка, и
+    # только она: иначе выйти из экрана, не тронув настройку, было бы нечем.
+    if not wizard.cancelled(value) and not wizard.skipped(value):
+        getattr(conf, setter)(card.slug, value)
+
+    card_settings(link, conf, card)
+
+
+def services_menu(link, conf, card) -> None:
+    """Ручная привязка карты к услугам поставщика.
+
+    Обычно она не нужна: бот находит услуги по подкатегории сам. Экран
+    остаётся на случай, когда поставщик переименовал подкатегорию или
+    продавцу нужна конкретная услуга, а не всё семейство.
+    """
+    lines = [f"{card.emoji} {card.title} — услуги поставщика", ""]
+
+    if card.subcategory:
+        lines += [f"Обычно не нужно: бот сам берёт всё из подкатегории "
+                  f"«{card.subcategory}».",
+                  "Заданная здесь услуга сильнее — бот возьмёт только её.",
+                  ""]
+
+    for region in REGIONS:
+        got = conf.service_id(card.slug, region)
+        lines.append(f"{region}: {got or '— не задана'}")
+
+    keys = [[(f"🧾 Услуга {region}", PICK_SET + "svc" + region)]
+            for region in REGIONS]
+    keys.append([("✖️ Назад", "отмена")])
+
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
+    what = str(answer.get("text") or "")
+
+    if not what.startswith(PICK_SET + "svc"):
+        card_settings(link, conf, card)
+        return
+
+    region = what[len(PICK_SET) + 3:]
+    answer = link.ask(
+        f"Номер услуги поставщика для региона {region}.\n\n"
+        "Его показывает supplier_ids.py на сервере. Точка «.» уберёт "
+        "привязку — бот вернётся к поиску по подкатегории.",
+        ANSWER_WAIT, buttons=[SKIP])
+    value = str(answer.get("text") or "")
+
+    if not wizard.cancelled(value) and not wizard.skipped(value):
+        conf.set_service(card.slug, region,
+                         "" if value.strip() == "." else value)
+
+    services_menu(link, conf, card)
+
+
+def card_log(link, conf, card) -> None:
+    """Последние выдачи карты — с причиной отказа, если он был."""
+    rows = conf.store.conf(card.slug).get("log") or []
+    lines = [f"{card.emoji} {card.title} — журнал выдач", ""]
+
+    if not rows:
+        lines.append("Пока пусто: по этой карте бот ещё ничего не выдавал.")
+
+    for entry in rows[:10]:
+        if not isinstance(entry, dict):
+            continue
+
+        mark = "✅" if entry.get("state") == STATE_DONE else "⚠️"
+        line = (f"{mark} заказ {entry.get('order')} · "
+                f"{entry.get('nominal') or '?'} · {entry.get('state')}")
+
+        if entry.get("why"):
+            line += f"\n    {entry['why']}"
+
+        lines.append(line)
+
+    link.ask("\n".join(lines), ANSWER_WAIT,
+             buttons=[[("✖️ Назад", "отмена")]])
+    card_menu(link, conf, card.slug)
+
+
+def shorten(text: str, limit: int = 40) -> str:
+    """Значение настройки для списка: длинное описание его не распирает."""
+    text = " ".join(str(text or "").split())
+
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def drafts_menu(link, account) -> None:

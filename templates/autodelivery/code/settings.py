@@ -23,6 +23,22 @@ import os
 # разбор описания товара.
 REGIONS = ("GL", "RU")
 
+# Чем продавец очищает текстовую настройку. Пустое сообщение Telegram
+# отправить не даёт, и без этого соглашения очистить поле было нечем вовсе.
+#
+# Очистка обязана происходить ЗДЕСЬ, а не на экране: однажды подсказка
+# обещала очистку точкой, а общий обработчик клал точку текстом — и
+# `keyword` из одной точки переставал узнавать свою карту и забирал чужие
+# заказы. Экран обещает то, что делает код.
+CLEAR = "."
+
+
+def _text(value) -> str:
+    """Текст настройки. Точка — очистка."""
+    text = str(value or "").strip()
+
+    return "" if text == CLEAR else text
+
 
 class Settings:
     """Настройки карт одного продавца. Пишет туда же, откуда читает движок."""
@@ -39,9 +55,12 @@ class Settings:
 
         return {
             "enabled": bool(conf.get("enabled")),
+            "region": str(conf.get("region") or "").upper(),
             "keyword": str(conf.get("keyword") or ""),
             "greeting": str(conf.get("greeting") or ""),
             "note": str(conf.get("note") or ""),
+            "ad_title": str(conf.get("ad_title") or ""),
+            "ad_text": str(conf.get("ad_text") or ""),
             "services": services if isinstance(services, dict) else {},
         }
 
@@ -60,10 +79,18 @@ class Settings:
         return os.environ.get(
             f"APPROUTE_SERVICE_{str(slug).upper()}_{region}", "").strip()
 
-    def ready(self, slug: str) -> tuple[bool, str]:
-        """Можно ли выдавать по этой карте. → (можно, чего не хватает)."""
+    def ready(self, slug: str, card=None) -> tuple[bool, str]:
+        """Можно ли выдавать по этой карте. → (можно, чего не хватает).
+
+        У карты с подкатегорией номера услуг не нужны: движок находит их
+        в каталоге сам. Требовать их значило бы заставлять продавца
+        переписывать с телефона десятки чужих UUID — по одному на регион.
+        """
         if not self.card(slug)["enabled"]:
             return False, "выдача выключена"
+
+        if card is not None and getattr(card, "subcategory", ""):
+            return True, ""
 
         missing = [r for r in REGIONS if not self.service_id(slug, r)]
 
@@ -80,14 +107,24 @@ class Settings:
     def set_enabled(self, slug: str, on: bool) -> None:
         self._change(slug, "enabled", bool(on))
 
+    def set_region(self, slug: str, region: str) -> None:
+        """Запасной регион карты. Пусто — брать из описания товара."""
+        self._change(slug, "region", _text(region).upper())
+
     def set_keyword(self, slug: str, word: str) -> None:
-        self._change(slug, "keyword", " ".join(str(word or "").split()))
+        self._change(slug, "keyword", " ".join(_text(word).split()))
 
     def set_greeting(self, slug: str, text: str) -> None:
-        self._change(slug, "greeting", str(text or "").strip())
+        self._change(slug, "greeting", _text(text))
 
     def set_note(self, slug: str, text: str) -> None:
-        self._change(slug, "note", str(text or "").strip())
+        self._change(slug, "note", _text(text))
+
+    def set_ad_title(self, slug: str, text: str) -> None:
+        self._change(slug, "ad_title", _text(text))
+
+    def set_ad_text(self, slug: str, text: str) -> None:
+        self._change(slug, "ad_text", _text(text))
 
     def set_service(self, slug: str, region: str, service_id: str) -> None:
         services = dict(self.card(slug)["services"])

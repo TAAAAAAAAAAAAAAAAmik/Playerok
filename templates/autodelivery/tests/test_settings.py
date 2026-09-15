@@ -143,5 +143,75 @@ class ServiceTest(Base):
         self.assertEqual(self.conf.service_id("robux", "GL"), "svc-gl")
 
 
+class ClearingTest(unittest.TestCase):
+    """Точка очищает текстовое поле.
+
+    Пустое сообщение Telegram отправить не даёт, и без этого соглашения
+    очистить настройку было нечем вовсе. Очистка обязана происходить здесь,
+    а не на экране: однажды подсказка обещала её, а обработчик клал точку
+    текстом — и `keyword` из одной точки переставал узнавать свою карту,
+    забирая чужие заказы: точка есть в любом названии.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.conf = Settings(JsonStore(os.path.join(self.root, "s.json")))
+
+    def test_a_dot_clears_every_text_field(self):
+        pairs = [("set_keyword", "keyword"), ("set_greeting", "greeting"),
+                 ("set_note", "note"), ("set_ad_title", "ad_title"),
+                 ("set_ad_text", "ad_text"), ("set_region", "region")]
+
+        for setter, field in pairs:
+            getattr(self.conf, setter)("robux", "было")
+            getattr(self.conf, setter)("robux", ".")
+
+            self.assertEqual(self.conf.card("robux")[field], "", field)
+
+    def test_a_dot_inside_a_longer_text_is_kept(self):
+        self.conf.set_note("robux", "Код действует 12 мес. с активации")
+
+        self.assertIn("мес.", self.conf.card("robux")["note"])
+
+    def test_the_region_is_stored_uppercase(self):
+        self.conf.set_region("robux", "us")
+
+        self.assertEqual(self.conf.card("robux")["region"], "US")
+
+
+class ReadyTest(unittest.TestCase):
+    """Карта с подкатегорией не требует номеров услуг.
+
+    Требовать их значило бы заставлять продавца переписывать с телефона
+    десятки чужих UUID — по одному на регион, — тогда как подкатегория
+    одна и меняется редко.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.conf = Settings(JsonStore(os.path.join(self.root, "s.json")))
+
+    def test_disabled_is_not_ready_whatever_else_is_set(self):
+        card = Card(slug="apple", title="Apple",
+                    subcategory="Apple Gift Cards")
+
+        self.assertEqual(self.conf.ready("apple", card)[0], False)
+
+    def test_a_subcategory_is_enough(self):
+        card = Card(slug="apple", title="Apple",
+                    subcategory="Apple Gift Cards")
+        self.conf.set_enabled("apple", True)
+
+        self.assertEqual(self.conf.ready("apple", card), (True, ""))
+
+    def test_without_a_subcategory_a_service_is_still_required(self):
+        card = Card(slug="x", title="X")
+        self.conf.set_enabled("x", True)
+        ok, why = self.conf.ready("x", card)
+
+        self.assertFalse(ok)
+        self.assertIn("услуга", why)
+
+
 if __name__ == "__main__":
     unittest.main()

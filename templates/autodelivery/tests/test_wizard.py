@@ -170,13 +170,39 @@ class DescriptionInputTest(unittest.TestCase):
         self.assertEqual(why, "")
         self.assertIn("Коды сразу", body)
 
-    def test_skip_gives_the_default_text(self):
-        self.assertEqual(wizard.accept_description("пропустить")[0],
-                         wizard.DEFAULT_TAIL)
+    def test_skip_leaves_the_description_to_the_card(self):
+        """Пропуск не подставляет текст сам: описание по умолчанию берётся
+        от узнанной карты, и одно на всех дало бы объявлению Apple строку
+        «Активация: roblox.com/redeem»."""
+        self.assertEqual(wizard.accept_description("пропустить")[0], "")
 
-    def test_empty_text_gives_the_default_too(self):
-        self.assertEqual(wizard.accept_description("   ")[0],
-                         wizard.DEFAULT_TAIL)
+    def test_empty_text_is_the_same_as_a_skip(self):
+        self.assertEqual(wizard.accept_description("   ")[0], "")
+
+    def test_the_cards_text_is_used_when_the_seller_skipped(self):
+        draft = wizard.Draft()
+        draft.region = "US"
+        draft.description = ""
+        draft.tail = "Активация: App Store → Погасить подарочную карту."
+
+        self.assertIn("App Store", wizard.description_for(draft))
+        self.assertNotIn("roblox", wizard.description_for(draft).lower())
+
+    def test_the_sellers_own_text_wins_over_the_cards(self):
+        draft = wizard.Draft()
+        draft.region = "US"
+        draft.description = "Мой текст"
+        draft.tail = "Заготовка карты"
+
+        self.assertIn("Мой текст", wizard.description_for(draft))
+        self.assertNotIn("Заготовка", wizard.description_for(draft))
+
+    def test_without_a_card_the_old_default_still_applies(self):
+        draft = wizard.Draft()
+        draft.region = "GL"
+        draft.description = ""
+
+        self.assertIn(wizard.DEFAULT_TAIL, wizard.description_for(draft))
 
     def test_own_region_line_is_cut_out(self):
         """Две разные строки региона — тихая денежная ошибка: движок

@@ -103,6 +103,10 @@ class Draft:
         # важна: иначе пропуск означал бы вечный повтор вопроса.
         self.description = None
         self.photos: list = []
+        # Описание по умолчанию — от узнанной карты: у Apple своя
+        # активация, у Steam своя. Одно на всех давало бы объявлению Apple
+        # строку «Активация: roblox.com/redeem».
+        self.tail = ""
 
     @property
     def step(self) -> str:
@@ -261,13 +265,13 @@ def accept_description(text: str) -> tuple[str, str]:
     ошибка, движок прочитает не ту и купит не тот товар.
     """
     if skipped(text):
-        return DEFAULT_TAIL, ""
+        return "", ""
 
     body = REGION_LINE.sub("", str(text or "")).strip()
     body = re.sub(r"\n{3,}", "\n\n", body)
 
     if not body:
-        return DEFAULT_TAIL, ""
+        return "", ""
 
     if len(body) > DESCRIPTION_LIMIT:
         return "", (f"Слишком длинно: {len(body)} знаков при "
@@ -311,7 +315,8 @@ def progress(draft: Draft) -> str:
         lines.append(f"✓ Регион: {draft.region}")
 
     if draft.description is not None:
-        first = (draft.description or DEFAULT_TAIL).splitlines()[0]
+        first = (draft.description or draft.tail
+                 or DEFAULT_TAIL).splitlines()[0]
         lines.append(f"✓ Описание: {first[:40]}"
                      + ("…" if len(first) > 40 else ""))
 
@@ -414,6 +419,6 @@ def description_for(draft: Draft) -> str:
     Уберёте её — бот при оплате остановится и код не купит. Поэтому её
     ставим мы, а не продавец, и в его тексте такие строки вырезаны.
     """
-    tail = draft.description if draft.description else DEFAULT_TAIL
+    tail = draft.description or draft.tail or DEFAULT_TAIL
 
     return f"Регион кода: {draft.region}\n\n{tail}"

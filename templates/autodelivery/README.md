@@ -43,6 +43,7 @@ docs/
   03_SUPPLIER.md         всё про поставщика: конверт, коды, лимиты, права
   04_PITFALLS.md         грабли — каждая денежная
   05_CHECKLIST.md        чек-лист приёмки до первой живой покупки
+cards.py           реестр: 13 карт — что выдаём и как узнаём заказ
 check_telegram.py  проверка связи с владельцем: живой ли токен, дойдёт ли
                    сообщение
 catalog_ids.py     разведка каталога площадки: ID для создания товара
@@ -67,7 +68,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 434 теста, сети не требуют
+python3 -m unittest discover tests -v      # 474 теста, сети не требуют
 ```
 
 ---
