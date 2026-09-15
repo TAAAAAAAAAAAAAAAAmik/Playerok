@@ -88,11 +88,15 @@ class OwnerLink:
         """
         return self._call("getMe")
 
-    def say(self, text: str) -> bool:
-        """Сообщить владельцу. Молчание бота дороже неудачной отправки,
-        поэтому ошибка здесь не поднимается наверх."""
+    def say(self, text: str, buttons=None) -> bool:
+        """Сообщить владельцу, при желании с кнопками.
+
+        Молчание бота дороже неудачной отправки, поэтому ошибка здесь не
+        поднимается наверх.
+        """
         try:
-            self._call("sendMessage", chat_id=self.owner_id, text=text)
+            self._call("sendMessage", chat_id=self.owner_id, text=text,
+                       reply_markup=keyboard(buttons))
             return True
         except Exception:                                  # noqa: BLE001
             return False
@@ -160,13 +164,16 @@ class OwnerLink:
 
         return messages
 
-    def ask(self, question: str, wait_seconds: float = WAIT_SECONDS) -> dict:
+    def ask(self, question: str, wait_seconds: float = WAIT_SECONDS,
+            buttons=None) -> dict:
         """Спросить и дождаться ответа. → сообщение целиком или {}.
 
         Сообщение, а не текст: в ответ может прийти фотография, а у неё
-        текста нет вовсе.
+        текста нет вовсе. Нажатие кнопки приходит сюда же и выглядит как
+        обычный текст — иначе разбор ответов пришлось бы держать в двух
+        видах, и они бы разошлись.
         """
-        self.say(question)
+        self.say(question, buttons)
 
         return self.wait_answer(wait_seconds)
 
@@ -207,7 +214,8 @@ class OwnerLink:
         try:
             result = self._call(
                 "getUpdates", wait=LONG_POLL, offset=self._offset,
-                timeout=LONG_POLL, allowed_updates=["message"],
+                timeout=LONG_POLL,
+                allowed_updates=["message", "callback_query"],
             )
         except Exception:                                  # noqa: BLE001
             time.sleep(3)
@@ -217,7 +225,11 @@ class OwnerLink:
 
         for update in result if isinstance(result, list) else []:
             self._offset = int(update.get("update_id", 0)) + 1
-            message = update.get("message") or {}
+            message = self._as_message(update)
+
+            if not message:
+                continue
+
             chat_id = str((message.get("chat") or {}).get("id") or "")
 
             # Единственная проверка, которая здесь по-настоящему важна.
@@ -225,6 +237,33 @@ class OwnerLink:
                 messages.append(message)
 
         return messages
+
+    def _as_message(self, update: dict) -> dict:
+        """Обновление → сообщение. Нажатие кнопки выглядит как текст.
+
+        Так весь разбор ответов остаётся один: иначе пришлось бы держать
+        две ветки на каждый вопрос, и однажды они разошлись бы.
+        """
+        press = update.get("callback_query")
+
+        if not press:
+            return update.get("message") or {}
+
+        # Убрать «часики» на кнопке. Не вышло — не беда, ответ уже принят.
+        try:
+            self._call("answerCallbackQuery",
+                       callback_query_id=press.get("id"))
+        except Exception:                                  # noqa: BLE001
+            pass
+
+        shown = press.get("message") or {}
+
+        return {
+            "text": str(press.get("data") or ""),
+            "chat": shown.get("chat") or {},
+            "message_id": shown.get("message_id"),
+            "from_button": True,
+        }
 
     def _drain(self) -> None:
         """Сбросить накопленные сообщения.
@@ -247,6 +286,28 @@ class OwnerLink:
             return True
         except Exception:                                  # noqa: BLE001
             return False
+
+
+def keyboard(buttons):
+    """Кнопки → разметка Telegram, или None, если кнопок нет.
+
+    Плоский список пар — один ряд: так просят кнопки вида «GL / RU».
+    Столбик задаётся явно списком рядов — например для списка статусов,
+    где подписи длинные.
+    """
+    if not buttons:
+        return None
+
+    # Плоский список — один ряд. Столбик задаётся явно списком рядов:
+    # угадывать за вызывающего, где перенос, значит однажды угадать не так.
+    first = buttons[0]
+    rows = buttons if isinstance(first, list) else [list(buttons)]
+
+    return {"inline_keyboard": [
+        [{"text": str(label), "callback_data": str(data)[:64]}
+         for label, data in row]
+        for row in rows if row
+    ]}
 
 
 def normalize_cookies(text: str) -> str:

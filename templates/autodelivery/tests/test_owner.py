@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 
 import owner                                                    # noqa: E402
 from owner import (CookieStore, OwnerLink, cookies_now,          # noqa: E402
-                   link_from_env, looks_like_cookies,
+                   keyboard, link_from_env, looks_like_cookies,
                    normalize_cookies, renew_cookies)
 
 OWNER = "555"
@@ -67,6 +67,19 @@ class FakeTelegram:
             return FakeResponse({"ok": True, "result": batch})
 
         return FakeResponse({"ok": True, "result": {}})
+
+
+def press(update_id, data, chat_id=OWNER):
+    """Нажатие inline-кнопки — оно приходит не сообщением."""
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"cb{update_id}",
+            "data": data,
+            "message": {"message_id": update_id,
+                        "chat": {"id": int(chat_id)}},
+        },
+    }
 
 
 def update(update_id, text, chat_id=OWNER, message_id=None):
@@ -307,6 +320,63 @@ class NetworkTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             OwnerLink("token", "")
+
+
+class KeyboardTest(unittest.TestCase):
+    def test_no_buttons_means_no_markup(self):
+        self.assertIsNone(keyboard(None))
+        self.assertIsNone(keyboard([]))
+
+    def test_flat_list_is_one_row(self):
+        """Так просят кнопки вида «GL / RU»."""
+        rows = keyboard([("GL", "GL"), ("RU", "RU")])["inline_keyboard"]
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows[0]), 2)
+
+    def test_rows_are_kept_as_given(self):
+        rows = keyboard([[("Да", "y")], [("Нет", "n")]])["inline_keyboard"]
+
+        self.assertEqual(len(rows), 2)
+
+    def test_long_value_is_cut_to_the_limit(self):
+        """Telegram не принимает длиннее 64 байт."""
+        rows = keyboard([("кнопка", "х" * 200)])["inline_keyboard"]
+
+        self.assertLessEqual(len(rows[0][0]["callback_data"]), 64)
+
+
+class ButtonPressTest(unittest.TestCase):
+    """Нажатие должно попасть в тот же разбор, что и набранный текст —
+    иначе на каждый вопрос появилось бы по две ветки."""
+
+    def test_press_arrives_as_text(self):
+        telegram = FakeTelegram([[], [press(1, COOKIES)]])
+
+        self.assertEqual(link(telegram).ask_cookies("проверка"), COOKIES)
+
+    def test_press_from_a_stranger_is_ignored(self):
+        telegram = FakeTelegram([[], [press(1, COOKIES, chat_id=STRANGER)]])
+
+        self.assertEqual(
+            link(telegram).ask_cookies("проверка", wait_seconds=0.2), "")
+
+    def test_the_spinner_on_the_button_is_stopped(self):
+        """Иначе на кнопке навсегда останутся «часики»."""
+        telegram = FakeTelegram([[], [press(7, COOKIES)]])
+        link(telegram).ask_cookies("проверка")
+
+        methods = [c[0] for c in telegram.calls]
+
+        self.assertIn("answerCallbackQuery", methods)
+
+    def test_buttons_reach_telegram_with_the_message(self):
+        telegram = FakeTelegram([[], [update(1, COOKIES)]])
+        link(telegram).say("вопрос", buttons=[("Да", "да")])
+
+        sent = [c for c in telegram.calls if c[0] == "sendMessage"][0][1]
+
+        self.assertIn("inline_keyboard", sent.get("reply_markup") or {})
 
 
 class WhoamiTest(unittest.TestCase):
