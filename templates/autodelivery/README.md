@@ -44,7 +44,8 @@ docs/
   04_PITFALLS.md         грабли — каждая денежная
   05_CHECKLIST.md        чек-лист приёмки до первой живой покупки
 cards.py           реестр: 13 карт — что выдаём и как узнаём заказ
-doctor.py          почему не работает: ключи, процессы, вход, каталог
+doctor.py          почему не работает: ключи, процессы, вход, объявления
+trial.py           пробная покупка: единственная проверка права orders:write
 fix_listener.py    доставить часть playerokapi, которую она не ставит
 check_telegram.py  проверка связи с владельцем: живой ли токен, дойдёт ли
                    сообщение
@@ -71,7 +72,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 629 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 697 тестов, сети не требуют
 ```
 
 ---

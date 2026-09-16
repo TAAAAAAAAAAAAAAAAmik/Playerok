@@ -130,18 +130,75 @@ def order_body(denomination_id: str, quantity: int = 1,
     return body
 
 
+# Где у ответа лежит код. Ищем только под этими именами.
+CODE_KEYS = ("pin", "code", "voucher", "serial")
+
+# Куда не заходим вовсе. В ответе полно посторонних «кодов»: валюта USD,
+# регион RU, код ошибки. Собрав их наравне с настоящими, бот отправил бы
+# покупателю «USD» первой строкой — или, того хуже, «OUT_OF_STOCK» вместо
+# кода, отметив заказ выданным.
+SKIP_KEYS = frozenset((
+    "currency", "region", "country", "locale", "language",
+    "error", "errors", "service", "category", "game", "price",
+    "meta", "rate", "limits", "provider",
+))
+
+# Чем поставщик замазывает коды, пока не спросишь `unhide=true`.
+MASK_CHARS = "*•…"
+
+# Самый короткий код, который бывает. Всё короче — это валюта, регион или
+# ещё какое-нибудь сокращение, но не то, что покупатель введёт на сайте.
+CODE_MIN = 6
+
+# Слова, которые кодом не бывают никогда: имена статусов и исходов. Они
+# приходят под теми же ключами и длиннее шести букв — одной длиной их не
+# отсечь.
+NOT_A_CODE = frozenset(list(STATUS_CODES.values()) + list(TERMINAL_STATUSES) + [
+    "IN_PROGRESS", "PENDING", "NEW", "PROCESSING", "FAILED", "ERROR",
+    "COMPLETED", "REFUNDED", "EXPIRED", "UNKNOWN",
+])
+
+
+def masked(value: str) -> bool:
+    """Замазанный код: «****9012».
+
+    Отправить такое покупателю — это отчёт о выдаче, которой не было.
+    """
+    return any(ch in str(value or "") for ch in MASK_CHARS)
+
+
+def looks_like_code(value) -> bool:
+    """Похоже ли это на код, который покупатель введёт на сайте."""
+    if not isinstance(value, str):
+        return False
+
+    text = value.strip()
+
+    if len(text) < CODE_MIN or masked(text):
+        return False
+
+    return text.upper() not in NOT_A_CODE
+
+
 def codes_from(data) -> list[str]:
-    """Коды из ответа. Форма отличается у покупки и у поиска по ссылке."""
+    """Коды из ответа. Форма отличается у покупки и у поиска по ссылке.
+
+    Отбираем строго: лишний «код» дороже пропущенного. Пропущенный виден
+    сразу — движок скажет «ответ без кода» и назовёт ссылку покупки, по
+    ней продавец найдёт заказ в кабинете. А лишний уходит покупателю молча
+    и выглядит как выданный товар.
+    """
     out: list[str] = []
 
     def walk(node):
         if isinstance(node, dict):
-            for key in ("pin", "code", "voucher", "serial"):
-                val = node.get(key)
-                if isinstance(val, str) and val.strip():
-                    out.append(val.strip())
-            for val in node.values():
-                walk(val)
+            for key in CODE_KEYS:
+                if looks_like_code(node.get(key)):
+                    out.append(node[key].strip())
+
+            for key, val in node.items():
+                if str(key).lower() not in SKIP_KEYS:
+                    walk(val)
         elif isinstance(node, list):
             for val in node:
                 walk(val)

@@ -224,6 +224,135 @@ def templates_check() -> None:
             say(OK, f"«{template.name}» — {template.price} ₽, повторяется")
 
 
+def listings_check(account) -> None:
+    """Сможет ли выдача обслужить ВАШИ объявления.
+
+    Самая частая беда — не в коде. Выдаче нужны от объявления две вещи:
+    сколько покупать и какого региона. Номинал она берёт из названия или
+    из строки «Номинал: …» в описании, регион — из строки «Регион кода: …»
+    или из запасной настройки карты.
+
+    Объявление, заведённое до того, как бот стал писать эти строки, ничем
+    из этого не располагает. Выдача по нему остановится — уже после того,
+    как покупатель заплатит. Поэтому смотрим заранее.
+    """
+    print("\n── Ваши объявления: сможет ли бот их выдать ──")
+
+    if account is None:
+        say(WARN, "кабинет не открылся — объявления не прочитать")
+        return
+
+    try:
+        from cards import CARDS
+        from catalog import (is_card_order, nominal_for,
+                             region_from_description)
+    except ImportError as e:
+        say(WARN, f"проверить не вышло: {e}")
+        return
+
+    # Отбор по статусу — удобство, а не условие: без него придут и
+    # черновики, но проверить их всё равно полезно.
+    try:
+        from playerokapi.enums import ItemStatuses
+        where = {"statuses": [ItemStatuses.APPROVED]}
+    except ImportError:
+        where = {}
+
+    try:
+        page = account.get_my_items(count=24, **where)
+        items = list(getattr(page, "items", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        say(WARN, f"объявления прочитать не вышло: {e}")
+        return
+
+    if not items:
+        say(WARN, "выставленных объявлений не нашлось")
+        return
+
+    conf = _settings()
+    ours = 0
+    strangers = []
+
+    for item in items:
+        name = str(getattr(item, "name", "") or "")
+        card = _whose(CARDS, is_card_order, conf, name)
+
+        if card is None:
+            strangers.append(name)
+            continue
+
+        ours += 1
+        short = name if len(name) <= 40 else name[:39] + "…"
+        # Описание у списка товаров бывает пустым — читаем, что дали.
+        text = str(getattr(item, "description", "") or "")
+        value, why_value = nominal_for(name, text)
+        region = (region_from_description(text)
+                  or conf.card(card.slug)["region"])
+
+        if value is None:
+            say(BAD, f"«{short}»: {why_value}",
+                "допишите номинал в название или строку «Номинал: 1000» "
+                "в описание")
+        elif not region:
+            say(BAD, f"«{short}»: региона нет ни в описании, ни в настройке "
+                     f"карты",
+                "допишите в описание «Регион кода: GL» — или задайте "
+                "запасной: бот → «⚙️ Автовыдача» → карта → «⚙️ Настройки» "
+                "→ «🌐 Регион»")
+        else:
+            say(OK, f"«{short}»: номинал {value:g}, регион {region}")
+
+    if strangers:
+        # Самая тихая из бед: бот просто не смотрит на такой заказ, и
+        # выглядит это как «автовыдача не работает». Название вроде
+        # «🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА» не содержит ни «Robux», ни
+        # «роблокс» — узнавать его не по чему.
+        shown = ", ".join(f"«{n[:30]}»" for n in strangers[:5])
+        more = f" и ещё {len(strangers) - 5}" if len(strangers) > 5 else ""
+        say(WARN,
+            f"бот НЕ узнаёт как свои: {shown}{more}. По таким заказам "
+            f"выдача даже не начнётся — и со стороны это выглядит как "
+            f"«автовыдача не работает»",
+            "если это ваши коды — задайте слово, которое есть в их "
+            "названиях: бот → «⚙️ Автовыдача» → карта → «⚙️ Настройки» → "
+            "«🔤 Слово-опознаватель». Если это другой товар — так и надо")
+
+    if not ours:
+        say(BAD, "ни одного объявления, которое бот считает своим — "
+                 "выдавать нечего")
+
+
+def _whose(cards, is_card_order, conf, title: str):
+    """Какая карта заберёт этот заказ. ТЕМ ЖЕ правилом, что у движка.
+
+    Своё слово продавца учитывается обязательно: иначе доктор сказал бы
+    «бот не узнаёт», когда бот прекрасно узнаёт, — а это диагностика,
+    которая врёт, и искать беду после неё будут не там.
+
+    Включена карта или нет, здесь не смотрим: про выключенную скажет
+    другая проверка, а мешать две причины в одну — значит не назвать ни
+    одной.
+    """
+    for card in cards:
+        if is_card_order(card, title, conf.card(card.slug)["keyword"]):
+            return card
+
+    return None
+
+
+def _settings():
+    from accounts import AccountStore
+    from settings import Settings
+    from store import JsonStore
+
+    accounts_dir = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
+    state = os.environ.get("PLAYEROK_STATE", "state/delivery")
+    current = AccountStore(os.path.join(HERE, accounts_dir)).current()
+    name = current.id if current else "default"
+
+    return Settings(JsonStore(os.path.join(HERE, state, f"{name}.json")))
+
+
 def delivery_check() -> None:
     print("\n── Автовыдача: что включено ──")
 
@@ -284,6 +413,7 @@ def supplier_check() -> None:
         return
 
     say(OK, "каталог поставщика читается — ключ рабочий")
+    pinned_check(catalog)
 
     if not os.environ.get("APPROUTE_PROXY", "").strip():
         say(OK, "прокси не нужен: поставщик нас и так видит")
@@ -308,6 +438,49 @@ FORBIDDEN = ("403", "forbidden", "orders:write", "permission", "scope",
 # проверил — иначе отказал бы раньше.
 LOOKED_UP = ("not found", "не найд", "нет такого", "denomination",
              "unavailable", "out of stock", "нет в наличии")
+
+
+def pinned_check(catalog) -> None:
+    """Привязанные вручную услуги: есть ли они ещё у поставщика.
+
+    Привязка сильнее поиска по подкатегории — бот возьмёт только её. А
+    номера услуг у поставщика меняются, и устаревшая привязка означает
+    «номинал не найден» на оплаченном заказе, притом что в каталоге он
+    есть. Ошибка тихая: искать её будут в карте, а лежит она в .env.
+    """
+    try:
+        from accounts import AccountStore
+        from cards import CARDS
+        from catalog import find_service
+        from settings import REGIONS, Settings
+        from store import JsonStore
+    except ImportError:
+        return
+
+    accounts_dir = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
+    state = os.environ.get("PLAYEROK_STATE", "state/delivery")
+    current = AccountStore(os.path.join(HERE, accounts_dir)).current()
+    name = current.id if current else "default"
+    conf = Settings(JsonStore(os.path.join(HERE, state, f"{name}.json")))
+
+    for card in CARDS:
+        for region in REGIONS:
+            pinned = conf.service_id(card.slug, region)
+
+            if not pinned:
+                continue
+
+            if find_service(catalog, pinned) is None:
+                say(BAD, f"{card.title} {region}: услуга {pinned} привязана "
+                         f"вручную, но её нет в каталоге — выдача "
+                         f"остановится на «номинал не найден»",
+                    f"уберите её: бот → «⚙️ Автовыдача» → {card.title} → "
+                    f"«⚙️ Настройки» → «🧾 Услуги вручную» → точка. Или "
+                    f"уберите строку APPROUTE_SERVICE_{card.slug.upper()}_"
+                    f"{region} из .env")
+            else:
+                say(OK, f"{card.title} {region}: привязана услуга {pinned}, "
+                        f"она на месте")
 
 
 def orders_write_check() -> None:
@@ -363,14 +536,15 @@ def orders_write_check() -> None:
                 "значит форму принял и права проверил")
         return
 
-    # Отказ по форме тела приходит РАНЬШЕ проверки прав, поэтому он не
-    # говорит о правах ничего. Выдать такое за «право есть» — худшее, что
+    # Отказ по форме тела о правах не говорит ничего: поля могли
+    # проверить раньше прав. Выдать такое за «право есть» — худшее, что
     # здесь можно сделать: продавец включит выдачу, первая же покупка
     # спишет деньги и не отдаст код.
     say(WARN, f"право проверить не вышло: поставщик отказал по форме "
-              f"запроса, а это происходит до проверки прав ({why})",
-        "убедитесь в кабинете AppRoute, что у ключа стоит orders: write — "
-        "без него он спишет деньги и не отдаст код")
+              f"запроса ({why}). Это не отказ по правам, но и не "
+              f"доказательство: поля могли проверить раньше прав",
+        f"настоящую проверку даёт только покупка: python3 {HERE}/trial.py — "
+        f"он купит самый дешёвый номинал и покажет код")
 
 
 def main() -> None:
@@ -380,8 +554,9 @@ def main() -> None:
     env_check()
     bots_check()
     listener_check()
-    login_check()
+    account = login_check()
     templates_check()
+    listings_check(account)
     delivery_check()
     supplier_check()
     orders_write_check()

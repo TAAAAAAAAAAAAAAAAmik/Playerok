@@ -77,6 +77,9 @@ class DeliveryEngine:
         self.notify = notify              # async (текст) — сообщить продавцу
         self.catalog_of = catalog_of      # (card, region) → [Denomination]
         self.prefix = reference_prefix
+        # О какой причине по какому заказу уже говорили. Живёт в процессе:
+        # после перезапуска про беду стоит напомнить.
+        self._told: set = set()
 
     # ------------------------------------------------------------------
     # Входы
@@ -98,6 +101,10 @@ class DeliveryEngine:
         order = await self.market.get_order(order_id)
         if order is None:
             return Result(False, "", f"заказ {order_id} не найден на площадке")
+        # Руками продавец спросил — руками и ответим, даже если про эту
+        # причину уже говорили: он ждёт ответа именно сейчас.
+        self._told = {k for k in self._told if k[0] != str(order_id)}
+
         return await self.deliver(card, order, by_hand=True)
 
     async def resume_unfinished(self) -> list[Result]:
@@ -346,8 +353,18 @@ class DeliveryEngine:
                                     record=False)
 
         codes = [str(c) for c in (got.get("codes") or []) if c]
-        # IN_PROGRESS — законный ответ: заказ принят, код будет позже.
-        if not codes and str(got.get("status") or "") == "IN_PROGRESS":
+        # Покупка прошла, а годного кода в ответе нет. Причин две, и обе
+        # лечатся опросом по ссылке:
+        #
+        # * IN_PROGRESS — законный ответ: заказ принят, код будет позже;
+        # * код пришёл замазанным («****9012»). Поставщик показывает их
+        #   целиком только по запросу с `unhide=true`, а его делает как
+        #   раз опрос по ссылке.
+        #
+        # Раньше опрашивали только первый случай, и замазанный код
+        # означал бы «ответ без кода» на оплаченном заказе — при том, что
+        # код куплен и лежит у поставщика.
+        if not codes:
             entry["state"] = STATE_WAIT_CODE
             self.store.save()
             waited = await self._wait_codes(entry, reference)
@@ -416,13 +433,30 @@ class DeliveryEngine:
             None, lambda: fn(*args))
 
     async def _stop(self, card: Card, order_id: str, why: str,
-                    record: bool = True) -> Result:
+                    record: bool = True, once: bool = True) -> Result:
         """Сказать продавцу, почему выдачи не будет.
 
         «Ничего не произошло» без причины — самая дорогая тишина в такой
         системе: покупатель ждёт оплаченный заказ, а продавец не знает.
+
+        Но и повторять одно и то же каждую минуту нельзя. Заказ, по
+        которому выдача не пошла, пробуется снова каждым проходом — иначе
+        случайный сбой (каталог не прочитался, поставщик моргнул) навсегда
+        оставлял бы оплаченный заказ без кода. А раз пробуется снова, то и
+        отказ приходит снова, и одно объявление без региона засыпало бы
+        продавца одинаковыми сообщениями до конца дня.
+        
+        Поэтому про одну и ту же причину по одному и тому же заказу
+        говорим один раз. Изменилась причина — скажем снова: это уже
+        новость. Память живёт в процессе: после перезапуска стоит
+        напомнить.
         """
-        await self.notify(f"{card.emoji} {card.title}: выдача не пошла.\n"
-                          f"Заказ #{order_id}.\nПричина: {why}")
+        key = (str(order_id), str(why))
+
+        if not once or key not in self._told:
+            self._told.add(key)
+            await self.notify(f"{card.emoji} {card.title}: выдача не пошла.\n"
+                              f"Заказ #{order_id}.\nПричина: {why}")
+
         logger.info("%s: заказ %s — %s", card.slug, order_id, why)
         return Result(False, "", why)
