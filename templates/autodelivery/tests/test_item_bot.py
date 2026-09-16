@@ -1540,5 +1540,85 @@ class CopyFromMarketTest(unittest.TestCase):
         self.assertIn("не нашлось", link.said[-1])
 
 
+class RegionButtonsTest(unittest.TestCase):
+    """Кнопки региона: те, что есть у поставщика для этой карты.
+
+    Показать регион, которого у поставщика нет, — значит дать продавцу
+    выставить товар, который выдача не выдаст: узнает он об этом из
+    отказа, когда покупатель уже заплатил.
+    """
+
+    CATALOG = {"services": [
+        {"id": "s1", "name": "Apple Gift Cards US",
+         "subcategoryName": "Apple Gift Cards",
+         "items": [{"id": "i1", "value": 10, "inStock": 5, "price": 1.0}]},
+        {"id": "s2", "name": "Apple Gift Cards SA",
+         "subcategoryName": "Apple Gift Cards",
+         "items": [{"id": "i2", "value": 50, "inStock": 5, "price": 1.0}]},
+        {"id": "s3", "name": "Apple Gift Cards MX",
+         "subcategoryName": "Apple Gift Cards",
+         "items": [{"id": "i3", "value": 200, "inStock": 0, "price": 1.0}]},
+    ]}
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        os.environ["APPROUTE_KEY"] = "ключ"
+        item_bot._CATALOG["raw"] = self.CATALOG
+        item_bot._CATALOG["at"] = time.time()
+
+    def tearDown(self):
+        item_bot._CATALOG["raw"] = None
+        os.environ.pop("APPROUTE_KEY", None)
+
+    def codes(self, name):
+        draft = wizard.Draft()
+        draft.name = name
+
+        return [value for row in item_bot.buttons_for("region", draft)
+                for _, value in row]
+
+    def test_the_suppliers_regions_are_offered(self):
+        got = self.codes("Apple Gift Card 10$")
+
+        self.assertIn("US", got)
+        self.assertIn("SA", got)
+
+    def test_a_region_that_is_out_of_stock_is_not_offered(self):
+        self.assertNotIn("MX", self.codes("Apple Gift Card 10$"))
+
+    def test_an_unknown_product_gets_the_usual_buttons(self):
+        """Остаться вовсе без кнопок хуже, чем с неточными."""
+        got = self.codes("Битки в Radmir RP")
+
+        self.assertIn("GL", got)
+        self.assertIn("RU", got)
+
+    def test_without_a_catalog_the_usual_buttons_are_shown(self):
+        item_bot._CATALOG["raw"] = None
+        os.environ.pop("APPROUTE_KEY", None)
+        got = self.codes("Apple Gift Card 10$")
+
+        self.assertIn("GL", got)
+
+    def test_the_settings_screen_knows_more_than_two_regions(self):
+        """Привязать услугу для US или SA было нельзя вовсе, хотя номиналы
+        там есть, — а именно за этим на такой экран и приходят."""
+        conf = item_bot.settings_of()
+        card = item_bot.card_by_slug("apple")
+
+        self.assertIn("SA", item_bot.regions_of(conf, card))
+        self.assertIn("US", item_bot.regions_of(conf, card))
+
+    def test_a_pinned_region_stays_visible_even_without_stock(self):
+        """Иначе привязка пропадёт с экрана, а работать продолжит."""
+        conf = item_bot.settings_of()
+        conf.set_service("apple", "HK", "svc-hk")
+
+        self.assertIn("HK", item_bot.regions_of(conf,
+                                                item_bot.card_by_slug("apple")))
+
+
 if __name__ == "__main__":
     unittest.main()

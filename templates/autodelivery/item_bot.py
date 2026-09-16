@@ -235,14 +235,14 @@ def screen_text(draft, question: str, complaint: str = "") -> str:
     return "\n\n".join(p for p in (done, complaint, question) if p)
 
 
-def buttons_for(step: str):
+def buttons_for(step: str, draft=None):
     """Кнопки под вопрос. Там, где ответ свободный, кнопок нет.
 
     Название и цену кнопкой не выберешь, но «отмена» нужна на каждом шаге:
     передумать посреди опроса — обычное дело.
     """
     if step == "region":
-        return [REGION_BUTTONS, MORE_REGIONS, CANCEL]
+        return region_buttons(draft)
 
     if step == "photos":
         return [PHOTOS_DONE]
@@ -254,6 +254,72 @@ def buttons_for(step: str):
         return [SKIP]
 
     return [CANCEL]
+
+
+def region_buttons(draft=None):
+    """Кнопки регионов. Лучше — те, что есть у поставщика для этой карты.
+
+    Ходовые про запас всё равно показываем: каталог может не прочитаться
+    (ключа нет, лимит выбран, связь легла), и остаться в такой миг вовсе
+    без кнопок хуже, чем с неточными. Любой регион всё равно принимается
+    текстом.
+    """
+    card = card_for_title(CARDS, str(getattr(draft, "name", "") or ""))
+    found = supplier_regions(card) if card is not None else []
+
+    if not found:
+        return [REGION_BUTTONS, MORE_REGIONS, CANCEL]
+
+    rows = []
+
+    for start in range(0, len(found), 4):
+        rows.append([(code, code) for code in found[start:start + 4]])
+
+    rows.append(CANCEL)
+
+    return rows
+
+
+def regions_of(conf, card) -> list:
+    """Какие регионы показывать в настройках карты.
+
+    Те, что есть у поставщика, плюс те, для которых продавец уже задал
+    услугу руками: заданную привязку надо показать даже тогда, когда
+    номиналы в этом регионе временно кончились — иначе она пропадёт с
+    экрана, а работать продолжит.
+    """
+    found = set(supplier_regions(card))
+
+    for region in REGIONS:
+        found.add(region)
+
+    for region in (conf.card(card.slug)["services"] or {}):
+        found.add(str(region).upper())
+
+    return sorted(found)
+
+
+def supplier_regions(card) -> list:
+    """Регионы, в которых у поставщика есть эта карта в наличии.
+
+    Показать регион, которого у поставщика нет, — значит дать продавцу
+    выставить товар, который выдача не выдаст: узнает он об этом из
+    отказа, когда покупатель уже заплатил.
+    """
+    if not getattr(card, "subcategory", ""):
+        return []
+
+    catalog, _ = supplier_catalog()
+
+    if catalog is None:
+        return []
+
+    try:
+        rows = denominations_for(card, catalog)
+    except Exception:                                         # noqa: BLE001
+        return []
+
+    return sorted({r.region for r in rows if r.region and r.in_stock > 0})
 
 
 def choose(link, question, rows, prefix, wait=None):
@@ -509,7 +575,7 @@ def collect(link, account, draft: wizard.Draft) -> bool:
 
         message = link.ask(
             screen_text(draft, wizard.question_for(draft), complaint),
-            ANSWER_WAIT, buttons=buttons_for(step))
+            ANSWER_WAIT, buttons=buttons_for(step, draft))
         complaint = ""
 
         if not message:
@@ -2191,12 +2257,29 @@ def services_menu(link, conf, card) -> None:
                   "Заданная здесь услуга сильнее — бот возьмёт только её.",
                   ""]
 
-    for region in REGIONS:
+    # Регионы берём те, что есть у поставщика для этой карты. Держать
+    # вечные «GL и RU» значило бы, что привязать услугу для US или SA
+    # нельзя вовсе, хотя номиналы там есть, — а именно за этим на такой
+    # экран и приходят.
+    where = regions_of(conf, card)
+
+    for region in where:
         got = conf.service_id(card.slug, region)
         lines.append(f"{region}: {got or '— не задана'}")
 
-    keys = [[(f"🧾 Услуга {region}", PICK_SET + "svc" + region)]
-            for region in REGIONS]
+    keys = []
+    row = []
+
+    for region in where:
+        row.append((f"🧾 {region}", PICK_SET + "svc" + region))
+
+        if len(row) == 3:
+            keys.append(row)
+            row = []
+
+    if row:
+        keys.append(row)
+
     keys.append([("✖️ Назад", "отмена")])
 
     answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)

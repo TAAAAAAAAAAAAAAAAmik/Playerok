@@ -149,6 +149,28 @@ class RegionTest(unittest.TestCase):
         for region in ("US", "TR", "EU", "AR", "BR", "AE"):
             self.assertEqual(wizard.accept_region(region), (region, ""))
 
+    def test_every_region_the_bot_can_recognise_is_accepted(self):
+        """Иначе выходит нелепость: номиналы в регионе SA у поставщика
+        есть, бот их видит в названии услуги, а пометить ими товар
+        продавец не может. Ходовые для гифт-карт как раз из этой части."""
+        from catalog import REGION_CODES, region_of_service
+
+        for code in REGION_CODES:
+            got = region_of_service({"name": f"Apple Gift Cards {code}"})
+
+            self.assertTrue(got, code)
+            self.assertEqual(wizard.accept_region(got), (got, ""), code)
+
+    def test_the_popular_gift_card_regions_are_accepted(self):
+        for region in ("SA", "HK", "SG", "MX", "KW", "QA", "TH", "ID"):
+            self.assertEqual(wizard.accept_region(region), (region, ""))
+
+    def test_uk_is_one_region_not_two(self):
+        """Разбор приводит его к GB, и держать оба значило бы иметь один
+        регион под двумя именами."""
+        self.assertEqual(wizard.accept_region("UK"), ("GB", ""))
+        self.assertNotIn("UK", wizard.REGIONS)
+
     def test_a_region_written_as_a_word_is_understood(self):
         """Продавец пишет «Россия» так же часто, как «RU», а отказ на
         понятном ответе — это экран, спорящий с человеком."""
