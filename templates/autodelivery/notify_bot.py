@@ -88,31 +88,63 @@ def main() -> None:
     log.info("Слушаю площадку. Показываю: %s", ", ".join(show))
     link.say("👂 Слежу за площадкой: покупки, сообщения, отзывы, проблемы.")
 
-    pause = PAUSE
     seen = notices.Seen(SEEN_FILE)
 
     # Слушатель создаётся ОДИН раз и переживает обрывы. Внутри у него своя
     # память о показанном, и создавая его заново на каждом переподключении,
     # мы стирали её — после любого сбоя сети недавние события приходили
     # повторно, и выглядело это как бот, который дублирует сообщения.
-    listener = EventListener(account)
-    alarm = Alarm(link, "Уведомления")
+    # Номера служебных чатов площадка отдаёт вместе с кабинетом. По ним
+    # письмо поддержки узнаётся надёжнее, чем по типу чата: тип у разных
+    # версий библиотеки называется по-разному, а номер один и тот же.
+    pump(EventListener(account), link, seen, me, show,
+         alarm=Alarm(link, "Уведомления"),
+         support_id=str(getattr(account, "support_chat_id", "") or ""),
+         system_id=str(getattr(account, "system_chat_id", "") or ""))
+
+
+def pump(listener, link, seen, me: str, show, alarm=None,
+         sleeper=time.sleep, support_id: str = "",
+         system_id: str = "") -> None:
+    """Вечный цикл: событие площадки → сообщение владельцу.
+
+    Вынесен из `main` не ради красоты. Здесь живёт всё, что может пойти не
+    так — повторы, обрывы, несостоявшаяся отправка, — и ровно это до сих
+    пор не проверялось ничем. Отсюда и месяцы без уведомлений.
+    """
+    pause = PAUSE
 
     while True:
         try:
             for event in listener.listen():
                 # Дожили до события — значит связь есть.
                 pause = PAUSE
-                alarm.working()
 
-                if not seen.fresh(event):
+                if alarm is not None:
+                    alarm.working()
+
+                if not seen.is_new(event):
                     continue
 
-                text = notices.describe(event, me, show)
+                text = notices.describe(event, me, show,
+                                        support_id, system_id)
 
-                if text:
-                    log.info("%s", text.splitlines()[0])
-                    link.say(text)
+                if not text:
+                    # Разобрали и решили молчать — но запомнить надо, иначе
+                    # будем разбирать это же при каждом переподключении.
+                    seen.remember(event)
+                    continue
+
+                log.info("%s", text.splitlines()[0])
+
+                if link.say(text):
+                    seen.remember(event)
+                else:
+                    # Не ушло — не помечаем. Площадка присылает недавние
+                    # события заново при переподключении, и там мы
+                    # попробуем ещё раз. Молча потерять покупку нельзя.
+                    log.error("не отправилось в телеграм, попробую позже: %s",
+                              text.splitlines()[0])
         except KeyboardInterrupt:
             raise
         except Exception as e:                                # noqa: BLE001
@@ -123,11 +155,11 @@ def main() -> None:
             # А вот отказ во входе молчанием не отделаешься: сам он не
             # пройдёт, и пока продавец не пришлёт куки, уведомлений не
             # будет вовсе. Об этом говорим — один раз.
-            if is_auth_error(e):
+            if alarm is not None and is_auth_error(e):
                 alarm.broken("площадка не приняла вход", COOKIES_ADVICE)
 
             log.error("слушатель оборвался: %s, продолжу через %ss", e, pause)
-            time.sleep(pause)
+            sleeper(pause)
             pause = min(pause * 2, MAX_PAUSE)
 
 
