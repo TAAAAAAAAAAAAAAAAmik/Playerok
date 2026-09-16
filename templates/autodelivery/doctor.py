@@ -132,6 +132,26 @@ def last_error(name: str) -> None:
         print(f"       {line[:200]}")
 
 
+def listener_check() -> None:
+    """Есть ли то, чем notify_bot слушает площадку.
+
+    Отдельной проверкой, потому что беда неочевидная: библиотека
+    установлена и всё остальное на ней работает, а уведомлений нет
+    никогда. В setup.py библиотеки стоит packages=find_packages(), у папки
+    playerokapi/listener нет __init__.py — и она не попадает в установку.
+    """
+    print("\n── Слушатель событий (для уведомлений) ──")
+
+    try:
+        from playerokapi.listener.listener import EventListener  # noqa: F401
+    except Exception as e:                                    # noqa: BLE001
+        say(BAD, f"не импортируется: {e}",
+            f"python3 {HERE}/fix_listener.py")
+        return
+
+    say(OK, "слушатель на месте")
+
+
 def login_check():
     """Вход в кабинет. → аккаунт или None."""
     print("\n── Вход в кабинет площадки ──")
@@ -359,6 +379,7 @@ def main() -> None:
 
     env_check()
     bots_check()
+    listener_check()
     login_check()
     templates_check()
     delivery_check()

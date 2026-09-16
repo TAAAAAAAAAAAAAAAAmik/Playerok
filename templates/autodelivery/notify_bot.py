@@ -65,8 +65,22 @@ def main() -> None:
 
     try:
         from playerokapi.listener.listener import EventListener
-    except ImportError:
-        raise SystemExit("Не установлена библиотека playerokapi.")
+    except ImportError as e:
+        # Почти наверняка не вся библиотека, а ровно её слушатель. В
+        # setup.py стоит packages=find_packages(), а у папки
+        # playerokapi/listener нет __init__.py — и она не попадает в
+        # установку. Соседние enums.py и types.py ставятся, потому что они
+        # файлы, а не папки.
+        #
+        # Прежнее «не установлена библиотека playerokapi» уводило в
+        # сторону: библиотека стоит, на ней работает всё остальное.
+        here = os.path.dirname(os.path.abspath(__file__))
+        raise SystemExit(
+            f"Слушатель событий не импортируется: {e}\n\n"
+            f"Это известная недоделка библиотеки: папку "
+            f"playerokapi/listener она не устанавливает. Лечится одной "
+            f"командой:\n"
+            f"  python3 {here}/fix_listener.py")
 
     me = str(getattr(account, "id", "") or "")
     show = wanted()
