@@ -69,7 +69,8 @@ import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
 import vary                                                   # noqa: E402
-from bump import LIMIT, Ledger                                # noqa: E402
+import bump                                                   # noqa: E402
+from bump import Ledger                                       # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
@@ -91,9 +92,10 @@ MENU = [[("➕ Новый товар", "новый товар"),
          ("📝 Одним сообщением", "бланк")],
         [("⚡ Из шаблона", "шаблон"),
          ("📊 Серия номиналов", "серия")],
-        [("📄 Черновики", "черновики")],
-        [("⚙️ Автовыдача", "настройки")],
-        [("🔑 Проверить сессию", "проверить")],
+        [("📄 Черновики", "черновики"),
+         ("🏷 Копии и цены", "копии")],
+        [("⚙️ Автовыдача", "настройки"),
+         ("🔑 Проверить сессию", "проверить")],
         [("👤 Аккаунт", "аккаунт")]]
 
 # Команды в меню Telegram — та кнопка слева от поля ввода. Без неё их
@@ -105,6 +107,7 @@ COMMANDS = [
     ("tpl", "Создать из шаблона"),
     ("series", "Серия номиналов из шаблона"),
     ("drafts", "Черновики"),
+    ("copies", "Копии и цены: предел одинаковых"),
     ("delivery", "Настройки автовыдачи"),
     ("check", "Проверить сессию"),
     ("account", "Кабинеты"),
@@ -138,6 +141,7 @@ ACCOUNT_WORDS = ("аккаунт", "аккаунты", "кабинет", "/accou
 DRAFT_WORDS = ("черновики", "черновик", "/drafts")
 SETTINGS_WORDS = ("настройки", "автовыдача", "/delivery")
 BLANK_WORDS = ("бланк", "одним сообщением", "одно сообщение", "/blank")
+COPIES_WORDS = ("копии", "копии и цены", "/copies")
 SERIES_WORDS = ("серия", "серия номиналов", "номиналы", "/series")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
@@ -162,6 +166,7 @@ PICK_WAY = "way:"
 PICK_CARD = "crd:"
 PICK_SET = "set:"
 PICK_SERIES = "ser:"
+PICK_COPY = "cpy:"
 
 # Где лежит состояние выдачи: и настройки, и журнал выданных заказов. На
 # кабинет: товары и слова-опознаватели у разных кабинетов разные, а
@@ -1093,14 +1098,17 @@ def make_from_template(link, account, store, template_id: str) -> None:
     # Чередование общее на всё время работы бота: без него два нажатия
     # подряд легко дают одну фразу, а это ровно та копия, которой мы и
     # избегаем.
-    vary.apply(draft.fields, ROTATION)
+    ledger = ledger_of()
+
+    if ledger.rules()["vary"]:
+        vary.apply(draft.fields, ROTATION)
 
     # Четвёртая копия по той же цене — уже не ассортимент. Поднимаем на
-    # рубль и говорим об этом: молча изменить цену продавца нельзя.
-    ledger = ledger_of()
+    # столько, сколько задано, и говорим об этом: молча изменить цену
+    # продавца нельзя.
     draft.price, up = ledger.price_for(draft.nominal, draft.price)
     note = (f"\n\nЦена поднята на {up} ₽: бесплатных по {template.price} ₽ "
-            f"уже {LIMIT}." if up else "")
+            f"уже {ledger.rules()['limit']}." if up else "")
 
     link.screen(f"Повторяю:\n\n{draft.summary()}{note}\n\nСоздаю черновик…")
 
@@ -1246,8 +1254,8 @@ def make_series(link, account, store, template_id: str) -> None:
     count = plural(len(jobs), "объявление", "объявления", "объявлений")
     lines = [f"Создам {count}:", ""]
     lines += [f"• {j['name']} — {j['price']} ₽"
-              + (f" (+{j['bump']} — таких уже {LIMIT})" if j.get("bump")
-                 else "")
+              + (f" (+{j['bump']} ₽ — столько же уже висит)"
+                 if j.get("bump") else "")
               for j in jobs]
 
     if raised:
@@ -1455,6 +1463,7 @@ def run_series(link, account, template, photos, jobs) -> None:
     # Одно чередование на всю партию: иначе две соседние копии легко
     # получают одну фразу, а ровно этого мы и избегаем.
     rotation = vary.Rotation()
+    vary_on = ledger_of().rules()["vary"]
 
     for number, job in enumerate(jobs, start=1):
         link.screen(f"Создаю {number} из {len(jobs)}: {job['name']}…")
@@ -1473,7 +1482,9 @@ def run_series(link, account, template, photos, jobs) -> None:
         draft.fields = copy.deepcopy(template.fields)
         draft.options = copy.deepcopy(template.options)
         draft.photos = list(photos)
-        vary.apply(draft.fields, rotation)
+
+        if vary_on:
+            vary.apply(draft.fields, rotation)
 
         item_id, why = create_item(account, draft)
 
@@ -1552,6 +1563,119 @@ def ledger_of() -> Ledger:
     вторым источником правды о том же кабинете.
     """
     return Ledger(settings_of().store)
+
+
+def copies_menu(link) -> None:
+    """Что делать с одинаковыми объявлениями: предел, шаг, разнообразие."""
+    ledger = ledger_of()
+    rules = ledger.rules()
+    counted = ledger.pairs()
+
+    lines = [
+        "🏷 Копии и цены",
+        "",
+        "Площадка не любит одинаковые объявления. Бот следит, чтобы их не "
+        "копилось само собой.",
+        "",
+        f"Подъём цены: {'включён' if rules['enabled'] else 'ВЫКЛЮЧЕН'}",
+        f"Одинаковых допускаем: {rules['limit']}",
+        f"Дальше дороже на: {rules['step']} ₽",
+        f"Разнообразить «Комментарий» и «Промокод»: "
+        f"{'да' if rules['vary'] else 'нет'}",
+    ]
+
+    if rules["enabled"]:
+        many = plural(rules["limit"], "объявление", "объявления",
+                      "объявлений")
+        step = rules["step"]
+        lines += ["", f"Сейчас так: {many} одного номинала по одной "
+                      f"цене, следующее — на {step} ₽ дороже."]
+
+    lines += ["", f"Под счётом сейчас пар «номинал + цена»: {counted}"]
+
+    keys = [[(("⛔ Выключить подъём" if rules["enabled"]
+               else "✅ Включить подъём"), PICK_COPY + "on")],
+            [("🔢 Сколько допускать", PICK_COPY + "limit"),
+             ("💰 На сколько дороже", PICK_COPY + "step")],
+            [(("🎲 Не разнообразить" if rules["vary"]
+               else "🎲 Разнообразить"), PICK_COPY + "vary")],
+            [("🧹 Сбросить счёт", PICK_COPY + "reset")],
+            [("✖️ Назад", "отмена")]]
+
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
+    what = str(answer.get("text") or "")
+
+    if not what.startswith(PICK_COPY):
+        link.screen("Готово.", buttons=MENU)
+        return
+
+    what = what[len(PICK_COPY):]
+
+    if what == "on":
+        ledger.set_enabled(not rules["enabled"])
+    elif what == "vary":
+        ledger.set_vary(not rules["vary"])
+    elif what == "limit":
+        ask_copy_number(
+            link, ledger.set_limit,
+            f"Сколько одинаковых объявлений допускать?\n\n"
+            f"Считаются объявления одного номинала по одной цене. Когда "
+            f"их станет столько, следующее создастся дороже.\n\n"
+            f"Сейчас: {rules['limit']}. Можно от {bump.MIN_LIMIT} "
+            f"до {bump.MAX_LIMIT}.")
+    elif what == "step":
+        ask_copy_number(
+            link, ledger.set_step,
+            f"На сколько рублей поднимать цену?\n\n"
+            f"Сейчас: {rules['step']} ₽. Можно от {bump.MIN_STEP} "
+            f"до {bump.MAX_STEP}.")
+    elif what == "reset":
+        confirm_reset(link, ledger)
+        return
+
+    copies_menu(link)
+
+
+def ask_copy_number(link, save, question: str) -> None:
+    """Спросить число и сохранить. Отказ и отмена ничего не меняют."""
+    answer = link.ask(question, ANSWER_WAIT, buttons=[SKIP])
+    text = str(answer.get("text") or "")
+
+    if wizard.cancelled(text) or wizard.skipped(text):
+        return
+
+    value, why = wizard.accept_number(text)
+
+    if why:
+        link.screen(why, buttons=MENU)
+        return
+
+    save(value)
+
+
+def confirm_reset(link, ledger) -> None:
+    """Сброс счёта — с подтверждением: обратно его не собрать."""
+    counted = ledger.pairs()
+
+    if not counted:
+        link.screen("Счёт и так пуст.", buttons=MENU)
+        return
+
+    answer = link.ask(
+        f"Забыть счёт по {plural(counted, 'паре', 'парам', 'парам')} "
+        f"«номинал + цена»?\n\n"
+        f"Нужно, когда объявления сняты руками: счёт про это не знает и "
+        f"продолжит поднимать цену на пустом месте.\n\n"
+        f"Обратно счёт не собрать — бот не знает, что висит на витрине.",
+        ANSWER_WAIT,
+        buttons=[[("🧹 Да, забыть", "да")], CANCEL])
+
+    if str(answer.get("text") or "").strip().lower() == "да":
+        link.screen(f"Забыл {plural(ledger.reset(), 'пару', 'пары', 'пар')}.",
+                    buttons=MENU)
+        return
+
+    copies_menu(link)
 
 
 def settings_of() -> Settings:
@@ -2321,6 +2445,8 @@ def handle_command(link, account, text: str):
         from_template(link, account)
     elif text in DRAFT_WORDS:
         drafts_menu(link, account)
+    elif text in COPIES_WORDS:
+        copies_menu(link)
     elif text in SETTINGS_WORDS:
         settings_menu(link)
     elif text in CHECK_WORDS:

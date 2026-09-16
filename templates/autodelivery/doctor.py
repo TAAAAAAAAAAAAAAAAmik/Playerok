@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "code"))
@@ -98,6 +99,37 @@ def bots_check() -> None:
         else:
             say(BAD, f"{name} НЕ работает — {what}",
                 f"sh {HERE}/run_bot.sh {name}.py")
+            last_error(name)
+
+
+# Сколько строк журнала показывать. Больше — и отчёт на телефоне
+# превращается в простыню, в которой причина теряется.
+LOG_TAIL = 6
+
+
+def last_error(name: str) -> None:
+    """Чем кончил бот в прошлый раз.
+
+    Без этого «не работает» отправляет продавца искать журнал руками — то
+    есть ещё один круг вопросов там, где ответ уже записан на диск.
+    """
+    path = os.path.join(HERE, "state", f"{name}.log")
+
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = [line.rstrip() for line in f if line.strip()]
+    except OSError:
+        print(f"     журнала нет — бота ни разу не запускали "
+              f"или он не дошёл до записи")
+        return
+
+    if not lines:
+        return
+
+    print("     последнее в журнале:")
+
+    for line in lines[-LOG_TAIL:]:
+        print(f"       {line[:200]}")
 
 
 def login_check():
@@ -247,13 +279,15 @@ def supplier_check() -> None:
             say(OK, f"{card.title}: номиналов в наличии {len(live)}")
 
 
-# Номинал, которого нет и быть не может. Нужен, чтобы позвать покупку и
-# посмотреть, ЧЕМ поставщик откажет, не покупая ничего.
-NOWHERE = "00000000-0000-0000-0000-000000000000"
-
 # Слова отказа, означающие «ключу не хватает прав».
 FORBIDDEN = ("403", "forbidden", "orders:write", "permission", "scope",
              "доступ", "прав")
+
+# Слова отказа, означающие «дошли до поиска товара». Это и есть хороший
+# исход: раз поставщик искал номинал, форму тела он принял и права
+# проверил — иначе отказал бы раньше.
+LOOKED_UP = ("not found", "не найд", "нет такого", "denomination",
+             "unavailable", "out of stock", "нет в наличии")
 
 
 def orders_write_check() -> None:
@@ -286,23 +320,37 @@ def orders_write_check() -> None:
     supplier = ApprouteSupplier(
         api_key=key, proxy=os.environ.get("APPROUTE_PROXY", ""))
     # Своя ссылка: повтор проверки не должен выглядеть повтором покупки.
-    got = supplier.place(NOWHERE, f"doctor-{int(time.time())}")
-    why = str(got.get("why") or "").lower()
+    got = supplier.place(str(uuid.uuid4()), f"doctor-{int(time.time())}")
+    why = str(got.get("why") or "")
+    low = why.lower()
 
     if got.get("ok"):
-        # Такого быть не должно: номинала не существует. Молчать нельзя —
-        # это либо не тот кабинет, либо мы поняли ответ неверно.
+        # Такого быть не должно: номинала со случайным номером не
+        # существует. Молчать нельзя — это либо не тот кабинет, либо мы
+        # поняли ответ неверно.
         say(WARN, "поставщик принял покупку несуществующего номинала — "
                   "странно, проверьте кабинет вручную")
         return
 
-    if any(word in why for word in FORBIDDEN):
+    if any(word in low for word in FORBIDDEN):
         say(BAD, "у ключа НЕТ права orders:write — он спишет деньги, но "
                  "кода не отдаст",
             "в кабинете AppRoute выдайте ключу право orders: write")
         return
 
-    say(OK, f"право есть: отказ не про права ({got.get('why')})")
+    if any(word in low for word in LOOKED_UP):
+        say(OK, "право есть: поставщик дошёл до поиска номинала, "
+                "значит форму принял и права проверил")
+        return
+
+    # Отказ по форме тела приходит РАНЬШЕ проверки прав, поэтому он не
+    # говорит о правах ничего. Выдать такое за «право есть» — худшее, что
+    # здесь можно сделать: продавец включит выдачу, первая же покупка
+    # спишет деньги и не отдаст код.
+    say(WARN, f"право проверить не вышло: поставщик отказал по форме "
+              f"запроса, а это происходит до проверки прав ({why})",
+        "убедитесь в кабинете AppRoute, что у ключа стоит orders: write — "
+        "без него он спишет деньги и не отдаст код")
 
 
 def main() -> None:

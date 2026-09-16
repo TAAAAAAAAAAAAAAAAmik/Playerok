@@ -1356,5 +1356,90 @@ class PriceBumpTest(unittest.TestCase):
         self.assertIn("поднята", plan)
 
 
+class CopiesMenuTest(unittest.TestCase):
+    """Экран «Копии и цены»: правило должно настраиваться, а не быть
+    зашитым — у каждого продавца свой ассортимент и свои цены."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        self.tid = item_bot.templates_of().save(
+            "1000 Robux", 1320, "GL", [PNG], description="Коды",
+            game=GAME, category=CATEGORY, obtaining=OBTAINING)
+
+    def press(self, times):
+        account = FakeAccount()
+
+        for _ in range(times):
+            item_bot.from_template(
+                FakeLink([item_bot.PICK + self.tid,
+                          item_bot.PICK_ACT + "make"]), account)
+
+        return [c["price"] for c in account.created]
+
+    def test_the_screen_shows_the_current_rule(self):
+        link = FakeLink(["отмена"])
+        item_bot.copies_menu(link)
+
+        self.assertIn("Одинаковых допускаем: 3", link.said[0])
+        self.assertIn("Дальше дороже на: 1 ₽", link.said[0])
+
+    def test_the_limit_can_be_changed_and_is_obeyed(self):
+        item_bot.copies_menu(FakeLink([item_bot.PICK_COPY + "limit", "5",
+                                       "отмена"]))
+
+        self.assertEqual(self.press(6), [1320] * 5 + [1321])
+
+    def test_the_step_can_be_changed_and_is_obeyed(self):
+        item_bot.copies_menu(FakeLink([item_bot.PICK_COPY + "step", "50",
+                                       "отмена"]))
+
+        self.assertEqual(self.press(4)[-1], 1370)
+
+    def test_it_can_be_switched_off_entirely(self):
+        item_bot.copies_menu(FakeLink([item_bot.PICK_COPY + "on", "отмена"]))
+
+        self.assertEqual(self.press(5), [1320] * 5)
+
+    def test_varying_the_fields_can_be_switched_off(self):
+        tid = item_bot.templates_of().save(
+            "500 Robux", 700, "GL", [PNG], description="Коды",
+            game=GAME, category=CATEGORY, obtaining=OBTAINING,
+            fields=[{"id": "f1", "label": "Комментарий",
+                     "required": False, "value": ""}])
+        item_bot.copies_menu(FakeLink([item_bot.PICK_COPY + "vary", "отмена"]))
+        account = FakeAccount()
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + tid, item_bot.PICK_ACT + "make"]),
+            account)
+
+        # Пустое поле на площадку не уходит вовсе — и выдумывать в него
+        # фразу бот перестал.
+        sent = [f.value for f in account.created[0]["data_fields"]]
+
+        self.assertEqual(sent, [])
+
+    def test_a_word_instead_of_a_number_is_refused(self):
+        item_bot.copies_menu(FakeLink([item_bot.PICK_COPY + "limit",
+                                       "много", "отмена"]))
+
+        self.assertEqual(item_bot.ledger_of().rules()["limit"], 3)
+
+    def test_resetting_asks_first(self):
+        item_bot.ledger_of().remember(1000, 1320)
+        link = FakeLink([item_bot.PICK_COPY + "reset", "отмена", "отмена"])
+        item_bot.copies_menu(link)
+
+        self.assertEqual(item_bot.ledger_of().pairs(), 1)
+
+    def test_a_confirmed_reset_clears_the_count(self):
+        item_bot.ledger_of().remember(1000, 1320)
+        item_bot.copies_menu(FakeLink([item_bot.PICK_COPY + "reset", "да"]))
+
+        self.assertEqual(item_bot.ledger_of().pairs(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

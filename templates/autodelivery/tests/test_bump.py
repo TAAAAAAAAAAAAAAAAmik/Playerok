@@ -90,5 +90,88 @@ class LedgerTest(unittest.TestCase):
         self.assertLess(up, 100)
 
 
+class RulesTest(unittest.TestCase):
+    """Настройки счёта: предел, шаг, выключение."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.path = os.path.join(self.root, "s.json")
+        self.led = Ledger(JsonStore(self.path))
+
+    def test_defaults_are_what_it_did_before_settings(self):
+        rules = self.led.rules()
+
+        self.assertTrue(rules["enabled"])
+        self.assertEqual(rules["limit"], LIMIT)
+        self.assertEqual(rules["step"], STEP)
+        self.assertTrue(rules["vary"])
+
+    def test_a_bigger_limit_is_respected(self):
+        self.led.set_limit(5)
+
+        for _ in range(5):
+            self.assertEqual(self.led.price_for(1000, 500)[1], 0)
+            self.led.remember(1000, 500)
+
+        self.assertEqual(self.led.price_for(1000, 500), (501, 1))
+
+    def test_a_bigger_step_is_respected(self):
+        self.led.set_step(10)
+
+        for _ in range(LIMIT):
+            self.led.remember(1000, 500)
+
+        self.assertEqual(self.led.price_for(1000, 500), (510, 10))
+
+    def test_switching_it_off_leaves_the_price_alone(self):
+        self.led.set_limit(1)
+        self.led.remember(1000, 500)
+        self.led.set_enabled(False)
+
+        self.assertEqual(self.led.price_for(1000, 500), (500, 0))
+
+    def test_settings_survive_a_restart(self):
+        self.led.set_limit(7)
+        self.led.set_step(25)
+
+        again = Ledger(JsonStore(self.path))
+
+        self.assertEqual(again.rules()["limit"], 7)
+        self.assertEqual(again.rules()["step"], 25)
+
+    def test_nonsense_falls_back_to_the_default(self):
+        """Ноль в пределе означал бы, что цена растёт у каждого
+        объявления, а нулевой шаг — вечный круг подъёма ни о чём."""
+        self.led.set_limit(0)
+        self.led.set_step(0)
+
+        self.assertGreaterEqual(self.led.rules()["limit"], 1)
+        self.assertGreaterEqual(self.led.rules()["step"], 1)
+
+    def test_a_word_instead_of_a_number_changes_nothing_dangerous(self):
+        self.led.set_limit("много")
+
+        self.assertEqual(self.led.rules()["limit"], LIMIT)
+
+    def test_resetting_forgets_the_count_but_not_the_settings(self):
+        """Счёт про снятые руками объявления не знает и продолжал бы
+        поднимать цену на пустом месте."""
+        self.led.set_limit(5)
+
+        for _ in range(3):
+            self.led.remember(1000, 500)
+
+        self.assertEqual(self.led.reset(), 1)
+        self.assertEqual(self.led.count(1000, 500), 0)
+        self.assertEqual(self.led.rules()["limit"], 5)
+
+    def test_pairs_counts_what_is_under_the_ledger(self):
+        self.led.remember(1000, 500)
+        self.led.remember(1000, 500)
+        self.led.remember(400, 200)
+
+        self.assertEqual(self.led.pairs(), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
