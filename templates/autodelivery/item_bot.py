@@ -1778,7 +1778,7 @@ PAGE_PAUSE = 0.8
 # площадки собственными руками.
 ITEMS_TTL = 120.0
 
-_ITEMS: dict = {"at": 0.0, "rows": None, "whole": True}
+_ITEMS: dict = {"at": 0.0, "rows": None, "whole": True, "key": ""}
 
 # По этим словам узнаём просьбу площадки сбавить темп. Это не поломка:
 # то, что уже прочитано, остаётся годным.
@@ -1791,7 +1791,7 @@ def forget_items() -> None:
     Зовётся при смене кабинета: объявления у кабинетов разные, и показать
     чужие — значит дать скопировать не тот товар не в тот магазин.
     """
-    _ITEMS.update({"at": 0.0, "rows": None, "whole": True})
+    _ITEMS.update({"at": 0.0, "rows": None, "whole": True, "key": ""})
 
 
 def is_too_often(e) -> bool:
@@ -1800,7 +1800,8 @@ def is_too_often(e) -> bool:
     return any(word in text for word in TOO_OFTEN)
 
 
-def my_items(account, fresh: bool = False) -> tuple:
+def my_items(account, fresh: bool = False, game_id: str = "",
+             category_id: str = "") -> tuple:
     """Выставленные объявления → (список, всё ли прочитано).
 
     Площадка отдаёт по двадцать четыре за запрос, и первая страница — это
@@ -1813,7 +1814,10 @@ def my_items(account, fresh: bool = False) -> tuple:
     говорим, что список неполный. Половина списка полезнее отказа: нужное
     объявление скорее всего в ней.
     """
-    if not fresh and _ITEMS["rows"] is not None \
+    key = f"{game_id}/{category_id}"
+
+    if not fresh and _ITEMS.get("key") == key \
+            and _ITEMS["rows"] is not None \
             and time.time() - _ITEMS["at"] < ITEMS_TTL:
         return list(_ITEMS["rows"]), _ITEMS["whole"]
 
@@ -1822,6 +1826,13 @@ def my_items(account, fresh: bool = False) -> tuple:
         where = {"statuses": [ItemStatuses.APPROVED]}
     except ImportError:
         where = {}
+
+    # Отбор делает сама площадка. Это не только точнее — это ещё и меньше
+    # страниц, а значит меньше поводов услышать «слишком много попыток».
+    if category_id:
+        where["category_id"] = category_id
+    elif game_id:
+        where["game_id"] = game_id
 
     out: list = []
     cursor = None
@@ -1855,9 +1866,13 @@ def my_items(account, fresh: bool = False) -> tuple:
         # Страницы кончились раньше, чем наше терпение.
         whole = False
 
-    _ITEMS.update({"at": time.time(), "rows": list(out), "whole": whole})
+    _ITEMS.update({"at": time.time(), "rows": list(out), "whole": whole,
+                   "key": key})
 
     return out, whole
+
+
+PICK_CAT = "cat2:"
 
 
 def copy_live(link, account) -> None:
@@ -1866,11 +1881,125 @@ def copy_live(link, account) -> None:
     Шаблон запоминается при создании товара — а то, что заведено раньше
     бота или в кабинете на сайте, шаблона не имеет. Повторить такое было
     нечем, хотя всё нужное у площадки есть.
+
+    Сначала спрашиваем игру и категорию. У продавца с пятью сотнями
+    объявлений список без отбора бесполезен, а разложить его по настоящим
+    категориям бот сам не может: в списке товаров площадка категорию НЕ
+    отдаёт, только в карточке каждого — читать пять сотен карточек ради
+    одного меню значит заставить ждать минуты.
+    
+    Зато отбирать по категории умеет сама площадка. Заодно это и меньше
+    страниц, то есть меньше поводов услышать «слишком много попыток».
     """
-    link.screen("Читаю ваши объявления…")
+    game = ask_game(link, account)
+
+    if game is None:
+        return
+
+    if game == "все":
+        show_items(link, account)
+        return
+
+    category = ask_category(link, account, game)
+
+    if category is None:
+        return
+
+    show_items(link, account, game=game,
+               category=None if category == "все" else category)
+
+
+def ask_game(link, account):
+    """Игра или приложение → {"id", "name"}, "все" или None.
+
+    Ищем по названию, а не показываем список: игр на площадке тысячи, и
+    меню из них не помещается никуда.
+    """
+    answer = link.ask(
+        "Для какой игры или приложения объявление?\n\n"
+        "Напишите название или его часть — покажу, что нашлось.\n"
+        "Или нажмите «Все подряд», если объявлений немного.",
+        ANSWER_WAIT,
+        buttons=[[("📄 Все подряд", "все")], CANCEL])
+    search = str(answer.get("text") or "").strip()
+
+    if not search or wizard.cancelled(search):
+        link.screen("Отменил.", buttons=MENU)
+        return None
+
+    if search.lower() == "все":
+        return "все"
 
     try:
-        items, whole = my_items(account)
+        page = account.get_games(name=search, count=MAX_CHOICES)
+        games = list(getattr(page, "games", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Поиск не удался: {e}", buttons=MENU)
+        return None
+
+    if not games:
+        link.screen(f"По запросу «{search}» ничего не нашлось. "
+                    f"Попробуйте короче.", buttons=MENU)
+        return None
+
+    chosen = choose(link, "Что из этого?",
+                    [(g.id, g.name) for g in games], PICK_GAME)
+
+    if chosen is None:
+        link.screen("Отменил.", buttons=MENU)
+
+    return chosen
+
+
+def ask_category(link, account, game):
+    """Категория игры → {"id", "name"}, "все" или None."""
+    try:
+        found = account.get_game(id=game["id"])
+        rows = list(getattr(found, "categories", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Категории прочитать не вышло: {e}", buttons=MENU)
+        return None
+
+    if not rows:
+        # Не беда: покажем всё по игре.
+        return "все"
+
+    keys = [[(c.name, PICK_CAT + str(c.id))] for c in rows[:MAX_CHOICES]]
+    keys.append([("📄 Все категории", PICK_CAT + "все")])
+    keys.append([("✖️ Отмена", "отмена")])
+
+    answer = link.ask(f"{game['name']} — какая категория?", ANSWER_WAIT,
+                      buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_CAT):
+        link.screen("Отменил.", buttons=MENU)
+        return None
+
+    what = text[len(PICK_CAT):]
+
+    if what == "все":
+        return "все"
+
+    found = next((c for c in rows if str(c.id) == what), None)
+
+    if found is None:
+        link.screen("Такой категории нет.", buttons=MENU)
+        return None
+
+    return {"id": str(found.id), "name": str(found.name)}
+
+
+def show_items(link, account, game=None, category=None) -> None:
+    """Прочитать отобранные объявления и показать списком."""
+    where = " · ".join(x["name"] for x in (game, category) if isinstance(x, dict))
+    link.screen(f"Читаю объявления{' — ' + where if where else ''}…")
+
+    try:
+        items, whole = my_items(
+            account,
+            game_id=game["id"] if isinstance(game, dict) else "",
+            category_id=category["id"] if isinstance(category, dict) else "")
     except Exception as e:                                    # noqa: BLE001
         if is_auth_error(e):
             link.screen(f"Площадка не приняла вход.\n\n{COOKIES_ADVICE}",
@@ -1885,9 +2014,14 @@ def copy_live(link, account) -> None:
         return
 
     if not items:
-        link.screen("Выставленных объявлений не нашлось.\n\nКопировать "
-                    "можно только то, что уже стоит на витрине.",
-                    buttons=MENU)
+        link.screen(f"Объявлений{' — ' + where if where else ''} не "
+                    f"нашлось.\n\nКопировать можно только то, что уже стоит "
+                    f"на витрине.", buttons=MENU)
+        return
+
+    if where:
+        # Отбор уже сделан площадкой — делить дальше по названию незачем.
+        items_menu(link, account, items, where, whole=whole)
         return
 
     groups_menu(link, account, items, whole)

@@ -1499,7 +1499,7 @@ class CopyFromMarketTest(unittest.TestCase):
         """Продавец, не нашедший своего объявления, решит, что бот его не
         видит."""
         market = self.market()
-        link = FakeLink(["отмена"])
+        link = FakeLink(["все", "отмена"])
         item_bot.copy_live(link, market)
 
         self.assertGreater(market.pages, 1)
@@ -1507,49 +1507,50 @@ class CopyFromMarketTest(unittest.TestCase):
                       else link.said[-1])
 
     def test_listings_are_split_into_piles(self):
-        link = FakeLink(["отмена"])
+        link = FakeLink(["все", "отмена"])
         item_bot.copy_live(link, self.market())
-        names = [n for row in link.asked[0][1] for n, _ in row]
+        names = [n for row in link.asked[-1][1] for n, _ in row]
 
         self.assertTrue(any("ХИТ КАТЕГОРИИ" in n for n in names))
         self.assertTrue(any("БЫСТРАЯ ПОКУПКА" in n for n in names))
 
     def test_the_biggest_pile_comes_first(self):
-        link = FakeLink(["отмена"])
+        link = FakeLink(["все", "отмена"])
         item_bot.copy_live(link, self.market())
-        first = link.asked[0][1][0][0][0]
+        first = link.asked[-1][1][0][0][0]
 
         self.assertIn("БЫСТРАЯ ПОКУПКА", first)
         self.assertIn("22", first)
 
     def test_a_pile_is_shown_page_by_page(self):
-        link = FakeLink([item_bot.PICK_GROUP + "0", "отмена"])
+        link = FakeLink(["все", item_bot.PICK_GROUP + "0", "отмена"])
         item_bot.copy_live(link, self.market())
 
         self.assertIn("страница 1 из 2", link.said[-2])
 
     def test_the_next_page_shows_the_rest(self):
-        link = FakeLink([item_bot.PICK_GROUP + "0",
+        link = FakeLink(["все", item_bot.PICK_GROUP + "0",
                          item_bot.PICK_PAGE + "1", "отмена"])
         item_bot.copy_live(link, self.market())
 
         self.assertIn("страница 2 из 2", link.said[-2])
 
     def test_a_word_finds_the_listing(self):
-        link = FakeLink([item_bot.PICK_GROUP + "find", "хит", "отмена"])
+        link = FakeLink(["все", item_bot.PICK_GROUP + "find", "хит",
+                         "отмена"])
         item_bot.copy_live(link, self.market())
 
         self.assertIn("«хит»", link.said[-2])
 
     def test_one_kind_of_listing_needs_no_piles(self):
         """Делить нечего — сразу список, лишний экран только мешает."""
-        link = FakeLink(["отмена"])
+        link = FakeLink(["все", "отмена"])
         item_bot.copy_live(link, self.market(hits=3, fasts=0))
 
         self.assertIn("Какое повторить?", link.said[-2])
 
     def test_no_listings_at_all_is_explained(self):
-        link = FakeLink([])
+        link = FakeLink(["все"])
         item_bot.copy_live(link, self.Market([]))
 
         self.assertIn("не нашлось", link.said[-1])
@@ -1675,7 +1676,7 @@ class TooOftenTest(unittest.TestCase):
     def test_an_incomplete_list_is_said_to_be_incomplete(self):
         """Молча показать половину — значит дать решить, что остального
         нет вовсе."""
-        link = FakeLink(["отмена"])
+        link = FakeLink(["все", "отмена"])
         item_bot.copy_live(link, self.market(limit_after=2))
 
         self.assertTrue(any("неполный" in q for q, _ in link.asked))
@@ -1685,7 +1686,7 @@ class TooOftenTest(unittest.TestCase):
         увидит вовсе, и предупреждение до него не дойдёт."""
         items = [type("I", (), {"id": f"i{n}", "name": "🚀 БЫСТРАЯ ПОКУПКА",
                                 "price": 100})() for n in range(60)]
-        link = FakeLink(["отмена"])
+        link = FakeLink(["все", "отмена"])
         item_bot.copy_live(link, self.Market(items, limit_after=2))
 
         self.assertIn("неполный", link.asked[-1][0])
@@ -1693,13 +1694,13 @@ class TooOftenTest(unittest.TestCase):
     def test_a_limit_on_the_very_first_page_is_explained(self):
         """Тут прочитанного нет вовсе — и это не поломка, а просьба
         подождать."""
-        link = FakeLink([])
+        link = FakeLink(["все"])
         item_bot.copy_live(link, self.market(limit_after=0.5))
 
         self.assertIn("сбавить темп", link.said[-1])
 
     def test_a_full_read_is_not_called_incomplete(self):
-        link = FakeLink(["отмена"])
+        link = FakeLink(["все", "отмена"])
         item_bot.copy_live(link, self.market())
 
         self.assertNotIn("неполный", link.asked[0][0])
@@ -1708,9 +1709,9 @@ class TooOftenTest(unittest.TestCase):
         """Перечитывать витрину на каждое нажатие значит выбирать лимит
         площадки собственными руками."""
         market = self.market()
-        item_bot.copy_live(FakeLink(["отмена"]), market)
+        item_bot.copy_live(FakeLink(["все", "отмена"]), market)
         was = market.pages
-        item_bot.copy_live(FakeLink(["отмена"]), market)
+        item_bot.copy_live(FakeLink(["все", "отмена"]), market)
 
         self.assertEqual(market.pages, was)
 
@@ -1718,13 +1719,152 @@ class TooOftenTest(unittest.TestCase):
         """Показать чужие объявления — значит дать скопировать не тот
         товар не в тот магазин."""
         first = self.market(count=5)
-        item_bot.copy_live(FakeLink(["отмена"]), first)
+        item_bot.copy_live(FakeLink(["все", "отмена"]), first)
 
         item_bot.forget_items()
         second = self.market(count=30)
-        item_bot.copy_live(FakeLink(["отмена"]), second)
+        item_bot.copy_live(FakeLink(["все", "отмена"]), second)
 
         self.assertGreater(second.pages, 0)
+
+
+class ByCategoryTest(unittest.TestCase):
+    """Отбор по настоящей категории, а не по началу названия.
+
+    У продавца с пятью сотнями объявлений начало названия — это
+    «РЕКОМЕНДУЕМ» и «ЛУЧШАЯ ЦЕНА», то есть приставки, а не категории.
+    Настоящую категорию площадка в списке товаров не отдаёт, зато умеет
+    по ней отбирать — этим и пользуемся.
+    """
+
+    class Market:
+        BY_CATEGORY = {
+            "c-robux": 83,
+            "c-acc": 12,
+        }
+
+        def __init__(self):
+            self.asked = []
+
+        def _rows(self, key, count):
+            return [type("I", (), {"id": f"{key}-{n}",
+                                   "name": f"🚀 БЫСТРАЯ ПОКУПКА {n}",
+                                   "price": 100 + n})()
+                    for n in range(count)]
+
+        def get_games(self, name="", count=12):
+            self.asked.append(("games", name))
+
+            return type("P", (), {"games": [
+                type("G", (), {"id": "g-roblox", "name": "Roblox"})(),
+                type("G", (), {"id": "g-az", "name": "Arizona RP"})()]})()
+
+        def get_game(self, id=None):                       # noqa: A002
+            self.asked.append(("game", id))
+
+            return type("G", (), {"categories": [
+                type("C", (), {"id": "c-robux", "name": "Робуксы"})(),
+                type("C", (), {"id": "c-acc", "name": "Аккаунты"})()]})()
+
+        def get_my_items(self, count=24, after_cursor=None,
+                         category_id=None, game_id=None, **kw):
+            self.asked.append(("items", category_id or game_id or "всё"))
+            key = category_id or game_id or "всё"
+            rows = self._rows(key, self.BY_CATEGORY.get(category_id, 95))
+            start = int(after_cursor or 0)
+
+            return type("P", (), {
+                "items": rows[start:start + count],
+                "page_info": type("I", (), {
+                    "has_next_page": start + count < len(rows),
+                    "end_cursor": str(start + count)})(),
+            })()
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.forget_items()
+        self._pause = item_bot.PAGE_PAUSE
+        item_bot.PAGE_PAUSE = 0
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.forget_items()
+
+    def pick(self, *answers):
+        market = self.Market()
+        link = FakeLink(list(answers))
+        item_bot.copy_live(link, market)
+
+        return link, market
+
+    def test_the_game_is_asked_first(self):
+        link, _ = self.pick("отмена")
+
+        self.assertIn("игры", link.asked[0][0])
+
+    def test_the_games_categories_are_offered(self):
+        link, _ = self.pick("роблокс", item_bot.PICK_GAME + "g-roblox",
+                            "отмена")
+        names = [n for row in link.asked[-1][1] for n, _ in row]
+
+        self.assertIn("Робуксы", names)
+        self.assertIn("Аккаунты", names)
+
+    def test_the_platform_does_the_filtering(self):
+        """Это не только точнее — это ещё и меньше страниц, то есть меньше
+        поводов услышать «слишком много попыток»."""
+        _, market = self.pick("роблокс", item_bot.PICK_GAME + "g-roblox",
+                              item_bot.PICK_CAT + "c-acc", "отмена")
+        asked = [what for kind, what in market.asked if kind == "items"]
+
+        self.assertTrue(asked)
+        self.assertTrue(all(what == "c-acc" for what in asked))
+
+    def test_only_that_categorys_listings_are_shown(self):
+        link, _ = self.pick("роблокс", item_bot.PICK_GAME + "g-roblox",
+                            item_bot.PICK_CAT + "c-acc", "отмена")
+
+        # Двенадцать объявлений — это ровно одна страница, и подписи про
+        # страницы тогда нет.
+        self.assertIn("Аккаунты", link.asked[-1][0])
+        self.assertEqual(len(link.asked[-1][1]) - 1, 12)
+
+    def test_all_categories_of_a_game_can_be_taken(self):
+        _, market = self.pick("роблокс", item_bot.PICK_GAME + "g-roblox",
+                              item_bot.PICK_CAT + "все", "отмена")
+        asked = [what for kind, what in market.asked if kind == "items"]
+
+        self.assertTrue(all(what == "g-roblox" for what in asked))
+
+    def test_everything_at_once_is_still_possible(self):
+        """Продавцу с десятком объявлений отбор только мешает."""
+        _, market = self.pick("все", "отмена")
+        asked = [what for kind, what in market.asked if kind == "items"]
+
+        self.assertTrue(asked)
+        self.assertTrue(all(what == "всё" for what in asked))
+
+    def test_nothing_in_the_category_is_explained(self):
+        market = self.Market()
+        market.BY_CATEGORY = dict(market.BY_CATEGORY, **{"c-acc": 0})
+        link = FakeLink(["роблокс", item_bot.PICK_GAME + "g-roblox",
+                         item_bot.PICK_CAT + "c-acc"])
+        item_bot.copy_live(link, market)
+
+        self.assertIn("не нашлось", link.said[-1])
+
+    def test_a_game_that_is_not_found_is_said_plainly(self):
+        class Empty(self.Market):
+            def get_games(self, name="", count=12):
+                return type("P", (), {"games": []})()
+
+        link = FakeLink(["чепуха"])
+        item_bot.copy_live(link, Empty())
+
+        self.assertIn("ничего не нашлось", link.said[-1])
 
 
 if __name__ == "__main__":
