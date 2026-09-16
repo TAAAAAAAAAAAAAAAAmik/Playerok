@@ -66,6 +66,7 @@ from envfile import load_env_file                             # noqa: E402
 from owner import link_from_env                               # noqa: E402
 import listing                                                # noqa: E402
 import copyitem                                               # noqa: E402
+import grouping                                               # noqa: E402
 import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
@@ -1689,6 +1690,51 @@ def confirm_reset(link, ledger) -> None:
     copies_menu(link)
 
 
+# Сколько объявлений показывать на одной странице списка. Столько же,
+# сколько вариантов в других списках: больше не влезает на телефон.
+PAGE = MAX_CHOICES
+
+# Сколько страниц готовы прочитать у площадки. Двадцать по двадцать
+# четыре — почти пять сотен объявлений: больше не бывает даже у крупного
+# продавца, а бесконечный цикл по чужому курсору бывает.
+MAX_PAGES = 20
+
+PICK_GROUP = "grp:"
+PICK_PAGE = "pge:"
+
+
+def my_items(link, account) -> list:
+    """ВСЕ выставленные объявления, а не первую страницу.
+
+    Площадка отдаёт по двадцать четыре за запрос, и первая страница — это
+    не «все»: на заказах мы на этом уже обжигались. Продавец, не нашедший
+    своего объявления в списке, решит, что бот его не видит.
+    """
+    try:
+        from playerokapi.enums import ItemStatuses
+        where = {"statuses": [ItemStatuses.APPROVED]}
+    except ImportError:
+        where = {}
+
+    out: list = []
+    cursor = None
+
+    for _ in range(MAX_PAGES):
+        page = account.get_my_items(count=24, after_cursor=cursor, **where)
+        out.extend(list(getattr(page, "items", None) or []))
+        info = getattr(page, "page_info", None)
+
+        if not getattr(info, "has_next_page", False):
+            break
+
+        cursor = getattr(info, "end_cursor", None)
+
+        if not cursor:
+            break
+
+    return out
+
+
 def copy_live(link, account) -> None:
     """Копия объявления, которое уже стоит на витрине.
 
@@ -1699,14 +1745,7 @@ def copy_live(link, account) -> None:
     link.screen("Читаю ваши объявления…")
 
     try:
-        from playerokapi.enums import ItemStatuses
-        where = {"statuses": [ItemStatuses.APPROVED]}
-    except ImportError:
-        where = {}
-
-    try:
-        page = account.get_my_items(count=MAX_CHOICES, **where)
-        items = list(getattr(page, "items", None) or [])
+        items = my_items(link, account)
     except Exception as e:                                    # noqa: BLE001
         if is_auth_error(e):
             link.screen(f"Площадка не приняла вход.\n\n{COOKIES_ADVICE}",
@@ -1722,11 +1761,100 @@ def copy_live(link, account) -> None:
                     buttons=MENU)
         return
 
-    keys = [[(f"{i.name} — {getattr(i, 'price', '?')} ₽", PICK_LIVE + str(i.id))]
-            for i in items]
+    groups_menu(link, account, items)
+
+
+def groups_menu(link, account, items) -> None:
+    """Кучки объявлений: по началу названия.
+
+    Полсотни строк подряд, где половина выглядит одинаково, выбрать не
+    помогают. Категорию площадка в списке не отдаёт, а название продавец
+    придумывает сам — и до первого разделителя обычно стоит то, чем товар
+    и отличается.
+    """
+    found = grouping.groups(items)
+
+    if len(found) < 2:
+        # Делить нечего — сразу список.
+        items_menu(link, account, items, "Все объявления")
+        return
+
+    keys = []
+
+    for number, (label, rows) in enumerate(found):
+        many = plural(len(rows), "объявление", "объявления",
+                      "объявлений")
+        keys.append([(f"{label} — {many}", PICK_GROUP + str(number))])
+    keys.append([("🔍 Найти по слову", PICK_GROUP + "find"),
+                 ("📄 Все подряд", PICK_GROUP + "all")])
     keys.append([("✖️ Назад", "отмена")])
-    answer = link.ask("Какое объявление повторить?", ANSWER_WAIT, buttons=keys)
+
+    answer = link.ask(
+        f"Ваших объявлений: {len(items)}. Разложил по началу названия — "
+        f"так проще найти нужное.", ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "")
+
+    if not text.startswith(PICK_GROUP):
+        link.screen("Отменил.", buttons=MENU)
+        return
+
+    what = text[len(PICK_GROUP):]
+
+    if what == "all":
+        items_menu(link, account, items, "Все объявления")
+        return
+
+    if what == "find":
+        answer = link.ask("Какое слово есть в названии?", ANSWER_WAIT,
+                          buttons=[CANCEL])
+        word = str(answer.get("text") or "")
+
+        if wizard.cancelled(word) or not word.strip():
+            groups_menu(link, account, items)
+            return
+
+        chosen = grouping.matching(items, word)
+
+        if not chosen:
+            link.screen(f"По слову «{word}» ничего не нашлось.", buttons=MENU)
+            return
+
+        items_menu(link, account, chosen, f"Со словом «{word}»")
+        return
+
+    if not what.isdigit() or int(what) >= len(found):
+        groups_menu(link, account, items)
+        return
+
+    label, rows = found[int(what)]
+    items_menu(link, account, rows, label)
+
+
+def items_menu(link, account, items, title: str, number: int = 0) -> None:
+    """Список объявлений с листанием."""
+    shown, more, total = grouping.page(items, number, PAGE)
+    keys = [[(f"{getattr(i, 'price', '?')} ₽ · {grouping.head(i.name)}",
+              PICK_LIVE + str(i.id))] for i in shown]
+    row = []
+
+    if number > 0:
+        row.append(("⬅️ Назад", PICK_PAGE + str(number - 1)))
+
+    if more:
+        row.append(("Ещё ➡️", PICK_PAGE + str(number + 1)))
+
+    if row:
+        keys.append(row)
+
+    keys.append([("✖️ Отмена", "отмена")])
+    where = f" — страница {number + 1} из {total}" if total > 1 else ""
+    answer = link.ask(f"{title}{where}\n\nКакое повторить?", ANSWER_WAIT,
+                      buttons=keys)
     text = str(answer.get("text") or "").strip()
+
+    if text.startswith(PICK_PAGE):
+        items_menu(link, account, items, title, int(text[len(PICK_PAGE):]))
+        return
 
     if not text.startswith(PICK_LIVE):
         link.screen("Отменил.", buttons=MENU)

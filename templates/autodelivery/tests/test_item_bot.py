@@ -1441,5 +1441,104 @@ class CopiesMenuTest(unittest.TestCase):
         self.assertEqual(item_bot.ledger_of().pairs(), 0)
 
 
+class CopyFromMarketTest(unittest.TestCase):
+    """Список для копии: все объявления, разложенные по кучкам."""
+
+    HIT = "🏆 ХИТ КАТЕГОРИИ • 25.000.000₽ • 3 LVL"
+    FAST = "🚀 БЫСТРАЯ ПОКУПКА • 30.000.000₽ • 3 LVL"
+
+    class Market:
+        """Площадка отдаёт по 24 за раз — и это не «все»."""
+
+        def __init__(self, items):
+            self.items = items
+            self.pages = 0
+
+        def get_my_items(self, count=24, after_cursor=None, **kw):
+            self.pages += 1
+            start = int(after_cursor or 0)
+            chunk = self.items[start:start + count]
+            nxt = start + count
+
+            return type("P", (), {
+                "items": chunk,
+                "page_info": type("I", (), {
+                    "has_next_page": nxt < len(self.items),
+                    "end_cursor": str(nxt)})(),
+            })()
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+
+    def market(self, hits=14, fasts=22):
+        names = [self.HIT] * hits + [self.FAST] * fasts
+        items = [type("I", (), {"id": f"i{n}", "name": nm, "price": 100 + n})()
+                 for n, nm in enumerate(names)]
+
+        return self.Market(items)
+
+    def test_every_page_is_read_not_just_the_first(self):
+        """Продавец, не нашедший своего объявления, решит, что бот его не
+        видит."""
+        market = self.market()
+        link = FakeLink(["отмена"])
+        item_bot.copy_live(link, market)
+
+        self.assertGreater(market.pages, 1)
+        self.assertIn("36", link.said[-2] if len(link.said) > 1
+                      else link.said[-1])
+
+    def test_listings_are_split_into_piles(self):
+        link = FakeLink(["отмена"])
+        item_bot.copy_live(link, self.market())
+        names = [n for row in link.asked[0][1] for n, _ in row]
+
+        self.assertTrue(any("ХИТ КАТЕГОРИИ" in n for n in names))
+        self.assertTrue(any("БЫСТРАЯ ПОКУПКА" in n for n in names))
+
+    def test_the_biggest_pile_comes_first(self):
+        link = FakeLink(["отмена"])
+        item_bot.copy_live(link, self.market())
+        first = link.asked[0][1][0][0][0]
+
+        self.assertIn("БЫСТРАЯ ПОКУПКА", first)
+        self.assertIn("22", first)
+
+    def test_a_pile_is_shown_page_by_page(self):
+        link = FakeLink([item_bot.PICK_GROUP + "0", "отмена"])
+        item_bot.copy_live(link, self.market())
+
+        self.assertIn("страница 1 из 2", link.said[-2])
+
+    def test_the_next_page_shows_the_rest(self):
+        link = FakeLink([item_bot.PICK_GROUP + "0",
+                         item_bot.PICK_PAGE + "1", "отмена"])
+        item_bot.copy_live(link, self.market())
+
+        self.assertIn("страница 2 из 2", link.said[-2])
+
+    def test_a_word_finds_the_listing(self):
+        link = FakeLink([item_bot.PICK_GROUP + "find", "хит", "отмена"])
+        item_bot.copy_live(link, self.market())
+
+        self.assertIn("«хит»", link.said[-2])
+
+    def test_one_kind_of_listing_needs_no_piles(self):
+        """Делить нечего — сразу список, лишний экран только мешает."""
+        link = FakeLink(["отмена"])
+        item_bot.copy_live(link, self.market(hits=3, fasts=0))
+
+        self.assertIn("Какое повторить?", link.said[-2])
+
+    def test_no_listings_at_all_is_explained(self):
+        link = FakeLink([])
+        item_bot.copy_live(link, self.Market([]))
+
+        self.assertIn("не нашлось", link.said[-1])
+
+
 if __name__ == "__main__":
     unittest.main()
