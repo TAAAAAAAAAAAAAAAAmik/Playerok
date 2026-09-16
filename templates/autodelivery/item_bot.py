@@ -1769,13 +1769,54 @@ PICK_GROUP = "grp:"
 PICK_PAGE = "pge:"
 
 
-def my_items(link, account) -> list:
-    """ВСЕ выставленные объявления, а не первую страницу.
+# Пауза между страницами списка товаров. Площадка считает частые запросы
+# и отвечает «слишком много попыток» — а мы читаем страницы подряд.
+PAGE_PAUSE = 0.8
+
+# Сколько держим прочитанный список. Продавец листает страницы и ходит
+# назад: перечитывать витрину на каждое нажатие значит выбирать лимит
+# площадки собственными руками.
+ITEMS_TTL = 120.0
+
+_ITEMS: dict = {"at": 0.0, "rows": None, "whole": True}
+
+# По этим словам узнаём просьбу площадки сбавить темп. Это не поломка:
+# то, что уже прочитано, остаётся годным.
+TOO_OFTEN = ("слишком много", "too many", "rate limit", "429")
+
+
+def forget_items() -> None:
+    """Забыть прочитанную витрину.
+
+    Зовётся при смене кабинета: объявления у кабинетов разные, и показать
+    чужие — значит дать скопировать не тот товар не в тот магазин.
+    """
+    _ITEMS.update({"at": 0.0, "rows": None, "whole": True})
+
+
+def is_too_often(e) -> bool:
+    text = str(e).lower()
+
+    return any(word in text for word in TOO_OFTEN)
+
+
+def my_items(account, fresh: bool = False) -> tuple:
+    """Выставленные объявления → (список, всё ли прочитано).
 
     Площадка отдаёт по двадцать четыре за запрос, и первая страница — это
-    не «все»: на заказах мы на этом уже обжигались. Продавец, не нашедший
-    своего объявления в списке, решит, что бот его не видит.
+    не «все»: продавец, не нашедший своего объявления, решит, что бот его
+    не видит.
+
+    Но и читать двадцать страниц подряд нельзя — площадка отвечает
+    «слишком много попыток». Поэтому между страницами пауза, а если
+    попросили сбавить темп посреди чтения, отдаём прочитанное и честно
+    говорим, что список неполный. Половина списка полезнее отказа: нужное
+    объявление скорее всего в ней.
     """
+    if not fresh and _ITEMS["rows"] is not None \
+            and time.time() - _ITEMS["at"] < ITEMS_TTL:
+        return list(_ITEMS["rows"]), _ITEMS["whole"]
+
     try:
         from playerokapi.enums import ItemStatuses
         where = {"statuses": [ItemStatuses.APPROVED]}
@@ -1784,9 +1825,22 @@ def my_items(link, account) -> list:
 
     out: list = []
     cursor = None
+    whole = True
 
-    for _ in range(MAX_PAGES):
-        page = account.get_my_items(count=24, after_cursor=cursor, **where)
+    for number in range(MAX_PAGES):
+        if number:
+            time.sleep(PAGE_PAUSE)
+
+        try:
+            page = account.get_my_items(count=24, after_cursor=cursor, **where)
+        except Exception as e:                                # noqa: BLE001
+            if out and is_too_often(e):
+                # Уже что-то прочитали — этим и обойдёмся.
+                whole = False
+                break
+
+            raise
+
         out.extend(list(getattr(page, "items", None) or []))
         info = getattr(page, "page_info", None)
 
@@ -1797,8 +1851,13 @@ def my_items(link, account) -> list:
 
         if not cursor:
             break
+    else:
+        # Страницы кончились раньше, чем наше терпение.
+        whole = False
 
-    return out
+    _ITEMS.update({"at": time.time(), "rows": list(out), "whole": whole})
+
+    return out, whole
 
 
 def copy_live(link, account) -> None:
@@ -1811,11 +1870,15 @@ def copy_live(link, account) -> None:
     link.screen("Читаю ваши объявления…")
 
     try:
-        items = my_items(link, account)
+        items, whole = my_items(account)
     except Exception as e:                                    # noqa: BLE001
         if is_auth_error(e):
             link.screen(f"Площадка не приняла вход.\n\n{COOKIES_ADVICE}",
                         buttons=MENU)
+        elif is_too_often(e):
+            link.screen("Площадка просит сбавить темп: «слишком много "
+                        "попыток».\n\nЭто не поломка — подождите минуту и "
+                        "нажмите ещё раз.", buttons=MENU)
         else:
             link.screen(f"Объявления прочитать не вышло: {e}", buttons=MENU)
 
@@ -1827,10 +1890,10 @@ def copy_live(link, account) -> None:
                     buttons=MENU)
         return
 
-    groups_menu(link, account, items)
+    groups_menu(link, account, items, whole)
 
 
-def groups_menu(link, account, items) -> None:
+def groups_menu(link, account, items, whole: bool = True) -> None:
     """Кучки объявлений: по началу названия.
 
     Полсотни строк подряд, где половина выглядит одинаково, выбрать не
@@ -1842,7 +1905,7 @@ def groups_menu(link, account, items) -> None:
 
     if len(found) < 2:
         # Делить нечего — сразу список.
-        items_menu(link, account, items, "Все объявления")
+        items_menu(link, account, items, "Все объявления", whole=whole)
         return
 
     keys = []
@@ -1855,9 +1918,12 @@ def groups_menu(link, account, items) -> None:
                  ("📄 Все подряд", PICK_GROUP + "all")])
     keys.append([("✖️ Назад", "отмена")])
 
-    answer = link.ask(
-        f"Ваших объявлений: {len(items)}. Разложил по началу названия — "
-        f"так проще найти нужное.", ANSWER_WAIT, buttons=keys)
+    said = (f"Ваших объявлений: {len(items)}." if whole
+            else f"Прочитал {len(items)} — площадка попросила сбавить темп, "
+                 f"так что список неполный. Через минуту нажмите ещё раз, "
+                 f"если нужного тут нет.")
+    answer = link.ask(f"{said} Разложил по началу названия — так проще "
+                      f"найти нужное.", ANSWER_WAIT, buttons=keys)
     text = str(answer.get("text") or "")
 
     if not text.startswith(PICK_GROUP):
@@ -1867,7 +1933,7 @@ def groups_menu(link, account, items) -> None:
     what = text[len(PICK_GROUP):]
 
     if what == "all":
-        items_menu(link, account, items, "Все объявления")
+        items_menu(link, account, items, "Все объявления", whole=whole)
         return
 
     if what == "find":
@@ -1876,27 +1942,31 @@ def groups_menu(link, account, items) -> None:
         word = str(answer.get("text") or "")
 
         if wizard.cancelled(word) or not word.strip():
-            groups_menu(link, account, items)
+            groups_menu(link, account, items, whole)
             return
 
         chosen = grouping.matching(items, word)
 
         if not chosen:
-            link.screen(f"По слову «{word}» ничего не нашлось.", buttons=MENU)
+            link.screen(f"По слову «{word}» ничего не нашлось."
+                        + ("" if whole else "\n\nСписок неполный: площадка "
+                           "просила сбавить темп. Попробуйте через минуту."),
+                        buttons=MENU)
             return
 
-        items_menu(link, account, chosen, f"Со словом «{word}»")
+        items_menu(link, account, chosen, f"Со словом «{word}»", whole=whole)
         return
 
     if not what.isdigit() or int(what) >= len(found):
-        groups_menu(link, account, items)
+        groups_menu(link, account, items, whole)
         return
 
     label, rows = found[int(what)]
-    items_menu(link, account, rows, label)
+    items_menu(link, account, rows, label, whole=whole)
 
 
-def items_menu(link, account, items, title: str, number: int = 0) -> None:
+def items_menu(link, account, items, title: str, number: int = 0,
+               whole: bool = True) -> None:
     """Список объявлений с листанием."""
     shown, more, total = grouping.page(items, number, PAGE)
     keys = [[(f"{getattr(i, 'price', '?')} ₽ · {grouping.head(i.name)}",
@@ -1914,12 +1984,19 @@ def items_menu(link, account, items, title: str, number: int = 0) -> None:
 
     keys.append([("✖️ Отмена", "отмена")])
     where = f" — страница {number + 1} из {total}" if total > 1 else ""
-    answer = link.ask(f"{title}{where}\n\nКакое повторить?", ANSWER_WAIT,
-                      buttons=keys)
+    # Про неполный список говорим и здесь: кучка может быть одна, и тогда
+    # экрана с кучками продавец не увидит вовсе. Молча показать половину —
+    # значит дать решить, что остального нет.
+    warn = ("" if whole else
+            "\n\n⚠️ Список неполный: площадка попросила сбавить темп. "
+            "Через минуту нажмите ещё раз, если нужного тут нет.")
+    answer = link.ask(f"{title}{where}\n\nКакое повторить?{warn}",
+                      ANSWER_WAIT, buttons=keys)
     text = str(answer.get("text") or "").strip()
 
     if text.startswith(PICK_PAGE):
-        items_menu(link, account, items, title, int(text[len(PICK_PAGE):]))
+        items_menu(link, account, items, title,
+                   int(text[len(PICK_PAGE):]), whole)
         return
 
     if not text.startswith(PICK_LIVE):
@@ -2482,6 +2559,7 @@ def switch_account(link, store, account_id: str, account):
         return offer_new_cookies(link, store, saved, account, e)
 
     store.set_current(account_id)
+    forget_items()
     link.screen(f"Переключился: {saved.name}", buttons=MENU)
 
     return fresh

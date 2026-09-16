@@ -1450,12 +1450,19 @@ class CopyFromMarketTest(unittest.TestCase):
     class Market:
         """Площадка отдаёт по 24 за раз — и это не «все»."""
 
-        def __init__(self, items):
+        def __init__(self, items, limit_after=0):
             self.items = items
             self.pages = 0
+            # С какой страницы площадка просит сбавить темп.
+            self.limit_after = limit_after
 
         def get_my_items(self, count=24, after_cursor=None, **kw):
             self.pages += 1
+
+            if self.limit_after and self.pages > self.limit_after:
+                raise RuntimeError("Слишком много попыток, пожалуйста, "
+                                   "попробуйте повторить запрос позже")
+
             start = int(after_cursor or 0)
             chunk = self.items[start:start + count]
             nxt = start + count
@@ -1472,6 +1479,14 @@ class CopyFromMarketTest(unittest.TestCase):
         item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
         item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
         item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        # Витрина помнится между нажатиями — но не между проверками.
+        item_bot.forget_items()
+        self._pause = item_bot.PAGE_PAUSE
+        item_bot.PAGE_PAUSE = 0
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.forget_items()
 
     def market(self, hits=14, fasts=22):
         names = [self.HIT] * hits + [self.FAST] * fasts
@@ -1618,6 +1633,98 @@ class RegionButtonsTest(unittest.TestCase):
 
         self.assertIn("HK", item_bot.regions_of(conf,
                                                 item_bot.card_by_slug("apple")))
+
+
+class TooOftenTest(unittest.TestCase):
+    """Площадка считает частые запросы и просит сбавить темп.
+
+    Читать двадцать страниц подряд — верный способ нарваться: так и
+    вышло, и вместо списка продавец увидел «слишком много попыток».
+    """
+
+    Market = CopyFromMarketTest.Market
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.forget_items()
+        self._pause = item_bot.PAGE_PAUSE
+        item_bot.PAGE_PAUSE = 0
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.forget_items()
+
+    def market(self, count=60, limit_after=0):
+        items = [type("I", (), {"id": f"i{n}", "name": f"Товар {n}",
+                                "price": 100})()
+                 for n in range(count)]
+
+        return self.Market(items, limit_after=limit_after)
+
+    def test_what_was_read_is_kept_when_the_limit_hits(self):
+        """Половина списка полезнее отказа: нужное объявление скорее
+        всего в ней."""
+        items, whole = item_bot.my_items(self.market(limit_after=2))
+
+        self.assertEqual(len(items), 48)
+        self.assertFalse(whole)
+
+    def test_an_incomplete_list_is_said_to_be_incomplete(self):
+        """Молча показать половину — значит дать решить, что остального
+        нет вовсе."""
+        link = FakeLink(["отмена"])
+        item_bot.copy_live(link, self.market(limit_after=2))
+
+        self.assertTrue(any("неполный" in q for q, _ in link.asked))
+
+    def test_the_warning_reaches_a_single_pile_too(self):
+        """Кучка может быть одна — тогда экрана с кучками продавец не
+        увидит вовсе, и предупреждение до него не дойдёт."""
+        items = [type("I", (), {"id": f"i{n}", "name": "🚀 БЫСТРАЯ ПОКУПКА",
+                                "price": 100})() for n in range(60)]
+        link = FakeLink(["отмена"])
+        item_bot.copy_live(link, self.Market(items, limit_after=2))
+
+        self.assertIn("неполный", link.asked[-1][0])
+
+    def test_a_limit_on_the_very_first_page_is_explained(self):
+        """Тут прочитанного нет вовсе — и это не поломка, а просьба
+        подождать."""
+        link = FakeLink([])
+        item_bot.copy_live(link, self.market(limit_after=0.5))
+
+        self.assertIn("сбавить темп", link.said[-1])
+
+    def test_a_full_read_is_not_called_incomplete(self):
+        link = FakeLink(["отмена"])
+        item_bot.copy_live(link, self.market())
+
+        self.assertNotIn("неполный", link.asked[0][0])
+
+    def test_the_shop_is_read_once_not_on_every_press(self):
+        """Перечитывать витрину на каждое нажатие значит выбирать лимит
+        площадки собственными руками."""
+        market = self.market()
+        item_bot.copy_live(FakeLink(["отмена"]), market)
+        was = market.pages
+        item_bot.copy_live(FakeLink(["отмена"]), market)
+
+        self.assertEqual(market.pages, was)
+
+    def test_another_account_does_not_see_the_previous_shop(self):
+        """Показать чужие объявления — значит дать скопировать не тот
+        товар не в тот магазин."""
+        first = self.market(count=5)
+        item_bot.copy_live(FakeLink(["отмена"]), first)
+
+        item_bot.forget_items()
+        second = self.market(count=30)
+        item_bot.copy_live(FakeLink(["отмена"]), second)
+
+        self.assertGreater(second.pages, 0)
 
 
 if __name__ == "__main__":
