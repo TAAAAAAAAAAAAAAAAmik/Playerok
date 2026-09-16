@@ -255,5 +255,73 @@ class EdgeTest(unittest.TestCase):
                          ["777"])
 
 
+class LiveShopTest(unittest.TestCase):
+    """Считаем и то, что продавец выставил без бота.
+
+    Свой счёт знает только созданное ботом. Продавец мог выставить
+    десятки таких же руками или до бота — площадке всё равно, чьей рукой
+    они сделаны.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.led = Ledger(JsonStore(os.path.join(self.root, "s.json")))
+
+    def shop(self, count, nominal=1000, price=500):
+        from bump import key
+
+        return {key(nominal, price): count}
+
+    def test_the_shop_alone_is_enough_to_raise_the_price(self):
+        """Восемьдесят четыре одинаковых уже висят, а бот не создавал ни
+        одного — раньше он спокойно добавил бы ещё три."""
+        self.assertEqual(self.led.price_for(1000, 500, self.shop(84)),
+                         (500 + STEP, STEP))
+
+    def test_a_small_shop_does_not_raise_anything(self):
+        self.assertEqual(self.led.price_for(1000, 500, self.shop(1)),
+                         (500, 0))
+
+    def test_the_two_counts_are_not_added_up(self):
+        """Объявление, созданное ботом и выставленное, есть и там и там.
+        Сложив, мы погнали бы цену вверх вдвое быстрее задуманного."""
+        for _ in range(3):
+            self.led.remember(1000, 500)
+
+        self.assertEqual(self.led.count(1000, 500, self.shop(3)), 3)
+
+    def test_the_bigger_of_the_two_wins(self):
+        self.led.remember(1000, 500)
+
+        self.assertEqual(self.led.count(1000, 500, self.shop(9)), 9)
+        self.assertEqual(self.led.count(1000, 500, self.shop(0)), 1)
+
+    def test_drafts_still_count_through_our_own_ledger(self):
+        """Черновик ещё не на витрине, но скоро там будет."""
+        for _ in range(LIMIT):
+            self.led.remember(1000, 500)
+
+        self.assertEqual(self.led.price_for(1000, 500, {}),
+                         (500 + STEP, STEP))
+
+    def test_another_nominal_in_the_shop_does_not_interfere(self):
+        self.assertEqual(self.led.price_for(400, 500, self.shop(84)),
+                         (500, 0))
+
+    def test_the_raised_price_is_checked_against_the_shop_too(self):
+        """Иначе цена поднялась бы туда, где таких же ещё больше."""
+        from bump import key
+
+        live = {key(1000, 500): 84, key(1000, 501): 84}
+
+        self.assertEqual(self.led.price_for(1000, 500, live),
+                         (502, 2))
+
+    def test_no_shop_data_works_as_before(self):
+        """Витрина не прочиталась — считаем по своему счёту. Хуже, чем по
+        витрине, но лучше, чем не создать товар вовсе."""
+        self.assertEqual(self.led.price_for(1000, 500, None), (500, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,9 +48,13 @@ def _between(value, default: int, low: int, high: int) -> int:
     return max(low, min(high, number))
 
 
-def _key(nominal, price) -> str:
+def key(nominal, price) -> str:
     """Ключ счёта: номинал и цена. Разные номиналы не мешают друг другу."""
     return f"{shown_number(nominal)}@{int(price)}"
+
+
+# Прежнее имя. Оставлено, чтобы не переписывать зовущих ради буквы.
+_key = key
 
 
 class Ledger:
@@ -128,8 +132,25 @@ class Ledger:
         """Сколько пар «номинал + цена» под счётом. Для экрана настроек."""
         return len(self._counts())
 
-    def count(self, nominal, price) -> int:
-        return int(self._counts().get(_key(nominal, price)) or 0)
+    def count(self, nominal, price, live=None) -> int:
+        """Сколько таких объявлений уже есть.
+
+        `live` — сколько их СЕЙЧАС на витрине: {ключ: число}. Свой счёт
+        знает только то, что бот создал сам, а продавец мог выставить
+        десятки таких же руками или до бота — и площадке всё равно, чьей
+        рукой они сделаны.
+
+        Берём большее из двух, а не сумму. Объявление, созданное ботом и
+        выставленное, есть и там и там: сложив, мы посчитали бы его
+        дважды и погнали цену вверх вдвое быстрее задуманного.
+        """
+        mine = int(self._counts().get(key(nominal, price)) or 0)
+        theirs = 0
+
+        if live:
+            theirs = int(live.get(key(nominal, price)) or 0)
+
+        return max(mine, theirs)
 
     def remember(self, nominal, price) -> None:
         """Записать выставленное бесплатное объявление."""
@@ -155,12 +176,14 @@ class Ledger:
 
         self.store.save()
 
-    def price_for(self, nominal, price) -> tuple:
+    def price_for(self, nominal, price, live=None) -> tuple:
         """Какую цену ставить → (цена, на сколько подняли).
 
         Поднимаем до первой цены, по которой объявлений меньше предела.
         Ноль во втором значении значит «ничего не меняли» — так вызывающий
         отличает обычный случай от того, о котором надо сказать продавцу.
+
+        `live` — что сейчас на витрине, см. `count`.
         """
         price = int(price)
         start = price
@@ -170,7 +193,7 @@ class Ledger:
             return price, 0
 
         for _ in range(MAX_STEPS):
-            if self.count(nominal, price) < rules["limit"]:
+            if self.count(nominal, price, live) < rules["limit"]:
                 return price, price - start
 
             price += rules["step"]

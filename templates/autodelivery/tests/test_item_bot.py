@@ -1867,5 +1867,112 @@ class ByCategoryTest(unittest.TestCase):
         self.assertIn("ничего не нашлось", link.said[-1])
 
 
+class LiveShopCountTest(unittest.TestCase):
+    """Бот считает и то, что выставлено без него."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.forget_items()
+        self._pause = item_bot.PAGE_PAUSE
+        item_bot.PAGE_PAUSE = 0
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.forget_items()
+
+    def market(self, count=84, price=179, name="1000 Robux"):
+        rows = [type("I", (), {"id": f"i{n}", "name": name, "price": price})()
+                for n in range(count)]
+
+        class Market(FakeAccount):
+            asked = []
+
+            def get_my_items(self, count=24, after_cursor=None, **kw):
+                Market.asked.append(kw.get("category_id")
+                                    or kw.get("game_id") or "всё")
+                start = int(after_cursor or 0)
+
+                return type("P", (), {
+                    "items": rows[start:start + count],
+                    "page_info": type("I", (), {
+                        "has_next_page": start + count < len(rows),
+                        "end_cursor": str(start + count)})(),
+                })()
+
+        Market.asked = []
+
+        return Market()
+
+    def template(self, price=179, name="1000 Robux"):
+        return item_bot.templates_of().save(
+            name, price, "GL", [PNG], description="Коды",
+            game={"id": "g1", "name": "Roblox"},
+            category={"id": "c1", "name": "Робуксы"},
+            obtaining=OBTAINING)
+
+    def test_a_crowded_shop_raises_the_price_at_once(self):
+        """Восемьдесят четыре одинаковых уже висят, а бот не создавал ни
+        одного — раньше он спокойно добавил бы ещё три."""
+        market = self.market(84)
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + self.template(),
+                      item_bot.PICK_ACT + "make"]), market)
+
+        self.assertEqual(market.created[0]["price"], 180)
+
+    def test_an_empty_shop_keeps_the_price(self):
+        market = self.market(0)
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + self.template(),
+                      item_bot.PICK_ACT + "make"]), market)
+
+        self.assertEqual(market.created[0]["price"], 179)
+
+    def test_only_the_same_category_is_read(self):
+        """Витрина бывает на пять сотен товаров: читать её целиком ради
+        одного нажатия значит заставить продавца ждать, да ещё и нарваться
+        на «слишком много попыток»."""
+        market = self.market(5)
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + self.template(),
+                      item_bot.PICK_ACT + "make"]), market)
+
+        self.assertEqual(set(type(market).asked), {"c1"})
+
+    def test_a_different_nominal_on_the_shop_does_not_interfere(self):
+        market = self.market(84, name="400 Robux")
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + self.template(name="1000 Robux"),
+                      item_bot.PICK_ACT + "make"]), market)
+
+        self.assertEqual(market.created[0]["price"], 179)
+
+    def test_the_seller_is_told_how_many_there_already_are(self):
+        market = self.market(84)
+        link = FakeLink([item_bot.PICK + self.template(),
+                         item_bot.PICK_ACT + "make"])
+        item_bot.from_template(link, market)
+        said = next(t for t in link.said if "Повторяю" in t)
+
+        self.assertIn("уже 84", said)
+
+    def test_an_unreadable_shop_does_not_block_creating(self):
+        """Считать по своему счёту хуже, чем по витрине, но лучше, чем не
+        создать товар вовсе."""
+        class Broken(FakeAccount):
+            def get_my_items(self, **kw):
+                raise RuntimeError("площадка не ответила")
+
+        market = Broken()
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + self.template(),
+                      item_bot.PICK_ACT + "make"]), market)
+
+        self.assertEqual(market.created[0]["price"], 179)
+
+
 if __name__ == "__main__":
     unittest.main()

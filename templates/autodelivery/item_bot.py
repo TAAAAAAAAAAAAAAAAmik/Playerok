@@ -1175,12 +1175,15 @@ def make_from_template(link, account, store, template_id: str) -> None:
     if ledger.rules()["vary"]:
         vary.apply(draft.fields, ROTATION)
 
+    live = live_counts(account, template.game, template.category)
+
     # Четвёртая копия по той же цене — уже не ассортимент. Поднимаем на
     # столько, сколько задано, и говорим об этом: молча изменить цену
     # продавца нельзя.
-    draft.price, up = ledger.price_for(draft.nominal, draft.price)
-    note = (f"\n\nЦена поднята на {up} ₽: бесплатных по {template.price} ₽ "
-            f"уже {ledger.rules()['limit']}." if up else "")
+    draft.price, up = ledger.price_for(draft.nominal, draft.price, live)
+    note = (f"\n\nЦена поднята на {up} ₽: таких по {template.price} ₽ уже "
+            f"{ledger.count(draft.nominal, template.price, live)}."
+            if up else "")
 
     link.screen(f"Повторяю:\n\n{draft.summary()}{note}\n\nСоздаю черновик…")
 
@@ -1322,7 +1325,8 @@ def make_series(link, account, store, template_id: str) -> None:
                     + "\n".join(bad + refused), buttons=MENU)
         return
 
-    raised = apply_bump(jobs)
+    raised = apply_bump(jobs, live_counts(account, template.game,
+                                         template.category))
     count = plural(len(jobs), "объявление", "объявления", "объявлений")
     lines = [f"Создам {count}:", ""]
     lines += [f"• {j['name']} — {j['price']} ₽"
@@ -1509,7 +1513,7 @@ def _series_text(link, answer):
     return text
 
 
-def apply_bump(jobs) -> int:
+def apply_bump(jobs, live=None) -> int:
     """Поднять цену там, где одинаковых объявлений уже предел. → сколько.
 
     Считаем ВСЮ партию сразу, а не по одному при создании: продавец должен
@@ -1520,7 +1524,7 @@ def apply_bump(jobs) -> int:
     raised = 0
 
     for job in jobs:
-        price, up = ledger.price_for(job["nominal"], job["price"])
+        price, up = ledger.price_for(job["nominal"], job["price"], live)
         job["price"], job["bump"] = price, up
 
         if up:
@@ -1628,6 +1632,48 @@ def is_auth_error_text(why: str) -> bool:
     return is_auth_error(Exception(str(why)))
 
 
+def live_counts(account, game=None, category=None) -> dict:
+    """Сколько одинаковых объявлений СЕЙЧАС на витрине → {ключ: число}.
+
+    Свой счёт знает только то, что бот создал сам. А продавец мог
+    выставить десятки таких же руками или до бота — площадке всё равно,
+    чьей рукой они сделаны, и считать надо всё.
+
+    Смотрим ВНУТРИ той же категории, а не по всей витрине. Одинаковые
+    объявления по определению лежат в одной категории, зато витрина
+    бывает на пять сотен товаров: читать её целиком ради одного нажатия
+    значит заставить продавца ждать, да ещё и нарваться на «слишком много
+    попыток».
+
+    Не прочиталось — возвращаем пусто. Считать по своему счёту хуже, чем
+    по витрине, но лучше, чем не создать товар вовсе.
+    """
+    if account is None:
+        return {}
+
+    try:
+        items, _ = my_items(
+            account,
+            game_id=str((game or {}).get("id") or ""),
+            category_id=str((category or {}).get("id") or ""))
+    except Exception:                                         # noqa: BLE001
+        return {}
+
+    found: dict = {}
+
+    for item in items:
+        value = nominal_from_title(str(getattr(item, "name", "") or ""))
+        price = int(getattr(item, "price", 0) or 0)
+
+        if not value or not price:
+            continue
+
+        where = bump.key(value, price)
+        found[where] = found.get(where, 0) + 1
+
+    return found
+
+
 def ledger_of() -> Ledger:
     """Счёт бесплатных объявлений текущего кабинета.
 
@@ -1669,7 +1715,12 @@ def copies_menu(link) -> None:
         lines += ["", f"Сейчас так: {many} одного номинала по одной "
                       f"цене, следующее — на {step} ₽ дороже."]
 
-    lines += ["", f"Под счётом сейчас пар «номинал + цена»: {counted}"]
+    lines += ["",
+              "Считаются НЕ только созданные ботом: перед каждой копией он "
+              "смотрит витрину и берёт большее из двух. Площадке всё равно, "
+              "чьей рукой сделано объявление.",
+              "",
+              f"Свой счёт: пар «номинал + цена» — {counted}"]
 
     keys = [[(("⛔ Выключить подъём" if rules["enabled"]
                else "✅ Включить подъём"), PICK_COPY + "on")],
@@ -1740,10 +1791,10 @@ def confirm_reset(link, ledger) -> None:
         return
 
     answer = link.ask(
-        f"Забыть счёт по {plural(counted, 'паре', 'парам', 'парам')} "
+        f"Забыть свой счёт по {plural(counted, 'паре', 'парам', 'парам')} "
         f"«номинал + цена»?\n\n"
-        f"Нужно, когда объявления сняты руками: счёт про это не знает и "
-        f"продолжит поднимать цену на пустом месте.\n\n"
+        f"Витрину бот считает заново каждый раз, а свой счёт нужен для "
+        f"черновиков: они ещё не на витрине, но скоро там будут.\n\n"
         f"Обратно счёт не собрать — бот не знает, что висит на витрине.",
         ANSWER_WAIT,
         buttons=[[("🧹 Да, забыть", "да")], CANCEL])
@@ -2192,8 +2243,9 @@ def make_copy(link, account, item_id: str) -> None:
     if ledger.rules()["vary"]:
         vary.apply(draft.fields, ROTATION)
 
+    live = live_counts(account, plan["game"], plan["category"])
     draft.price, up = ledger.price_for(draft.nominal or draft.price,
-                                       draft.price)
+                                       draft.price, live)
     note = (f"\n\nЦена поднята на {up} ₽: столько же бесплатных по прежней "
             f"цене уже висит." if up else "")
 
