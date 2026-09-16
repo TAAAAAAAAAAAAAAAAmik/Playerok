@@ -173,5 +173,87 @@ class RulesTest(unittest.TestCase):
         self.assertEqual(self.led.pairs(), 2)
 
 
+class EdgeTest(unittest.TestCase):
+    """Края настройки: единица, потолок, огромные номиналы."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.path = os.path.join(self.root, "s.json")
+        self.led = Ledger(JsonStore(self.path))
+
+    def test_a_limit_of_one_raises_from_the_second(self):
+        self.led.set_limit(1)
+        self.led.remember(1000, 500)
+
+        self.assertEqual(self.led.price_for(1000, 500), (501, 1))
+
+    def test_the_limit_cannot_be_set_below_one(self):
+        """Ноль означал бы, что цена растёт у каждого объявления."""
+        self.led.set_limit(-5)
+
+        self.assertGreaterEqual(self.led.rules()["limit"], 1)
+
+    def test_a_huge_limit_is_capped(self):
+        self.led.set_limit(10 ** 9)
+
+        self.assertLessEqual(self.led.rules()["limit"], 50)
+
+    def test_a_huge_step_is_capped(self):
+        """Иначе одно нажатие увело бы цену в тысячи раз от задуманной."""
+        self.led.set_step(10 ** 9)
+
+        self.assertLessEqual(self.led.rules()["step"], 1000)
+
+    def test_a_fractional_setting_is_taken_as_a_whole_number(self):
+        self.led.set_limit(3.7)
+
+        self.assertEqual(self.led.rules()["limit"], 3)
+
+    def test_a_million_nominal_gets_its_own_count(self):
+        """Ключ счёта пишется числом целиком: «1e+06» и «1000000» — это
+        был бы один и тот же товар под двумя разными счетами."""
+        for _ in range(LIMIT):
+            self.led.remember(1000000, 500)
+
+        self.assertEqual(self.led.count(1000000, 500), LIMIT)
+        self.assertEqual(self.led.count(1, 500), 0)
+        self.assertEqual(self.led.price_for(1000000, 500), (500 + STEP, STEP))
+
+    def test_prices_are_counted_as_whole_roubles(self):
+        self.led.remember(1000, 500)
+
+        self.assertEqual(self.led.count(1000, 500.0), 1)
+
+    def test_settings_and_counts_live_side_by_side(self):
+        """Сброс счёта не должен уносить настройки, а правка настроек —
+        счёт."""
+        self.led.set_limit(7)
+
+        for _ in range(3):
+            self.led.remember(1000, 500)
+
+        self.led.set_step(5)
+
+        self.assertEqual(self.led.count(1000, 500), 3)
+
+        self.led.reset()
+
+        self.assertEqual(self.led.rules()["limit"], 7)
+        self.assertEqual(self.led.rules()["step"], 5)
+
+    def test_the_count_does_not_collide_with_the_delivery_journal(self):
+        """Счёт живёт в том же файле, что журнал выдач. Перепутать их —
+        значит потерять номера выданных заказов."""
+        store = JsonStore(self.path)
+        store.conf("листинги")["delivered"] = ["777"]
+        store.save()
+
+        led = Ledger(JsonStore(self.path))
+        led.remember(1000, 500)
+
+        self.assertEqual(JsonStore(self.path).conf("листинги")["delivered"],
+                         ["777"])
+
+
 if __name__ == "__main__":
     unittest.main()

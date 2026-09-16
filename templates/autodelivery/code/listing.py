@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from catalog import shown_number
+
 from typing import Any
 
 # Сколько запрашивать подтверждение словом, а не номером. Любая платная
@@ -51,7 +53,7 @@ def describe(status: Any) -> str:
     name = str(getattr(status, "name", "") or "без названия")
     days = getattr(status, "period", None)
     price = price_of(status)
-    cost = "бесплатно" if price <= 0 else f"{price:g} ₽"
+    cost = "бесплатно" if price <= 0 else f"{shown_number(price)} ₽"
     period = f", {days} дн." if days else ""
 
     return f"{name} — {cost}{period}"

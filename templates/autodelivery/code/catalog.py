@@ -132,7 +132,7 @@ def _shown_nominal(card: Card | None, nominal) -> str:
     if nominal in (None, ""):
         return ""
 
-    value = f"{float(nominal):g}" if isinstance(nominal, (int, float)) \
+    value = shown_number(nominal) if isinstance(nominal, (int, float)) \
         else str(nominal)
     measure = card.measure if card else ""
 
@@ -164,6 +164,29 @@ def pick_card(cards: list[Card], title: str, conf_of) -> Card | None:
 # ---------------------------------------------------------------------------
 
 _NUM = re.compile(r"(\d[\d\s  ]*(?:[.,]\d+)?)")
+
+
+def shown_number(value) -> str:
+    """Число целиком: «1000000», а не «1e+06».
+
+    Обычное `%g` с миллиона переходит на экспоненту, и это не косметика.
+    Такая запись уходит в название товара и в строку «Номинал: …» в
+    описании — а оттуда выдача читает её обратно. «1e+06» разбирается как
+    ЕДИНИЦА: бот купил бы номинал 1 вместо миллиона, на настоящие деньги.
+
+    Поэтому формат один на всё: и на экраны, и на объявления, и на ключи.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+
+    if number == int(number):
+        return str(int(number))
+
+    # Дробные номиналы встречаются у денежных карт: 9.99 USD. Хвост из
+    # нулей убираем, но само число не округляем до целого.
+    return f"{number:.6f}".rstrip("0").rstrip(".")
 
 
 def nominal_from_title(title: str) -> float | None:
@@ -234,8 +257,9 @@ def nominal_for(title: str, description: str = "") -> tuple:
     if said is not None and guessed is not None \
             and abs(said - guessed) > 1e-9:
         return None, (
-            f"в названии товара номинал {guessed:g}, а в описании "
-            f"{said:g} — какой покупать, непонятно. Исправьте одно из двух: "
+            f"в названии товара номинал {shown_number(guessed)}, а в описании "
+            f"{shown_number(said)} — какой покупать, непонятно. Исправьте одно "
+            f"из двух: "
             f"покупатель платил за то, что прочитал в названии")
 
     value = said if said is not None else guessed
@@ -357,13 +381,14 @@ def match_denomination(rows: list[Denomination], region: str,
             near = ", ".join(str(int(r.value)) for r in sorted(
                 rows, key=lambda r: r.value)[:8])
             return None, (
-                f"номинала {want:g} у поставщика нет"
+                f"номинала {shown_number(want)} у поставщика нет"
                 + (f". Есть: {near}" if near else "")
                 + ". Подбирать похожий бот не станет — это чужие деньги")
 
         got = ", ".join(sorted({r.region for r in exact if r.region}))
 
-        return None, (f"номинал {want:g} у поставщика есть, но не в регионе "
+        return None, (f"номинал {shown_number(want)} у поставщика есть, но не в "
+                      f"регионе "
                       f"{want_region or '—'}"
                       + (f" (есть: {got})" if got else ""))
 
@@ -372,7 +397,8 @@ def match_denomination(rows: list[Denomination], region: str,
         # {want_region}, отсюда не видно. Купить дешёвую значит наугад
         # продать покупателю код, который он не активирует.
         return None, (
-            f"у поставщика несколько услуг с номиналом {want:g}, и ни одна "
+            f"у поставщика несколько услуг с номиналом {shown_number(want)}, "
+            f"и ни одна "
             f"не называет регион — какая из них {want_region}, "
             f"непонятно. Бот угадывать не станет: привяжите услугу вручную "
             f"в настройках карты, «Услуги вручную»")
@@ -380,7 +406,7 @@ def match_denomination(rows: list[Denomination], region: str,
     live = [r for r in same_region if r.in_stock > 0]
 
     if not live:
-        return None, f"номинал {want:g} есть в каталоге, но его нет в наличии"
+        return None, f"номинал {shown_number(want)} есть в каталоге, но его нет в наличии"
 
     # Дешевле — лучше: номинал и регион одни и те же, разница только в
     # закупке.
@@ -482,7 +508,7 @@ def denominations_from(service: dict, service_id: str = "",
             service_id=service_id,
             item_id=item_id,
             value=value,
-            title=title or f"{value:g}",
+            title=title or shown_number(value),
             price=_number(_first(item, PRICE_FIELDS)),
             # Отрицательный остаток встречается: считаем его нулём, иначе
             # такой номинал выглядел бы доступным.

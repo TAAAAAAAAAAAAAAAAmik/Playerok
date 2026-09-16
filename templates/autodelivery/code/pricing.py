@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import math
 
+from catalog import shown_number
+
 
 def sheet(rows) -> str:
     """Список для правки: «номинал = цена», по строке на номинал.
@@ -33,7 +35,7 @@ def sheet(rows) -> str:
             nominal, price = row, None
 
         shown = "" if price in (None, "") else f"{int(round(float(price)))}"
-        lines.append(f"{float(nominal):g} = {shown}".rstrip())
+        lines.append(f"{shown_number(nominal)} = {shown}".rstrip())
 
     return "\n".join(lines)
 

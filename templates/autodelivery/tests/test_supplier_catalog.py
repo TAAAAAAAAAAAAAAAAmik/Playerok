@@ -15,6 +15,7 @@ from catalog import (Card, denominations_for,                   # noqa: E402
                      denominations_from, find_service, items_of,
                      is_card_order, match_denomination, matches_service,
                      nominal_for, nominal_from_description,
+                     shown_number,
                      region_of_service, services_for)
 
 
@@ -461,6 +462,44 @@ class NominalFromDescriptionTest(unittest.TestCase):
 
         self.assertIsNone(got)
         self.assertIn("Номинал", why)
+
+
+class BigNumberTest(unittest.TestCase):
+    """С миллиона обычное %g переходит на экспоненту — и это не косметика.
+
+    «1e+06» уходит в название товара и в строку «Номинал: …» описания, а
+    оттуда выдача читает его обратно. Разбирается оно как ЕДИНИЦА: бот
+    купил бы номинал 1 вместо миллиона, на настоящие деньги.
+    """
+
+    def test_a_million_is_written_out_in_full(self):
+        self.assertEqual(shown_number(1000000), "1000000")
+        self.assertEqual(shown_number(1500000), "1500000")
+        self.assertEqual(shown_number(10000000), "10000000")
+
+    def test_small_numbers_are_unchanged(self):
+        self.assertEqual(shown_number(100), "100")
+        self.assertEqual(shown_number(22500), "22500")
+
+    def test_a_whole_number_has_no_tail(self):
+        """«1000.0» в названии товара выглядит небрежностью."""
+        self.assertEqual(shown_number(1000.0), "1000")
+
+    def test_fractions_survive(self):
+        """У денежных карт номиналы дробные: 9.99 USD."""
+        self.assertEqual(shown_number(9.99), "9.99")
+        self.assertEqual(shown_number(0.5), "0.5")
+
+    def test_nonsense_gives_nothing_not_a_crash(self):
+        self.assertEqual(shown_number("много"), "")
+        self.assertEqual(shown_number(None), "")
+
+    def test_what_we_write_is_what_we_read_back(self):
+        """Круг замкнулся: как написали в описание, так и прочитали."""
+        for value in (100, 1000, 22500, 1000000, 10000000):
+            line = f"Номинал: {shown_number(value)}"
+
+            self.assertEqual(nominal_from_description(line), value, line)
 
 
 if __name__ == "__main__":

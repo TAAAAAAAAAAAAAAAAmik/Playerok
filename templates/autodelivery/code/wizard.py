@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 from catalog import (REGION_ALIASES, nominal_from_title,
-                     normalize_region)
+                     normalize_region, shown_number)
 
 # Сколько шагов и в каком порядке.
 # Выбор игры и категории идёт первым: от категории зависит и способ
@@ -226,7 +226,8 @@ class Draft:
         # Номинал показываем всегда, даже когда его нет: по нему бот
         # покупает у поставщика, и пустое место здесь продавец должен
         # заметить до того, как товар уйдёт на витрину.
-        lines.append(f"Номинал: {self.nominal:g}" if self.nominal
+        lines.append(f"Номинал: {shown_number(self.nominal)}"
+                     if self.nominal
                      else "Номинал: — не понял, автовыдача работать не будет")
         lines.append(f"Регион: {self.region}")
 
@@ -403,7 +404,7 @@ def progress(draft: Draft) -> str:
         lines.append(f"✓ Цена: {draft.price} ₽")
 
     if draft.nominal:
-        lines.append(f"✓ Номинал: {draft.nominal:g}")
+        lines.append(f"✓ Номинал: {shown_number(draft.nominal)}")
 
     if draft.region:
         lines.append(f"✓ Регион: {draft.region}")
@@ -557,6 +558,6 @@ def description_for(draft: Draft) -> str:
     head = [f"Регион кода: {draft.region}"]
 
     if draft.nominal:
-        head.append(f"Номинал: {draft.nominal:g}")
+        head.append(f"Номинал: {shown_number(draft.nominal)}")
 
     return "\n".join(head) + f"\n\n{tail}"

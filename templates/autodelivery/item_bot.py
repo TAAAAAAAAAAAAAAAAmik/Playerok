@@ -76,7 +76,7 @@ from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
 from cards import CARDS, card_by_slug                         # noqa: E402
 from catalog import (card_for_title, denominations_for,       # noqa: E402
-                     nominal_from_title, render)
+                     nominal_from_title, render, shown_number)
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
@@ -624,7 +624,7 @@ def publish_step(link, account, item_id: str, price: int,
             f"Это платно: {listing.describe(chosen)}\n"
             "Сумма спишется с баланса площадки.",
             ANSWER_WAIT,
-            buttons=[[(f"💳 Да, списать {listing.price_of(chosen):g} ₽",
+            buttons=[[(f"💳 Да, списать {shown_number(listing.price_of(chosen))} ₽",
                        listing.CONFIRM_WORD)],
                      [("✖️ Нет, оставить черновиком", "нет")]])
 
@@ -1319,7 +1319,7 @@ def ask_series_rows(link, template, card, old: float):
     незачем. Решает продавец только цену, её одну и вводит.
     """
     head = f"Образец: «{template.name}»"
-    head += f" — номинал {old:g}" if old else ""
+    head += f" — номинал {shown_number(old)}" if old else ""
     head += f", цена {template.price} ₽.\n\n"
     keys = [[("📥 Взять номиналы у поставщика", "взять")],
             [("✍️ Вписать самому", "сам")], CANCEL]

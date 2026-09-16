@@ -245,7 +245,7 @@ def listings_check(account) -> None:
     try:
         from cards import CARDS
         from catalog import (is_card_order, nominal_for,
-                             region_from_description)
+                             region_from_description, shown_number)
     except ImportError as e:
         say(WARN, f"проверить не вышло: {e}")
         return
@@ -300,7 +300,7 @@ def listings_check(account) -> None:
                 "запасной: бот → «⚙️ Автовыдача» → карта → «⚙️ Настройки» "
                 "→ «🌐 Регион»")
         else:
-            say(OK, f"«{short}»: номинал {value:g}, регион {region}")
+            say(OK, f"«{short}»: номинал {shown_number(value)}, регион {region}")
 
     if strangers:
         # Самая тихая из бед: бот просто не смотрит на такой заказ, и

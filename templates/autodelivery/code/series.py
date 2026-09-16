@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import re
 
+from catalog import shown_number
+
 # «100 = 70», «100 - 70», «100:70», «100 70» — как придётся. Разделитель
 # необязателен: с телефона его набирать неудобно.
 ROW = re.compile(r"^\s*(\d[\d\s  ]*(?:[.,]\d+)?)\s*(?:[=:\-—]|\s)\s*"
@@ -65,7 +67,8 @@ def parse(text: str) -> tuple[list, list]:
             # Два разных задания на один номинал — это два одинаковых
             # объявления на витрине, и продавец не поймёт, какое из них он
             # правил.
-            bad.append(f"{raw.strip()} — номинал {nominal:g} уже был")
+            bad.append(f"{raw.strip()} — номинал {_shown(nominal)} "
+                       f"уже был")
             continue
 
         seen.add(nominal)
@@ -125,7 +128,12 @@ def usable(pattern: str) -> bool:
 
 
 def _shown(value: float) -> str:
-    return f"{value:g}"
+    """Число целиком: «1000000», а не «1e+06».
+
+    В названии товара экспонента выглядит поломкой магазина, а в описании
+    она ещё и читается обратно как единица — бот купил бы не тот номинал.
+    """
+    return shown_number(value)
 
 
 def plan(pattern: str, description: str, old, rows: list) -> tuple[list, list]:

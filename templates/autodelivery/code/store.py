@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -56,6 +57,7 @@ class JsonStore:
         self.path = path
         self._lock = threading.Lock()
         self.data: dict[str, Any] = {}
+        self._origin: dict[str, Any] = {}
         if os.path.exists(path):
             try:
                 with open(path, encoding="utf-8") as f:
@@ -67,6 +69,10 @@ class JsonStore:
                     f"{path} не читается. Это журнал выдач: в нём номера "
                     f"уже купленных заказов. Начав с пустого, бот купит их "
                     f"второй раз. Восстановите файл из копии.")
+
+        # Каким файл был, когда мы его прочитали. По нему на записи видно,
+        # что поменяли МЫ, а что — кто-то другой.
+        self._origin = copy.deepcopy(self.data)
 
     def conf(self, card_slug: str) -> dict:
         """Настройки и журнал одного вида товара."""
@@ -84,6 +90,22 @@ class JsonStore:
 
     def save(self) -> None:
         with self._lock:
+            # В этот файл пишут ДВА разных процесса: бот в телеграме —
+            # настройки, выдача — журнал и номера выданных заказов. Писать
+            # его целиком «как у меня в памяти» значит затирать чужое.
+            #
+            # Так и было, и обе стороны стоили дорого. Продавец задавал
+            # слово-опознаватель, выдача следом сохраняла журнал — и слово
+            # пропадало, а выдача продолжала не узнавать товар. В другую
+            # сторону хуже: выдача отмечала заказ выданным, бот сохранял
+            # настройку — и номер заказа исчезал из выданных. Такой заказ
+            # покупается и выдаётся ВТОРОЙ раз, за деньги продавца.
+            #
+            # Поэтому перед записью перечитываем файл и вливаем в себя
+            # чужие правки, не трогая своих. Поля у процессов разные, так
+            # что спорить им не о чем.
+            self._absorb(self._read_disk(), self.data, self._origin)
+
             for conf in self.data.get("cards", {}).values():
                 del conf.setdefault("log", [])[LOG_MAX:]
                 del conf.setdefault("delivered", [])[:-DELIVERED_MAX]
@@ -96,10 +118,55 @@ class JsonStore:
                     f.flush()
                     os.fsync(f.fileno())
                 os.replace(tmp, self.path)
+                self._origin = copy.deepcopy(self.data)
             except BaseException:
                 if os.path.exists(tmp):
                     os.unlink(tmp)
                 raise
+
+    def _read_disk(self) -> dict:
+        """Что в файле сейчас. Битый или пропавший — считаем пустым.
+
+        Здесь, в отличие от чтения при запуске, падать нельзя: мы посреди
+        записи, и наши изменения дороже чужих.
+        """
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                found = json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+        return found if isinstance(found, dict) else {}
+
+    def _absorb(self, disk: dict, mine: dict, origin) -> None:
+        """Влить чужие правки в свои. Правим на месте.
+
+        Правило одно: поле, которое МЫ не трогали с момента чтения, берём
+        с диска. Остальное оставляем своё.
+
+        На месте — не прихоть: выдача держит ссылки на записи журнала и
+        дописывает их после сохранения. Подменив словарь целиком, мы бы
+        эти правки потеряли.
+        """
+        was = origin if isinstance(origin, dict) else {}
+
+        for key, their in disk.items():
+            if key not in mine:
+                # У нас такого поля нет. Либо его завели без нас — берём,
+                # либо мы сами его убрали — тогда не возвращаем.
+                if key not in was:
+                    mine[key] = their
+
+                continue
+
+            ours = mine[key]
+
+            if isinstance(their, dict) and isinstance(ours, dict):
+                self._absorb(their, ours, was.get(key))
+                continue
+
+            if ours == was.get(key):
+                mine[key] = their
 
 
 def find_entry(conf: dict, order_id: str) -> dict | None:

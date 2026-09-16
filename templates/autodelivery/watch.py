@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
 from auth import open_account, sign_in, user_agent_from_env  # noqa: E402
 from envfile import load_env_file                             # noqa: E402
-from catalog import (nominal_for, pick_card,                  # noqa: E402
+from catalog import (nominal_for, pick_card, shown_number,    # noqa: E402
                      region_from_description)
 from owner import renew_cookies                              # noqa: E402
 from playerok import (PAID_STATUSES, PlayerokMarketplace,     # noqa: E402
@@ -111,7 +111,7 @@ async def main() -> None:
         value, why_value = nominal_for(order.title, order.description)
 
         log.info("  регион из описания: %s", region or "НЕ ПРОЧИТАН")
-        log.info("  номинал: %s", f"{value:g}" if value else "НЕ ПРОЧИТАН")
+        log.info("  номинал: %s", shown_number(value) if value else "НЕ ПРОЧИТАН")
 
         if not region:
             log.warning(

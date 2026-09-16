@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+from catalog import shown_number
+
 # Сколько одинаковых объявлений допускаем по умолчанию.
 LIMIT = 3
 
@@ -48,7 +50,7 @@ def _between(value, default: int, low: int, high: int) -> int:
 
 def _key(nominal, price) -> str:
     """Ключ счёта: номинал и цена. Разные номиналы не мешают друг другу."""
-    return f"{float(nominal):g}@{int(price)}"
+    return f"{shown_number(nominal)}@{int(price)}"
 
 
 class Ledger:
