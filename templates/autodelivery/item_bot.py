@@ -65,6 +65,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 from envfile import load_env_file                             # noqa: E402
 from owner import link_from_env                               # noqa: E402
 import listing                                                # noqa: E402
+import copyitem                                               # noqa: E402
 import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
@@ -91,12 +92,13 @@ from templates import TemplateStore, folder_for               # noqa: E402
 MENU = [[("➕ Новый товар", "новый товар"),
          ("📝 Одним сообщением", "бланк")],
         [("⚡ Из шаблона", "шаблон"),
-         ("📊 Серия номиналов", "серия")],
-        [("📄 Черновики", "черновики"),
-         ("🏷 Копии и цены", "копии")],
-        [("⚙️ Автовыдача", "настройки"),
-         ("🔑 Проверить сессию", "проверить")],
-        [("👤 Аккаунт", "аккаунт")]]
+         ("📋 Копия с витрины", "копировать")],
+        [("📊 Серия номиналов", "серия"),
+         ("📄 Черновики", "черновики")],
+        [("🏷 Правила копий", "копии"),
+         ("⚙️ Автовыдача", "настройки")],
+        [("🔑 Проверить сессию", "проверить"),
+         ("👤 Аккаунт", "аккаунт")]]
 
 # Команды в меню Telegram — та кнопка слева от поля ввода. Без неё их
 # надо помнить и набирать вслепую.
@@ -107,7 +109,8 @@ COMMANDS = [
     ("tpl", "Создать из шаблона"),
     ("series", "Серия номиналов из шаблона"),
     ("drafts", "Черновики"),
-    ("copies", "Копии и цены: предел одинаковых"),
+    ("copy", "Копия живого объявления"),
+    ("copies", "Правила копий: предел одинаковых"),
     ("delivery", "Настройки автовыдачи"),
     ("check", "Проверить сессию"),
     ("account", "Кабинеты"),
@@ -141,7 +144,8 @@ ACCOUNT_WORDS = ("аккаунт", "аккаунты", "кабинет", "/accou
 DRAFT_WORDS = ("черновики", "черновик", "/drafts")
 SETTINGS_WORDS = ("настройки", "автовыдача", "/delivery")
 BLANK_WORDS = ("бланк", "одним сообщением", "одно сообщение", "/blank")
-COPIES_WORDS = ("копии", "копии и цены", "/copies")
+COPIES_WORDS = ("копии", "правила копий", "копии и цены", "/copies")
+COPY_WORDS = ("копировать", "копия", "копия с витрины", "/copy")
 SERIES_WORDS = ("серия", "серия номиналов", "номиналы", "/series")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
@@ -167,6 +171,7 @@ PICK_CARD = "crd:"
 PICK_SET = "set:"
 PICK_SERIES = "ser:"
 PICK_COPY = "cpy:"
+PICK_LIVE = "liv:"
 
 # Где лежит состояние выдачи: и настройки, и журнал выданных заказов. На
 # кабинет: товары и слова-опознаватели у разных кабинетов разные, а
@@ -1572,10 +1577,16 @@ def copies_menu(link) -> None:
     counted = ledger.pairs()
 
     lines = [
-        "🏷 Копии и цены",
+        "🏷 Правила копий",
         "",
-        "Площадка не любит одинаковые объявления. Бот следит, чтобы их не "
-        "копилось само собой.",
+        "Это НЕ создание копий, а правила для них: площадка не любит "
+        "одинаковые объявления, и бот следит, чтобы их не копилось само "
+        "собой.",
+        "",
+        "Сами копии делаются так:",
+        "  📋 Копия с витрины — повторить уже выставленное",
+        "  ⚡ Из шаблона — повторить сохранённое",
+        "  📊 Серия номиналов — сразу на все номиналы",
         "",
         f"Подъём цены: {'включён' if rules['enabled'] else 'ВЫКЛЮЧЕН'}",
         f"Одинаковых допускаем: {rules['limit']}",
@@ -1676,6 +1687,151 @@ def confirm_reset(link, ledger) -> None:
         return
 
     copies_menu(link)
+
+
+def copy_live(link, account) -> None:
+    """Копия объявления, которое уже стоит на витрине.
+
+    Шаблон запоминается при создании товара — а то, что заведено раньше
+    бота или в кабинете на сайте, шаблона не имеет. Повторить такое было
+    нечем, хотя всё нужное у площадки есть.
+    """
+    link.screen("Читаю ваши объявления…")
+
+    try:
+        from playerokapi.enums import ItemStatuses
+        where = {"statuses": [ItemStatuses.APPROVED]}
+    except ImportError:
+        where = {}
+
+    try:
+        page = account.get_my_items(count=MAX_CHOICES, **where)
+        items = list(getattr(page, "items", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        if is_auth_error(e):
+            link.screen(f"Площадка не приняла вход.\n\n{COOKIES_ADVICE}",
+                        buttons=MENU)
+        else:
+            link.screen(f"Объявления прочитать не вышло: {e}", buttons=MENU)
+
+        return
+
+    if not items:
+        link.screen("Выставленных объявлений не нашлось.\n\nКопировать "
+                    "можно только то, что уже стоит на витрине.",
+                    buttons=MENU)
+        return
+
+    keys = [[(f"{i.name} — {getattr(i, 'price', '?')} ₽", PICK_LIVE + str(i.id))]
+            for i in items]
+    keys.append([("✖️ Назад", "отмена")])
+    answer = link.ask("Какое объявление повторить?", ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_LIVE):
+        link.screen("Отменил.", buttons=MENU)
+        return
+
+    make_copy(link, account, text[len(PICK_LIVE):])
+
+
+def make_copy(link, account, item_id: str) -> None:
+    """Прочитать объявление целиком и создать такое же."""
+    link.screen("Читаю объявление…")
+
+    try:
+        item = account.get_item(item_id)
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Объявление прочитать не вышло: {e}", buttons=MENU)
+        return
+
+    plan, gaps = copyitem.plan(item)
+
+    if gaps:
+        # Подставить недостающее нельзя: товар не там, где хотели, дороже
+        # несозданного.
+        link.screen(f"Скопировать не выйдет — площадка не отдала: "
+                    f"{', '.join(gaps)}.\n\nСоздайте товар заново через "
+                    f"«➕ Новый товар».", buttons=MENU)
+        return
+
+    link.screen(f"Скачиваю картинки ({len(plan['photos'])})…")
+    photos = fetch_photos(plan["photos"])
+
+    if not photos:
+        link.screen("Картинки скачать не вышло — без них площадка товар не "
+                    "примет.", buttons=MENU)
+        return
+
+    draft = wizard.Draft()
+    draft.game = plan["game"]
+    draft.category = plan["category"]
+    draft.obtaining = plan["obtaining"]
+    draft.name = plan["name"]
+    draft.price = plan["price"]
+    draft.region = plan["region"]
+    draft.nominal = plan["nominal"]
+    draft.options = plan["options"]
+    draft.fields = plan["fields"]
+    draft.photos = photos
+
+    # Описание прогоняем тем же разбором, что и набранное руками: он
+    # вырезает строки про регион и номинал. Скопированные как есть, они
+    # встали бы вторыми рядом с нашими, и движок выдачи прочитал бы не ту.
+    body, why = wizard.accept_description(
+        str(getattr(item, "description", "") or ""))
+    draft.description = "" if why else body
+
+    ledger = ledger_of()
+
+    if ledger.rules()["vary"]:
+        vary.apply(draft.fields, ROTATION)
+
+    draft.price, up = ledger.price_for(draft.nominal or draft.price,
+                                       draft.price)
+    note = (f"\n\nЦена поднята на {up} ₽: столько же бесплатных по прежней "
+            f"цене уже висит." if up else "")
+
+    answer = link.ask(
+        f"Повторю это объявление:\n\n{draft.summary()}{note}\n\nСоздаём?",
+        ANSWER_WAIT, buttons=[[("✅ Да, создать", "да")], CANCEL])
+
+    if str(answer.get("text") or "").strip().lower() != "да":
+        link.screen("Отменил. Ничего не создано.", buttons=MENU)
+        return
+
+    link.screen("Создаю черновик…")
+
+    if send_draft(link, account, draft):
+        ledger.remember(draft.nominal or draft.price, draft.price)
+        offer_template(link, draft)
+
+
+def fetch_photos(urls) -> list:
+    """Скачать картинки объявления. → байты, что получилось.
+
+    Молча пропускаем то, что не скачалось: одна битая ссылка из пяти не
+    повод отказываться от копии. А вот ни одной — повод, и об этом скажет
+    вызывающий.
+    """
+    try:
+        import requests
+    except ImportError:
+        return []
+
+    out = []
+
+    for url in urls:
+        try:
+            answer = requests.get(url, timeout=30,
+                                  headers={"User-Agent": DEFAULT_UA})
+        except Exception:                                     # noqa: BLE001
+            continue
+
+        if answer.status_code == 200 and answer.content:
+            out.append(answer.content)
+
+    return out
 
 
 def settings_of() -> Settings:
@@ -2424,7 +2580,8 @@ def handle_command(link, account, text: str):
 
     if text in START_WORDS or text in TEMPLATE_WORDS \
             or text in DRAFT_WORDS or text in CHECK_WORDS \
-            or text in BLANK_WORDS or text in SERIES_WORDS:
+            or text in BLANK_WORDS or text in SERIES_WORDS \
+            or text in COPY_WORDS:
         if account is None:
             link.screen("Сначала нужен рабочий кабинет: откройте "
                         "«Аккаунт».", buttons=MENU)
@@ -2445,6 +2602,8 @@ def handle_command(link, account, text: str):
         from_template(link, account)
     elif text in DRAFT_WORDS:
         drafts_menu(link, account)
+    elif text in COPY_WORDS:
+        copy_live(link, account)
     elif text in COPIES_WORDS:
         copies_menu(link)
     elif text in SETTINGS_WORDS:
