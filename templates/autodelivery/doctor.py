@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "code"))
@@ -40,7 +41,9 @@ def say(mark: str, text: str, fix: str = "") -> None:
         print(f"     → {fix}")
 
     if mark != OK:
-        problems.append(text)
+        # Итог собираем вместе с лечением: список одних только бед — это
+        # «разбирайся сам», а продавцу нужна команда, которую он наберёт.
+        problems.append((text, fix))
 
 
 def env_check() -> None:
@@ -49,8 +52,6 @@ def env_check() -> None:
         ("TELEGRAM_BOT_TOKEN", True, "без него бот не отвечает вовсе"),
         ("TELEGRAM_OWNER_ID", True, "без него боту некому писать"),
         ("APPROUTE_KEY", True, "без него автовыдаче нечем покупать коды"),
-        ("APPROUTE_PROXY", False,
-         "нужен, если у поставщика включён белый список IP"),
     ]
 
     for name, required, why in pairs:
@@ -61,8 +62,12 @@ def env_check() -> None:
         elif required:
             say(BAD, f"{name} НЕ задан — {why}",
                 f"допишите в .env строку {name}=...")
-        else:
-            say(WARN, f"{name} не задан — {why}")
+
+    # Про APPROUTE_PROXY здесь молчим нарочно. Он нужен только там, где у
+    # поставщика включён белый список IP, и узнать это можно одним
+    # способом — позвать поставщика. Если каталог читается, прокси не
+    # нужен, и жалоба на него была бы шумом: отчёт выглядел бы хуже, чем
+    # дела, а среди трёх «неисправностей» тонут настоящие две.
 
 
 def running() -> dict:
@@ -216,11 +221,20 @@ def supplier_check() -> None:
             api_key=key,
             proxy=os.environ.get("APPROUTE_PROXY", "")).services()
     except Exception as e:                                    # noqa: BLE001
-        say(BAD, f"каталог не прочитан: {e}",
-            "проверьте ключ и белый список IP у поставщика")
+        fix = "проверьте ключ в .env"
+
+        if "403" in str(e) or "ip" in str(e).lower():
+            fix = ("похоже на белый список IP: впишите в .env "
+                   "APPROUTE_PROXY=... с постоянным адресом и этот адрес "
+                   "добавьте у поставщика")
+
+        say(BAD, f"каталог не прочитан: {e}", fix)
         return
 
-    say(OK, "каталог поставщика читается")
+    say(OK, "каталог поставщика читается — ключ рабочий")
+
+    if not os.environ.get("APPROUTE_PROXY", "").strip():
+        say(OK, "прокси не нужен: поставщик нас и так видит")
 
     for card in CARDS:
         if not card.subcategory:
@@ -233,6 +247,64 @@ def supplier_check() -> None:
             say(OK, f"{card.title}: номиналов в наличии {len(live)}")
 
 
+# Номинал, которого нет и быть не может. Нужен, чтобы позвать покупку и
+# посмотреть, ЧЕМ поставщик откажет, не покупая ничего.
+NOWHERE = "00000000-0000-0000-0000-000000000000"
+
+# Слова отказа, означающие «ключу не хватает прав».
+FORBIDDEN = ("403", "forbidden", "orders:write", "permission", "scope",
+             "доступ", "прав")
+
+
+def orders_write_check() -> None:
+    """Есть ли у ключа право покупать. Денег не тратит.
+
+    Это единственная проверка, которую нельзя откладывать. Дословно из
+    кабинета поставщика: без `orders:write` ключ ПОКУПАЕТ, НО КОДА НЕ
+    ОТДАЁТ. То есть деньги спишутся, а выдать будет нечего — и узнает об
+    этом продавец от покупателя, который уже заплатил.
+
+    Сухого прогона для магазинных заказов у поставщика нет. Поэтому зовём
+    настоящую покупку, но на номинал, которого не существует: купить по
+    нему нельзя ни при каких обстоятельствах, а отказ придёт разный —
+    «нет прав» или «нет такого товара», и это ровно то, что нам нужно
+    различить.
+    """
+    print("\n── Право покупать (orders:write) ──")
+    key = os.environ.get("APPROUTE_KEY", "").strip()
+
+    if not key:
+        say(BAD, "ключа нет — проверять нечего")
+        return
+
+    try:
+        from supplier import ApprouteSupplier
+    except ImportError as e:
+        say(BAD, f"не подключается клиент поставщика: {e}")
+        return
+
+    supplier = ApprouteSupplier(
+        api_key=key, proxy=os.environ.get("APPROUTE_PROXY", ""))
+    # Своя ссылка: повтор проверки не должен выглядеть повтором покупки.
+    got = supplier.place(NOWHERE, f"doctor-{int(time.time())}")
+    why = str(got.get("why") or "").lower()
+
+    if got.get("ok"):
+        # Такого быть не должно: номинала не существует. Молчать нельзя —
+        # это либо не тот кабинет, либо мы поняли ответ неверно.
+        say(WARN, "поставщик принял покупку несуществующего номинала — "
+                  "странно, проверьте кабинет вручную")
+        return
+
+    if any(word in why for word in FORBIDDEN):
+        say(BAD, "у ключа НЕТ права orders:write — он спишет деньги, но "
+                 "кода не отдаст",
+            "в кабинете AppRoute выдайте ключу право orders: write")
+        return
+
+    say(OK, f"право есть: отказ не про права ({got.get('why')})")
+
+
 def main() -> None:
     load_env_file(os.path.join(HERE, ".env"))
     print("Проверяю, почему не работает. Ничего не меняю.")
@@ -243,6 +315,7 @@ def main() -> None:
     templates_check()
     delivery_check()
     supplier_check()
+    orders_write_check()
 
     print("\n── Итог ──")
 
@@ -252,8 +325,11 @@ def main() -> None:
 
     print(f"Нашлось неисправностей: {len(problems)}")
 
-    for text in problems:
+    for text, fix in problems:
         print(f"  • {text}")
+
+        if fix:
+            print(f"    → {fix}")
 
 
 if __name__ == "__main__":
