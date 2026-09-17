@@ -81,6 +81,62 @@ class GroupsTest(unittest.TestCase):
         self.assertEqual([i.price for i in rows], [0, 1, 2, 3, 4])
 
 
+class NominalsTest(unittest.TestCase):
+    """Внутри категории названия совпадают — отличает номинал."""
+
+    def nominals(self, items):
+        return grouping.nominals(items, lambda i: i.nominal)
+
+    def test_the_same_nominal_lands_in_one_pile(self):
+        items = [Item(PROMO), Item(PROMO), Item(PROMO)]
+        items[0].nominal = items[2].nominal = 80.0
+        items[1].nominal = 1000.0
+
+        got = self.nominals(items)
+
+        self.assertEqual([(v, len(rows)) for v, rows in got],
+                         [(80.0, 2), (1000.0, 1)])
+
+    def test_piles_go_by_growing_nominal_not_by_size(self):
+        """Продавец помнит номиналы подряд: 80, 400, 1000."""
+        items = [Item(PROMO) for _ in range(4)]
+        items[0].nominal = 1000.0
+        items[1].nominal = items[2].nominal = items[3].nominal = 80.0
+
+        self.assertEqual([v for v, _ in self.nominals(items)], [80.0, 1000.0])
+
+    def test_the_unread_ones_go_last_and_are_not_dropped(self):
+        """Среди них может быть нужное — выбросить нельзя."""
+        items = [Item(PROMO), Item(HIT), Item(PROMO)]
+        items[0].nominal = None
+        items[1].nominal = 500.0
+        items[2].nominal = 100.0
+
+        got = self.nominals(items)
+
+        self.assertEqual([v for v, _ in got], [100.0, 500.0, None])
+        self.assertEqual(len(got[-1][1]), 1)
+
+    def test_order_inside_a_pile_is_kept(self):
+        items = [Item(PROMO, price=n) for n in range(5)]
+
+        for item in items:
+            item.nominal = 80.0
+
+        _, rows = self.nominals(items)[0]
+
+        self.assertEqual([i.price for i in rows], [0, 1, 2, 3, 4])
+
+    def test_nothing_to_split_is_one_pile(self):
+        items = [Item(PROMO), Item(PROMO)]
+        items[0].nominal = items[1].nominal = None
+
+        self.assertEqual(len(self.nominals(items)), 1)
+
+    def test_an_empty_list_gives_no_piles(self):
+        self.assertEqual(self.nominals([]), [])
+
+
 class MatchingTest(unittest.TestCase):
     def setUp(self):
         self.items = [Item(HIT), Item(FAST), Item(PROMO)]

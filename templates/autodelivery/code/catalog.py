@@ -112,7 +112,7 @@ def render(template: str, card: Card | None = None, nominal="",
     витрине выглядит поломкой магазина, а не пропуском настройки.
     """
     values = {
-        "{номинал}": _shown_nominal(card, nominal, region),
+        "{номинал}": nominal_shown(card, nominal, region),
         "{регион}": str(region or ""),
         "{цена}": "" if price in (None, "") else f"{price} ₽",
         "{карта}": card.title if card else "",
@@ -165,7 +165,7 @@ def measure_of(card: Card | None, region: str = "") -> str:
     return card.measure if card is not None and not region else ""
 
 
-def _shown_nominal(card: Card | None, nominal, region: str = "") -> str:
+def nominal_shown(card: Card | None, nominal, region: str = "") -> str:
     """Номинал так, как его читает покупатель: «10$», «1000 Robux»."""
     if nominal in (None, ""):
         return ""

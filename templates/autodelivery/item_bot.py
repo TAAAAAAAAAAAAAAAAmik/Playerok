@@ -78,7 +78,8 @@ from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
 from cards import CARDS, card_by_slug                         # noqa: E402
 from catalog import (card_for_title, denominations_for,       # noqa: E402
-                     nominal_from_title, render, shown_number)
+                     nominal_from_title, nominal_shown, render,
+                     shown_number)
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
@@ -1954,6 +1955,7 @@ PAGE = MAX_CHOICES
 MAX_PAGES = 20
 
 PICK_GROUP = "grp:"
+PICK_NOM = "nom:"
 PICK_PAGE = "pge:"
 
 
@@ -2219,8 +2221,10 @@ def show_items(link, account, game=None, category=None):
         return None
 
     if where:
-        # Отбор уже сделан площадкой — делить дальше по названию незачем.
-        return items_menu(link, account, items, where, whole=whole)
+        # Отбор уже сделан площадкой — делить дальше по названию незачем:
+        # внутри одной категории названия у продавца совпадают до знака.
+        # Отличает их номинал, по нему и раскладываем.
+        return nominals_menu(link, account, items, where, whole=whole)
 
     return groups_menu(link, account, items, whole)
 
@@ -2291,7 +2295,128 @@ def groups_menu(link, account, items, whole: bool = True):
 
     label, rows = found[int(what)]
 
-    return items_menu(link, account, rows, label, whole=whole)
+    return nominals_menu(link, account, rows, label, whole=whole)
+
+
+def nominal_of_item(item):
+    """Номинал объявления по названию. → число или None.
+
+    Описания в списке товаров площадка не отдаёт, так что читаем название
+    и отдаём ему цену: в названиях денежных карт цена написана рядом с
+    номиналом («Apple Gift Card 10$ за 900 рублей»), и без подсказки
+    самым крупным числом оказалась бы она.
+    """
+    try:
+        return nominal_from_title(str(getattr(item, "name", "") or ""),
+                                  getattr(item, "price", None))
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def nominal_label(value, rows) -> str:
+    """Подпись кучки: «1000 Robux», «10$», «Без номинала»."""
+    if value is None:
+        return "Без номинала"
+
+    name = str(getattr(rows[0], "name", "") or "") if rows else ""
+    # Регион у чужого объявления не спрошен, и выдумывать его нельзя:
+    # знак валюты не того региона врёт про товар. Без региона
+    # `nominal_shown` берёт меру самой карты, а для незнакомой — просто
+    # число.
+    return nominal_shown(card_for_title(CARDS, name), value) \
+        or shown_number(value)
+
+
+def nominals_menu(link, account, items, title: str, number: int = 0,
+                  whole: bool = True):
+    """Кучки объявлений по номиналу. → номер выбранного или None.
+
+    Внутри одной категории названия у продавца одинаковые: полстраницы
+    «🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА😎» подряд, и отличает их только номинал.
+    Показать такой список плоским значит заставить выбирать вслепую.
+    """
+    found = grouping.nominals(items, nominal_of_item)
+
+    if len(found) < 2:
+        # Номинал один или не прочитался ни у кого — делить нечего.
+        return items_menu(link, account, items, title, whole=whole)
+
+    # Номиналов у карт бывает больше, чем влезает на экран телефона, —
+    # тогда листаем, а не обрезаем: обрезанный список молча прячет
+    # половину витрины.
+    shown, more, pages = grouping.page(list(enumerate(found)), number, PAGE)
+    keys = []
+
+    for place, (value, rows) in shown:
+        many = plural(len(rows), "объявление", "объявления", "объявлений")
+        keys.append([(f"{nominal_label(value, rows)} — {many}",
+                      PICK_NOM + str(place))])
+
+    row = []
+
+    if number > 0:
+        row.append(("⬅️ Назад", PICK_NOM + "p" + str(number - 1)))
+
+    if more:
+        row.append(("Ещё ➡️", PICK_NOM + "p" + str(number + 1)))
+
+    if row:
+        keys.append(row)
+
+    keys.append([("🔍 Найти по слову", PICK_NOM + "find"),
+                 ("📄 Все подряд", PICK_NOM + "all")])
+    keys.append([("✖️ Отмена", "отмена")])
+
+    warn = ("" if whole else
+            "\n\n⚠️ Список неполный: площадка попросила сбавить темп. "
+            "Через минуту нажмите ещё раз, если нужного тут нет.")
+    leaf = f" — страница {number + 1} из {pages}" if pages > 1 else ""
+    answer = link.ask(f"{title} — объявлений {len(items)}{leaf}.\n\nРазложил "
+                      f"по номиналам. Какой берём за образец?{warn}",
+                      ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_NOM):
+        link.screen("Отменил.", buttons=MENU)
+        return None
+
+    what = text[len(PICK_NOM):]
+
+    if what.startswith("p") and what[1:].isdigit():
+        return nominals_menu(link, account, items, title, int(what[1:]), whole)
+
+    if what == "all":
+        return items_menu(link, account, items, title, whole=whole)
+
+    if what == "find":
+        answer = link.ask("Какое слово есть в названии?", ANSWER_WAIT,
+                          buttons=[CANCEL])
+        word = str(answer.get("text") or "")
+
+        if wizard.cancelled(word) or not word.strip():
+            return nominals_menu(link, account, items, title,
+                                 number, whole)
+
+        chosen = grouping.matching(items, word)
+
+        if not chosen:
+            link.screen(f"По слову «{word}» ничего не нашлось."
+                        + ("" if whole else "\n\nСписок неполный: площадка "
+                           "просила сбавить темп. Попробуйте через минуту."),
+                        buttons=MENU)
+            return None
+
+        return items_menu(link, account, chosen, f"Со словом «{word}»",
+                          whole=whole)
+
+    if not what.isdigit() or int(what) >= len(found):
+        return nominals_menu(link, account, items, title, number,
+                             whole)
+
+    value, rows = found[int(what)]
+
+    return items_menu(link, account, rows,
+                      f"{title} · {nominal_label(value, rows)}", whole=whole)
 
 
 def items_menu(link, account, items, title: str, number: int = 0,

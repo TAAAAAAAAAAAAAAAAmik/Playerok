@@ -1839,7 +1839,8 @@ class ByCategoryTest(unittest.TestCase):
 
     def test_only_that_categorys_listings_are_shown(self):
         link, _ = self.pick("роблокс", item_bot.PICK_GAME + "g-roblox",
-                            item_bot.PICK_CAT + "c-acc", "отмена")
+                            item_bot.PICK_CAT + "c-acc",
+                            item_bot.PICK_NOM + "all", "отмена")
 
         # Двенадцать объявлений — это ровно одна страница, и подписи про
         # страницы тогда нет.
@@ -1879,6 +1880,158 @@ class ByCategoryTest(unittest.TestCase):
         item_bot.copy_live(link, Empty())
 
         self.assertIn("ничего не нашлось", link.said[-1])
+
+
+class NominalPilesTest(unittest.TestCase):
+    """Внутри категории объявления делятся по номиналу.
+
+    У продавца все объявления категории названы одинаково —
+    «🥳ПРОМОКОДОМ🥳😎 АВТОВЫДАЧА😎», — и плоский список из таких строк
+    выбирать не помогает: отличает их номинал, а не название.
+    """
+
+    NAME = "🥳ПРОМОКОДОМ🥳😎 АВТОВЫДАЧА😎"
+
+    class Market:
+        # Номинал живёт в названии: так его пишет и сам продавец.
+        ROWS = [("80 РОБУКСОВ", 119), ("80 РОБУКСОВ", 125),
+                ("400 РОБУКСОВ", 358), ("1000 РОБУКСОВ", 899),
+                ("1000 РОБУКСОВ", 915), ("1000 РОБУКСОВ", 930)]
+
+        def get_games(self, name="", count=12):
+            return type("P", (), {"games": [
+                type("G", (), {"id": "g-roblox", "name": "Roblox"})()]})()
+
+        def get_game(self, id=None):                       # noqa: A002
+            return type("G", (), {"categories": [
+                type("C", (), {"id": "c-robux", "name": "Робуксы"})()]})()
+
+        def get_my_items(self, count=24, after_cursor=None, **kw):
+            rows = [type("I", (), {"id": f"i{n}",
+                                   "name": f"🍎{what} · Roblox",
+                                   "price": price})()
+                    for n, (what, price) in enumerate(self.ROWS)]
+
+            return type("P", (), {
+                "items": rows,
+                "page_info": type("I", (), {"has_next_page": False,
+                                            "end_cursor": "0"})()})()
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.forget_items()
+        self._pause = item_bot.PAGE_PAUSE
+        item_bot.PAGE_PAUSE = 0
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.forget_items()
+
+    def choose(self, *answers):
+        link = FakeLink(["роблокс", item_bot.PICK_GAME + "g-roblox",
+                         item_bot.PICK_CAT + "c-robux"] + list(answers))
+        chosen = item_bot.choose_live_item(link, self.Market())
+
+        return link, chosen
+
+    def names(self, link):
+        return [n for row in link.asked[-1][1] for n, _ in row]
+
+    def test_the_piles_are_nominals_not_listings(self):
+        link, _ = self.choose("отмена")
+        names = self.names(link)
+
+        self.assertIn("номинал", link.asked[-1][0].lower())
+        self.assertTrue(any(n.startswith("80") for n in names), names)
+        self.assertTrue(any(n.startswith("400") for n in names), names)
+        self.assertTrue(any(n.startswith("1000") for n in names), names)
+
+    def test_a_pile_says_how_many_are_in_it(self):
+        link, _ = self.choose("отмена")
+        row = next(n for n in self.names(link) if n.startswith("1000"))
+
+        self.assertIn("3 объявления", row)
+
+    def test_the_smallest_nominal_goes_first(self):
+        """Номиналы продавец помнит подряд, а не по размеру кучки."""
+        link, _ = self.choose("отмена")
+
+        self.assertTrue(self.names(link)[0].startswith("80"))
+
+    def test_the_measure_is_shown_with_the_number(self):
+        link, _ = self.choose("отмена")
+
+        self.assertTrue(any("Robux" in n for n in self.names(link)),
+                        self.names(link))
+
+    def test_picking_a_nominal_shows_only_its_listings(self):
+        link, _ = self.choose(item_bot.PICK_NOM + "0", "отмена")
+        prices = [n.split(" ")[0] for n in self.names(link)
+                  if n[:1].isdigit()]
+
+        self.assertEqual(sorted(prices), ["119", "125"])
+
+    def test_the_chosen_listing_is_the_answer(self):
+        link, chosen = self.choose(item_bot.PICK_NOM + "1",
+                                   item_bot.PICK_LIVE + "i2")
+
+        self.assertEqual(chosen, "i2")
+
+    def test_everything_at_once_is_still_one_press_away(self):
+        link, _ = self.choose(item_bot.PICK_NOM + "all", "отмена")
+
+        self.assertEqual(len([n for n in self.names(link)
+                              if n[:1].isdigit()]), 6)
+
+    def test_a_single_nominal_is_not_split_at_all(self):
+        """Лишний экран с одной кнопкой — это не помощь."""
+        class One(self.Market):
+            ROWS = [("80 РОБУКСОВ", 119), ("80 РОБУКСОВ", 125)]
+
+        link = FakeLink(["роблокс", item_bot.PICK_GAME + "g-roblox",
+                         item_bot.PICK_CAT + "c-robux", "отмена"])
+        item_bot.choose_live_item(link, One())
+
+        self.assertNotIn("номинал", link.asked[-1][0].lower())
+
+    def test_listings_without_a_nominal_are_not_dropped(self):
+        class Mixed(self.Market):
+            ROWS = [("80 РОБУКСОВ", 119), ("ПРОМОКОДОМ АВТОВЫДАЧА", 499)]
+
+        link = FakeLink(["роблокс", item_bot.PICK_GAME + "g-roblox",
+                         item_bot.PICK_CAT + "c-robux", "отмена"])
+        item_bot.choose_live_item(link, Mixed())
+        names = [n for row in link.asked[-1][1] for n, _ in row]
+
+        self.assertTrue(any("Без номинала" in n for n in names), names)
+
+    def test_the_price_in_the_name_is_not_taken_for_a_nominal(self):
+        """«Apple Gift Card 10$ за 900 рублей» — это десятка, не девятьсот."""
+        class Money(self.Market):
+            ROWS = [("Apple Gift Card 10 USD за 900 рублей", 900),
+                    ("Apple Gift Card 25 USD за 2200 рублей", 2200)]
+
+        link = FakeLink(["роблокс", item_bot.PICK_GAME + "g-roblox",
+                         item_bot.PICK_CAT + "c-robux", "отмена"])
+        item_bot.choose_live_item(link, Money())
+        names = [n for row in link.asked[-1][1] for n, _ in row]
+
+        self.assertTrue(any(n.startswith("10") for n in names), names)
+        self.assertFalse(any(n.startswith("900") for n in names), names)
+
+    def test_many_nominals_are_paged_not_cut(self):
+        class Many(self.Market):
+            ROWS = [(f"{n * 100} РОБУКСОВ", n * 10) for n in range(1, 20)]
+
+        link = FakeLink(["роблокс", item_bot.PICK_GAME + "g-roblox",
+                         item_bot.PICK_CAT + "c-robux",
+                         item_bot.PICK_NOM + "p1", "отмена"])
+        item_bot.choose_live_item(link, Many())
+
+        self.assertIn("страница 2", link.asked[-1][0])
 
 
 class LiveShopCountTest(unittest.TestCase):
