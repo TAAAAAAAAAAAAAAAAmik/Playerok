@@ -45,6 +45,9 @@ CARDS = [
         keywords=("robux", "робукс", "роблокс", "roblox"),
         measure="Robux",
         unit=UNITS,
+        # Как это пишут в описаниях. «Роблокс» сюда не входит нарочно:
+        # это игра, а не единица, и «Roblox 2024» дал бы номинал 2024.
+        measure_words=("робукс", "robuxes", "робаксов", "робакс", "r$"),
         subcategory="Roblox Gift Cards",
         activation="Активируйте код на roblox.com/redeem.",
         pitch="Код на робуксы. Логин покупателя не нужен — он вводит код "

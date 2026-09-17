@@ -286,13 +286,13 @@ def listings_check(account) -> None:
         # Описание у списка товаров бывает пустым — читаем, что дали.
         text = str(getattr(item, "description", "") or "")
         value, why_value = nominal_for(name, text,
-                                       getattr(item, "price", None))
+                                       getattr(item, "price", None), card)
         region = (region_from_description(text)
                   or conf.card(card.slug)["region"])
 
         if value is None:
             say(BAD, f"«{short}»: {why_value}",
-                "допишите номинал в название или строку «Номинал: 1000» "
+                "допишите номинал в название или строку «Номинал: 50» "
                 "в описание")
         elif not region:
             say(BAD, f"«{short}»: региона нет ни в описании, ни в настройке "

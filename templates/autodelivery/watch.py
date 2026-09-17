@@ -109,7 +109,7 @@ async def main() -> None:
 
         region = region_from_description(order.description)
         value, why_value = nominal_for(order.title, order.description,
-                                       getattr(order, "amount", None))
+                                       getattr(order, "amount", None), card)
 
         log.info("  регион из описания: %s", region or "НЕ ПРОЧИТАН")
         log.info("  номинал: %s", shown_number(value) if value else "НЕ ПРОЧИТАН")

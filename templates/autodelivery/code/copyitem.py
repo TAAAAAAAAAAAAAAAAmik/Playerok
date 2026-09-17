@@ -95,7 +95,7 @@ def photos_of(item) -> list:
     return out
 
 
-def plan(item) -> tuple:
+def plan(item, card=None) -> tuple:
     """Объявление площадки → (что положить в черновик, чего не хватает).
 
     Второе — список того, без чего копию не создать. Возвращается, а не
@@ -105,7 +105,7 @@ def plan(item) -> tuple:
     text = str(getattr(item, "description", "") or "")
     name = str(getattr(item, "name", "") or "")
     price = int(getattr(item, "price", 0) or 0)
-    value, _ = nominal_for(name, text, price)
+    value, _ = nominal_for(name, text, price, card)
 
     draft = {
         "game": _ref(getattr(item, "game", None)),

@@ -255,8 +255,10 @@ class DeliveryEngine:
         # Цену заказа отдаём разбору: продавцы денежных карт пишут её
         # прямо в названии («Apple 10$ за 900 рублей»), и без неё самым
         # крупным числом окажется она, а не номинал.
+        # Карту отдаём тоже: по ней читается «50 робуксов» в описании,
+        # когда в названии числа нет вовсе.
         want, why = nominal_for(order.title, order.description,
-                                getattr(order, "amount", None))
+                                getattr(order, "amount", None), card)
 
         if want is None:
             return await self._stop(card, order.id, why)

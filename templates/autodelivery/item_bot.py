@@ -1339,7 +1339,8 @@ def pick_live_sample(link, account):
         link.screen(f"Объявление прочитать не вышло: {e}", buttons=MENU)
         return None
 
-    plan, gaps = copyitem.plan(item)
+    plan, gaps = copyitem.plan(
+        item, card_for_title(CARDS, str(getattr(item, "name", "") or "")))
 
     if gaps:
         link.screen(f"Взять за образец не выйдет — площадка не отдала: "
@@ -2473,7 +2474,8 @@ def make_copy(link, account, item_id: str) -> None:
         link.screen(f"Объявление прочитать не вышло: {e}", buttons=MENU)
         return
 
-    plan, gaps = copyitem.plan(item)
+    plan, gaps = copyitem.plan(
+        item, card_for_title(CARDS, str(getattr(item, "name", "") or "")))
 
     if gaps:
         # Подставить недостающее нельзя: товар не там, где хотели, дороже

@@ -11,10 +11,11 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 
-from catalog import (Card, denominations_for,                   # noqa: E402
+from catalog import (UNITS, Card, denominations_for,            # noqa: E402
                      denominations_from, find_service, items_of,
                      is_card_order, match_denomination, matches_service,
-                     nominal_for, nominal_from_description,
+                     nominal_by_unit, nominal_for,
+                     nominal_from_description, numbers_by_unit,
                      nominal_from_title, render, shown_number,
                      region_of_service, services_for)
 
@@ -557,6 +558,130 @@ class MoneyCardTest(unittest.TestCase):
         got = render("{номинал}", card_by_slug("apple"), 10, "ZZ")
 
         self.assertEqual(got, "10")
+
+
+class NominalByUnitTest(unittest.TestCase):
+    """Номинал из описания по единице: «50 робуксов» → 50.
+
+    Спасает объявления, у которых в названии числа нет вовсе —
+    «🥳ПРОМОКОДОМ🥳😎 АВТОВЫДАЧА😎», — а номинал написан в описании
+    обычными словами. Помеченной строки «Номинал: 50» у таких объявлений
+    нет и взяться ей неоткуда: их делали руками.
+    """
+
+    ROBUX = Card(slug="robux", title="Roblox", emoji="🎮",
+                 keywords=("robux", "робукс", "роблокс"), measure="Robux",
+                 unit=UNITS, measure_words=("робукс", "r$"),
+                 subcategory="Roblox Gift Cards", activation="")
+    APPLE = Card(slug="apple", title="Apple", emoji="🍎",
+                 keywords=("apple",), measure="$",
+                 subcategory="Apple Gift Cards", activation="")
+
+    NAMELESS = "🥳ПРОМОКОДОМ🥳😎 АВТОВЫДАЧА😎"
+
+    def value(self, text, card=None, title="", price=None):
+        return nominal_for(title or self.NAMELESS, text, price,
+                           card or self.ROBUX)
+
+    def test_the_seller_writes_it_in_his_own_words(self):
+        self.assertEqual(self.value("Вы получаете 50 робуксов")[0], 50)
+
+    def test_the_unit_in_english_works_too(self):
+        self.assertEqual(self.value("50 ROBUX моментально")[0], 50)
+
+    def test_the_declension_does_not_matter(self):
+        """По-русски единица склоняется: робукс, робукса, робуксов."""
+        for text in ("1 робукс", "2 робукса", "400 робуксов"):
+            self.assertIsNotNone(self.value(text)[0], text)
+
+    def test_a_space_inside_the_number_is_not_a_second_number(self):
+        self.assertEqual(self.value("1 000 робуксов сразу")[0], 1000)
+
+    def test_the_unit_must_start_a_word(self):
+        """«микроробуксы» — не робуксы, и число рядом с ними не номинал."""
+        self.assertIsNone(self.value("Не более 5 микроробуксов")[0])
+
+    def test_other_numbers_are_left_alone(self):
+        """Год, срок, проценты и телефон — не номиналы."""
+        text = ("Код действует до 2030 года. Скидка 5%. Поддержка 24/7, "
+                "отвечаем за 15 минут.")
+
+        self.assertIsNone(self.value(text)[0])
+
+    def test_a_range_is_refused_not_guessed(self):
+        """«от 50 до 10000 робуксов»: единица стоит рядом только с верхней
+        границей, и взять её значит купить самый дорогой номинал."""
+        got, why = self.value("Пополнение от 50 до 10000 робуксов")
+
+        self.assertIsNone(got)
+        self.assertIn("диапазон", why)
+
+    def test_a_dash_range_is_refused_too(self):
+        self.assertIsNone(self.value("50–10000 робуксов")[0])
+
+    def test_two_different_nominals_are_refused(self):
+        got, why = self.value("Дарю 50 робуксов сверху к 400 Robux")
+
+        self.assertIsNone(got)
+        self.assertIn("несколько", why)
+
+    def test_the_same_nominal_twice_is_not_a_conflict(self):
+        self.assertEqual(self.value("400 Robux. Код на 400 робуксов.")[0], 400)
+
+    def test_money_cards_read_their_currency(self):
+        got, _ = self.value("Карта на 10$ для App Store", self.APPLE,
+                            title="Apple Gift Card", price=900)
+
+        self.assertEqual(got, 10)
+
+    def test_the_currency_may_stand_before_the_number(self):
+        got, _ = self.value("Номинал $25", self.APPLE,
+                            title="Apple Gift Card")
+
+        self.assertEqual(got, 25)
+
+    def test_the_marked_line_still_wins(self):
+        """Сказанное прямо сильнее прочитанного между строк."""
+        got, _ = self.value("Номинал: 400. Бонусом 50 робуксов сверху.")
+
+        self.assertEqual(got, 400)
+
+    def test_the_title_still_wins_over_the_description(self):
+        """Работающие объявления новый разбор не трогает."""
+        got, _ = self.value("Пополнение от 50 до 10000 робуксов",
+                            title="Roblox 1000 Robux", price=999)
+
+        self.assertEqual(got, 1000)
+
+    def test_without_a_card_nothing_changes(self):
+        """Единицы не знаем — и не выдумываем."""
+        got, why = nominal_for(self.NAMELESS, "50 робуксов", 119)
+
+        self.assertIsNone(got)
+        self.assertIn("не найден", why)
+
+    def test_the_advice_does_not_demand_a_thousand(self):
+        """Старый текст советовал «Номинал: 1000» на выдаче в 50 робуксов
+        и читался как требование именно тысячи."""
+        _, why = self.value("Просто текст без чисел")
+
+        self.assertNotIn("1000", why)
+        self.assertIn("Номинал", why)
+
+    def test_the_refusal_shows_what_was_read(self):
+        """Продавец смотрит в своё описание, видит там число и не понимает,
+        чем оно боту не угодило."""
+        _, why = self.value("Код действует до 2030 года. Поддержка 24/7.")
+
+        self.assertIn("2030", why)
+        self.assertIn("единицей", why)
+
+    def test_numbers_by_unit_finds_them_in_order(self):
+        self.assertEqual(numbers_by_unit("50 робуксов и 400 robux",
+                                         ("robux", "робукс")), [50.0, 400.0])
+
+    def test_nothing_to_read_is_not_a_refusal(self):
+        self.assertEqual(nominal_by_unit("", self.ROBUX), (None, ""))
 
 
 if __name__ == "__main__":
