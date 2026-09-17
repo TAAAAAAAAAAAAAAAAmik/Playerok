@@ -136,12 +136,87 @@ class DeliveryEngine:
         return out
 
     # ------------------------------------------------------------------
+    # Глушка
+    # ------------------------------------------------------------------
+
+    def paused(self) -> bool:
+        """Продавец остановил выдачу целиком."""
+        return bool(self._shared().get("paused"))
+
+    def held(self, order_id: str) -> bool:
+        """Этот заказ поставлен на паузу и трогать его нельзя."""
+        return str(order_id) in (self._shared().get("held") or {})
+
+    def hold_old(self, orders) -> list:
+        """Первый взгляд на витрину: что висело ДО запуска. → что придержали.
+
+        Самый дорогой случай из всех возможных — не сбой, а успешный
+        запуск. Бот поднимается с чистым журналом (новая установка,
+        перенос, смена кабинета), видит оплаченные заказы недельной
+        давности и бодро покупает коды ко всем. А продавец их давно выдал
+        руками: площадка держит сделку в «оплачено», пока покупатель не
+        подтвердил, и по ней не видно, отдан товар или нет.
+
+        Поэтому на первом же проходе всё, что уже висит, откладывается в
+        сторону. Не отменяется — откладывается: продавец нажмёт «выдать»,
+        если эти заказы и правда ждут кода.
+
+        Второй и следующие запуски сюда не попадают: витрину мы уже
+        осматривали, и всё новое — действительно новое.
+        """
+        shared = self._shared()
+
+        if shared.get("started"):
+            return []
+
+        held = shared.setdefault("held", {})
+        fresh = []
+
+        for order in orders:
+            key = str(order.id)
+
+            if key in held:
+                continue
+
+            held[key] = {"title": str(order.title or ""), "at": time.time()}
+            fresh.append(order)
+
+        shared["started"] = True
+        self.store.save()
+
+        if fresh:
+            logger.warning("первый запуск: придержал заказов %d", len(fresh))
+
+        return fresh
+
+    def _shared(self) -> dict:
+        """Общий раздел состояния. У чужого хранилища его может не быть."""
+        shared = getattr(self.store, "shared", None)
+
+        return shared() if callable(shared) else {}
+
+    # ------------------------------------------------------------------
     # Общий путь
     # ------------------------------------------------------------------
 
     async def deliver(self, card: Card, order: Order,
                       by_hand: bool = False) -> Result:
         conf = self.store.conf(card.slug)
+
+        # 0. Глушка. Руками продавец может выдать и при ней: он тогда сам
+        #    смотрит на заказ, а глушка — про то, чтобы бот не решал.
+        if self.paused() and not by_hand:
+            return await self._stop(
+                card, order.id,
+                "выдача остановлена глушкой. Снять: бот → «⚙️ Автовыдача» "
+                "→ «⛔ Глушка»", record=False)
+
+        if self.held(order.id) and not by_hand:
+            return await self._stop(
+                card, order.id,
+                "заказ на паузе: он висел ещё до моего запуска, и я не "
+                "знаю, выдали его вручную или нет. Бот → «⚙️ Автовыдача» "
+                "→ «⛔ Глушка»", record=False)
 
         # 1. Оплачен ли. «Создан» деньгами не является.
         if not self.market.is_paid(order.status):
@@ -154,6 +229,12 @@ class DeliveryEngine:
         delivered = conf.setdefault("delivered", [])
         if str(order.id) in [str(x) for x in delivered]:
             return Result(True, STATE_DONE, "уже выдан раньше")
+
+        # 2а. Не закрыт ли иначе: выдан вручную, отменён, возвращён. Это
+        #     не то же самое, что «выдан нами», и списки разные нарочно:
+        #     в одном наши покупки, в другом — чужие решения.
+        if str(order.id) in [str(x) for x in conf.setdefault("closed", [])]:
+            return Result(True, STATE_DONE, "заказ закрыт, выдача не нужна")
 
         # 3. Есть ли незаконченная запись — тогда продолжаем ЕЁ.
         entry = find_entry(conf, order.id)
@@ -254,6 +335,26 @@ class DeliveryEngine:
             codes = waited
 
         if not codes:
+            # Последняя проверка перед деньгами: а ждёт ли заказ ещё?
+            #
+            # Список оплаченных прочитан секунды или минуты назад, и за это
+            # время продавец мог выдать код руками, покупатель — подтвердить
+            # получение, площадка — вернуть деньги. Покупать по такому
+            # заказу значит платить за код, который никому не нужен.
+            #
+            # Спрашиваем ТОЛЬКО перед покупкой: если код уже куплен,
+            # отправить его надо в любом случае — деньги потрачены.
+            closed, status = await self._already_closed(order_id)
+
+            if closed:
+                self._close(card, order_id)
+
+                return await self._stop(
+                    card, order_id,
+                    f"заказ уже не ждёт выдачи (статус «{status}»): его "
+                    f"закрыли, пока я собирался. Покупать не стал",
+                    record=False)
+
             codes = await self._buy(card, entry, reference)
             if isinstance(codes, Result):
                 return codes
@@ -435,6 +536,41 @@ class DeliveryEngine:
         """Синхронный вызов поставщика — в поток, чтобы не держать цикл."""
         return await asyncio.get_event_loop().run_in_executor(
             None, lambda: fn(*args))
+
+    async def _already_closed(self, order_id: str) -> tuple:
+        """Заказ закрылся, пока мы собирались? → (да/нет, статус).
+
+        Неуверенность решается в пользу покупателя: не дозвонились до
+        площадки, сделки не нашли, метода нет — считаем, что заказ ждёт.
+        Он был оплачен секунду назад, и оставить человека без кода из-за
+        оборванного запроса хуже, чем купить лишний раз.
+        """
+        get_order = getattr(self.market, "get_order", None)
+
+        if not callable(get_order):
+            return False, ""
+
+        try:
+            fresh = await get_order(str(order_id))
+        except Exception as e:                       # noqa: BLE001
+            logger.warning("заказ %s перечитать не вышло: %s", order_id, e)
+            return False, ""
+
+        if fresh is None:
+            return False, ""
+
+        if self.market.is_paid(fresh.status):
+            return False, str(fresh.status)
+
+        return True, str(fresh.status)
+
+    def _close(self, card: Card, order_id: str) -> None:
+        """Пометить заказ закрытым: больше к нему не возвращаемся."""
+        closed = self.store.conf(card.slug).setdefault("closed", [])
+
+        if str(order_id) not in [str(x) for x in closed]:
+            closed.append(str(order_id))
+            self.store.save()
 
     async def _stop(self, card: Card, order_id: str, why: str,
                     record: bool = True, once: bool = True) -> Result:

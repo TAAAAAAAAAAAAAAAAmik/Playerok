@@ -102,6 +102,66 @@ class Settings:
 
         return True, ""
 
+    # ---------- глушка ----------
+
+    def _shared(self) -> dict:
+        shared = getattr(self.store, "shared", None)
+
+        return shared() if callable(shared) else {}
+
+    def paused(self) -> bool:
+        """Выдача остановлена целиком."""
+        return bool(self._shared().get("paused"))
+
+    def set_paused(self, on: bool) -> None:
+        self._shared()["paused"] = bool(on)
+        self.store.save()
+
+    def held(self) -> dict:
+        """Заказы на паузе: номер → {«title», «at»}."""
+        rows = self._shared().get("held")
+
+        return dict(rows) if isinstance(rows, dict) else {}
+
+    def release(self, order_id: str = "") -> int:
+        """Снять с паузы. → сколько сняли.
+
+        Снятые заказы выдаются обычным путём: бот купит код и отправит.
+        """
+        held = self._shared().setdefault("held", {})
+        keys = [str(order_id)] if order_id else list(held)
+        gone = [k for k in keys if held.pop(k, None) is not None]
+        self.store.save()
+
+        return len(gone)
+
+    def close(self, slug: str, order_id: str = "") -> int:
+        """Считать заказы закрытыми: выдача по ним больше не нужна.
+
+        Номера ложатся в `closed` карты — тот же список, куда движок
+        кладёт заказы, закрывшиеся сами. Снять с паузы и не выдать — не
+        одно и то же: снятый выдастся, закрытый не выдастся никогда.
+        """
+        held = self._shared().setdefault("held", {})
+        keys = [str(order_id)] if order_id else list(held)
+        closed = self.store.conf(str(slug)).setdefault("closed", [])
+        known = {str(x) for x in closed}
+        gone = 0
+
+        for key in keys:
+            if held.pop(key, None) is None:
+                continue
+
+            if key not in known:
+                closed.append(key)
+                known.add(key)
+
+            gone += 1
+
+        self.store.save()
+
+        return gone
+
     # ---------- запись ----------
 
     def set_enabled(self, slug: str, on: bool) -> None:

@@ -224,10 +224,21 @@ class OnePassTest(unittest.IsolatedAsyncioTestCase):
     class Engine:
         """Движок-пустышка: отвечает тем, что положили."""
 
-        def __init__(self, answers):
+        def __init__(self, answers, hold=()):
             self.answers = dict(answers)
             self.asked: list = []
             self.resumed = 0
+            self.hold = {str(x) for x in hold}
+            self.looked = 0
+
+        def hold_old(self, orders):
+            """Первый взгляд на витрину — как у настоящего движка."""
+            self.looked += 1
+
+            return [o for o in orders if str(o.id) in self.hold]
+
+        def held(self, order_id):
+            return str(order_id) in self.hold
 
         async def on_paid_order(self, order):
             self.asked.append(order.id)
@@ -260,8 +271,8 @@ class OnePassTest(unittest.IsolatedAsyncioTestCase):
         return Order(id=oid, title=title, status="paid", chat_id="c",
                      description="")
 
-    async def once(self, orders, answers, seen=None):
-        engine = self.Engine(answers)
+    async def once(self, orders, answers, seen=None, hold=()):
+        engine = self.Engine(answers, hold)
         left = seen if seen is not None else set()
         unknown = await self.example_bot.one_pass(
             self.Shop(orders), engine, left, self.notify)
@@ -301,6 +312,24 @@ class OnePassTest(unittest.IsolatedAsyncioTestCase):
         engine, _, _ = await self.once([self.order("1")], answers, seen)
 
         self.assertEqual(engine.asked, ["1"])
+
+    async def test_a_held_order_is_not_delivered(self):
+        """Глушка сильнее всего остального: заказ даже не предлагается."""
+        engine, _, _ = await self.once([self.order("1")], {}, hold=["1"])
+
+        self.assertEqual(engine.asked, [])
+
+    async def test_the_seller_is_told_what_was_held(self):
+        await self.once([self.order("1")], {}, hold=["1"])
+
+        self.assertTrue(self.notes, "про отложенные заказы промолчали")
+        self.assertIn("Глушка", self.notes[0])
+
+    async def test_a_held_order_is_not_called_a_stranger(self):
+        """Он не чужой — он на паузе, и путать эти письма нельзя."""
+        _, _, unknown = await self.once([self.order("1")], {}, hold=["1"])
+
+        self.assertEqual(unknown, [])
 
     async def test_unfinished_deliveries_are_resumed(self):
         engine, _, _ = await self.once([], {})
@@ -398,6 +427,121 @@ class Base(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+
+class MuteTest(Base):
+    """Глушка. Всё, что мешает выдать код второй раз."""
+
+    async def test_a_paused_engine_buys_nothing(self):
+        engine, market = self.build(Approute())
+        self.store.shared()["paused"] = True
+        await self.pass_once(engine)
+
+        self.assertEqual(market.sent, [])
+
+    async def test_the_pause_is_explained_to_the_seller(self):
+        engine, _ = self.build(Approute())
+        self.store.shared()["paused"] = True
+        await self.pass_once(engine)
+
+        self.assertTrue(self.notes)
+        self.assertIn("глушк", " ".join(self.notes).lower())
+
+    async def test_by_hand_delivery_works_through_the_pause(self):
+        """Руками продавец смотрит на заказ сам — глушка не про него."""
+        engine, market = self.build(Approute())
+        self.store.shared()["paused"] = True
+        await engine.deliver_by_hand("robux", "777")
+
+        self.assertEqual(len(market.sent), 1)
+
+    async def test_a_held_order_is_not_delivered(self):
+        engine, market = self.build(Approute())
+        self.store.shared().setdefault("held", {})["777"] = {"title": "", "at": 0}
+        await self.pass_once(engine)
+
+        self.assertEqual(market.sent, [])
+
+    async def test_the_first_look_holds_what_was_already_there(self):
+        engine, market = self.build(Approute())
+
+        self.assertEqual([o.id for o in engine.hold_old(
+            await market.paid_orders())], ["777"])
+
+    async def test_the_second_look_holds_nothing(self):
+        """Витрину уже осматривали — всё новое действительно новое."""
+        engine, market = self.build(Approute())
+        engine.hold_old(await market.paid_orders())
+
+        self.assertEqual(engine.hold_old(await market.paid_orders()), [])
+
+    async def test_what_was_held_survives_a_restart(self):
+        engine, market = self.build(Approute())
+        engine.hold_old(await market.paid_orders())
+        again = JsonStore(self.store.path)
+
+        self.assertIn("777", again.shared().get("held") or {})
+
+    async def test_an_order_closed_meanwhile_is_not_bought(self):
+        """Продавец выдал код руками, покупатель подтвердил — и мы платим
+        за код, который уже никому не нужен."""
+        engine, market = self.build(Approute())
+        order = market.orders["777"]
+
+        async def closed(order_id):
+            # Площадка отвечает уже другим статусом: сделку подтвердили,
+            # пока мы читали каталог.
+            return Order(id=order.id, title=order.title, status="confirmed",
+                         chat_id=order.chat_id, description=order.description)
+
+        market.get_order = closed
+        await self.pass_once(engine)
+
+        self.assertEqual(market.sent, [])
+
+    async def test_a_closed_order_is_remembered(self):
+        engine, market = self.build(Approute())
+        order = market.orders["777"]
+
+        async def closed(order_id):
+            return Order(id=order.id, title=order.title, status="confirmed",
+                         chat_id=order.chat_id, description=order.description)
+
+        market.get_order = closed
+        await self.pass_once(engine)
+
+        self.assertIn("777", self.store.conf("robux").get("closed") or [])
+
+    async def test_a_closed_order_is_not_tried_again(self):
+        engine, market = self.build(Approute())
+        self.store.conf("robux").setdefault("closed", []).append("777")
+        await self.pass_once(engine)
+
+        self.assertEqual(market.sent, [])
+
+    async def test_an_unreachable_marketplace_does_not_block_the_buyer(self):
+        """Не дозвонились — заказ был оплачен секунду назад. Покупатель
+        важнее лишнего запроса."""
+        engine, market = self.build(Approute())
+
+        async def broken(order_id):
+            raise RuntimeError("связь оборвалась")
+
+        market.get_order = broken
+        await self.pass_once(engine)
+
+        self.assertEqual(len(market.sent), 1)
+
+    async def test_a_bought_code_is_still_sent_after_the_order_closed(self):
+        """Деньги уже потрачены: код должен дойти хоть кому-то."""
+        engine, market = self.build(Approute())
+        await self.pass_once(engine)
+        self.assertEqual(len(market.sent), 1)
+
+        # Вторая выдача по тому же заказу не случится вовсе: он в выданных.
+        await self.pass_once(engine)
+
+        self.assertEqual(len(market.sent), 1)
+
 
 class HappyPathTest(Base):
     """Оплачен — куплен — отправлен — отмечен."""

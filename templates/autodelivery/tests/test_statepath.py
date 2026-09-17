@@ -214,6 +214,42 @@ class AbsorbTest(unittest.TestCase):
         self.assertEqual(read(self.target)["cards"]["roblox"]["delivered"],
                          ["a"])
 
+    def test_the_closed_orders_survive_too(self):
+        """Закрытый заказ, потерявший отметку, покупается заново."""
+        write(self.target, {"cards": {"roblox": {"closed": ["b"]}}})
+        write(self.legacy, {"cards": {"roblox": {"closed": ["a"]}}})
+
+        statepath.absorb_legacy(self.target, self.legacy)
+        got = read(self.target)["cards"]["roblox"]["closed"]
+
+        self.assertEqual(sorted(got), ["a", "b"])
+
+    def test_the_orders_on_hold_survive(self):
+        write(self.target, {"shared": {"held": {"1": {"title": "а"}}}})
+        write(self.legacy, {"shared": {"held": {"2": {"title": "б"}}}})
+
+        statepath.absorb_legacy(self.target, self.legacy)
+        held = read(self.target)["shared"]["held"]
+
+        self.assertEqual(sorted(held), ["1", "2"])
+
+    def test_the_first_look_does_not_happen_twice(self):
+        """Иначе бот придержал бы всё ещё раз — уже после разбора."""
+        write(self.target, {"shared": {"started": False}})
+        write(self.legacy, {"shared": {"started": True}})
+
+        statepath.absorb_legacy(self.target, self.legacy)
+
+        self.assertTrue(read(self.target)["shared"]["started"])
+
+    def test_the_mute_switch_of_the_bot_wins(self):
+        write(self.target, {"shared": {"paused": True}})
+        write(self.legacy, {"shared": {"paused": False}})
+
+        statepath.absorb_legacy(self.target, self.legacy)
+
+        self.assertTrue(read(self.target)["shared"]["paused"])
+
     def test_the_store_reads_what_was_absorbed(self):
         write(self.legacy, {"cards": {"roblox": {"delivered": ["a"]}}})
         statepath.absorb_legacy(self.target, self.legacy)

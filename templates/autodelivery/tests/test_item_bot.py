@@ -752,6 +752,114 @@ class TemplatesPerAccountTest(unittest.TestCase):
         self.assertEqual(len(item_bot.templates_of().all()), 1)
 
 
+class MuteMenuTest(unittest.TestCase):
+    """⛔ Глушка: остановить выдачу и разобрать отложенные заказы.
+
+    Нужна она ровно для одного: чтобы бот не купил код по заказу, который
+    продавец уже закрыл руками. По сделке этого не видно — площадка держит
+    её в «оплачено», пока покупатель не подтвердит.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+
+    def hold(self, **rows):
+        conf = item_bot.settings_of()
+        held = conf.store.shared().setdefault("held", {})
+
+        for order_id, title in rows.items():
+            held[order_id] = {"title": title, "at": 0}
+
+        conf.store.save()
+
+        return conf
+
+    def buttons(self, keys):
+        return [name for row in keys for name, _ in row]
+
+    def test_the_settings_screen_counts_what_is_on_hold(self):
+        self.hold(o1="🥳ПРОМОКОДОМ🥳", o2="🥳ПРОМОКОДОМ🥳")
+        link = FakeLink(["отмена"])
+        item_bot.settings_menu(link)
+        names = self.buttons(link.asked[0][1])
+
+        self.assertTrue(any("2 заказа на паузе" in n for n in names), names)
+
+    def test_the_held_orders_are_named(self):
+        self.hold(o1="🥳ПРОМОКОДОМ🥳 80 РОБУКСОВ")
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("🥳ПРОМОКОДОМ🥳 80 РОБУКСОВ", link.asked[0][0])
+        self.assertIn("(заказ o1)", link.asked[0][0])
+
+    def test_releasing_lets_them_be_delivered(self):
+        conf = self.hold(o1="что-то")
+        link = FakeLink(["глушка:выдать"])
+        item_bot.mute_menu(link)
+
+        self.assertEqual(item_bot.settings_of().held(), {})
+        self.assertIn("Снял с паузы: 1 заказ", link.said[-1])
+
+    def test_closing_them_means_never(self):
+        """«Считать закрытыми» — это «код уже у покупателя»."""
+        self.hold(o1="Roblox 1000 Robux")
+        link = FakeLink(["глушка:закрыть"])
+        item_bot.mute_menu(link)
+        conf = item_bot.settings_of()
+
+        self.assertEqual(conf.held(), {})
+        self.assertTrue(any("o1" in (conf.store.conf(c.slug).get("closed") or [])
+                            for c in item_bot.CARDS))
+
+    def test_the_two_answers_are_not_the_same_button(self):
+        """Цена ошибки в разные стороны разная — решает продавец."""
+        self.hold(o1="что-то")
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+        names = self.buttons(link.asked[0][1])
+
+        self.assertIn("✅ Выдать их", names)
+        self.assertIn("🚫 Считать закрытыми", names)
+
+    def test_the_whole_delivery_can_be_stopped(self):
+        link = FakeLink(["глушка:выкл"])
+        item_bot.mute_menu(link)
+
+        self.assertTrue(item_bot.settings_of().paused())
+
+    def test_and_started_again(self):
+        conf = item_bot.settings_of()
+        conf.set_paused(True)
+        link = FakeLink(["глушка:вкл"])
+        item_bot.mute_menu(link)
+
+        self.assertFalse(item_bot.settings_of().paused())
+
+    def test_a_stopped_delivery_is_visible_from_the_settings_screen(self):
+        item_bot.settings_of().set_paused(True)
+        link = FakeLink(["отмена"])
+        item_bot.settings_menu(link)
+        names = self.buttons(link.asked[0][1])
+
+        self.assertTrue(any("выдача остановлена" in n.lower() for n in names),
+                        names)
+
+    def test_nothing_on_hold_is_said_plainly(self):
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("Отложенных заказов нет", link.asked[0][0])
+
+    def test_the_screen_is_reachable_from_the_settings(self):
+        link = FakeLink(["глушка", "отмена"])
+        item_bot.settings_menu(link)
+
+        self.assertIn("Глушка", link.asked[-1][0])
+
+
 class SettingsMenuTest(unittest.TestCase):
     """«Автовыдача» — кнопка, за которой продавец включает выдачу кодов.
 

@@ -2603,6 +2603,11 @@ def settings_menu(link) -> None:
     if row:
         keys.append(row)
 
+    waiting = len(conf.held())
+    mute = "⛔ Глушка: выдача остановлена" if conf.paused() \
+        else (f"⛔ Глушка: {plural(waiting, 'заказ', 'заказа', 'заказов')} "
+              f"на паузе" if waiting else "⛔ Глушка")
+    keys.append([(mute, "глушка")])
     keys.append([("✖️ Назад", "отмена")])
     answer = link.ask(
         "Автовыдача кодов.\n\n"
@@ -2611,11 +2616,108 @@ def settings_menu(link) -> None:
         ANSWER_WAIT, buttons=keys)
     text = str(answer.get("text") or "")
 
+    if text.strip().lower() == "глушка":
+        mute_menu(link)
+        return
+
     if not text.startswith(PICK_CARD):
         link.screen("Отменил.", buttons=MENU)
         return
 
     card_menu(link, conf, text[len(PICK_CARD):])
+
+
+# Сколько отложенных заказов перечислять на экране. Дальше — числом.
+MUTE_SHOWN = 8
+
+
+def mute_menu(link) -> None:
+    """Глушка: остановить выдачу и разобрать отложенные заказы.
+
+    Два разных «нет» нарочно разведены. «Считать закрытыми» — это «код уже
+    у покупателя, выдавать не надо никогда». «Выдать их» — «нет, они ждут,
+    покупай». Одной кнопкой тут не обойтись: цена ошибки в разные стороны
+    разная, и решать должен продавец, а не бот.
+    """
+    conf = settings_of()
+    held = conf.held()
+    keys = []
+
+    if conf.paused():
+        keys.append([("▶️ Снять глушку — выдавать снова", "глушка:вкл")])
+    else:
+        keys.append([("⏸ Остановить выдачу совсем", "глушка:выкл")])
+
+    if held:
+        keys.append([("✅ Выдать их", "глушка:выдать")])
+        keys.append([("🚫 Считать закрытыми", "глушка:закрыть")])
+
+    keys.append([("✖️ Назад", "отмена")])
+
+    said = ["⛔ Глушка."]
+
+    if conf.paused():
+        said.append("\nВыдача остановлена: бот не купит и не отправит "
+                    "ничего, пока вы её не снимете.")
+    else:
+        said.append("\nВыдача работает.")
+
+    if held:
+        said.append(f"\nНа паузе заказов: {len(held)}. Они висели ещё до "
+                    f"моего запуска, и по сделке не видно, выдали их "
+                    f"вручную или нет:")
+
+        for number, (order_id, about) in enumerate(held.items()):
+            if number >= MUTE_SHOWN:
+                said.append(f"  … и ещё {len(held) - MUTE_SHOWN}")
+                break
+
+            name = str((about or {}).get("title") or "без названия")
+            said.append(f"  • «{name[:40]}» (заказ {order_id})")
+
+        said.append("\n«Выдать их» — бот купит коды и отправит. "
+                    "«Считать закрытыми» — не тронет их никогда.")
+    else:
+        said.append("\nОтложенных заказов нет.")
+
+    answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip().lower()
+
+    if text == "глушка:выкл":
+        conf.set_paused(True)
+        link.screen("Выдача остановлена. Бот больше ничего не купит и не "
+                    "отправит.\n\nОплаченные заказы никуда не денутся: "
+                    "сниму глушку — разберу их обычным путём.", buttons=MENU)
+        return
+
+    if text == "глушка:вкл":
+        conf.set_paused(False)
+        link.screen("Глушка снята — выдача работает.", buttons=MENU)
+        return
+
+    if text == "глушка:выдать":
+        many = plural(conf.release(), "заказ", "заказа", "заказов")
+        link.screen(f"Снял с паузы: {many}.\n\nБот выдаст их ближайшим "
+                    f"проходом — это до минуты.", buttons=MENU)
+        return
+
+    if text == "глушка:закрыть":
+        done = 0
+
+        # Закрываем по той карте, которая узнаёт название. Не узнал никто —
+        # кладём первой: список закрытых нужен, чтобы заказ больше не
+        # всплыл, а по какой карте он лежит, на это не влияет.
+        for order_id, about in conf.held().items():
+            name = str((about or {}).get("title") or "")
+            card = card_for_title(CARDS, name) or CARDS[0]
+            done += conf.close(card.slug, order_id)
+
+        many = plural(done, "заказ", "заказа", "заказов")
+        link.screen(f"Отметил закрытыми: {many}.\n\nБот к ним больше не "
+                    f"подойдёт.", buttons=MENU)
+        return
+
+    link.screen("Отменил.", buttons=MENU)
 
 
 def card_menu(link, conf, slug: str) -> None:

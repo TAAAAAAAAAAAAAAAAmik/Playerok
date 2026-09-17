@@ -181,6 +181,33 @@ def strangers(orders) -> str:
     return "\n".join(lines)
 
 
+def held_orders(orders) -> str:
+    """Письмо про заказы, отложенные при первом запуске."""
+    rows = list(orders)
+    lines = [f"⛔ Глушка: отложил оплаченных заказов — {len(rows)}.", "",
+             "Они висели ещё до моего запуска, и по сделке не видно, "
+             "выдали их вручную или нет. Покупать коды вслепую я не стал: "
+             "это ваши деньги.", ""]
+
+    for order in rows[:STRANGERS_SHOWN]:
+        lines.append(f"  • «{order.title or 'без названия'}» "
+                     f"(заказ {order.id})")
+
+    if len(rows) > STRANGERS_SHOWN:
+        lines.append(f"  … и ещё {len(rows) - STRANGERS_SHOWN}")
+
+    lines += [
+        "",
+        "Если они и правда ждут кода — бот → «⚙️ Автовыдача» → «⛔ Глушка» "
+        "→ «✅ Выдать их».",
+        "Если уже выданы — там же «🚫 Считать закрытыми».",
+        "",
+        "Новых заказов это не касается: их я выдаю сам.",
+    ]
+
+    return "\n".join(lines)
+
+
 async def one_pass(market, engine, seen: set, notify) -> list:
     """Один проход по оплаченным заказам. → непризнанные заказы.
 
@@ -190,9 +217,17 @@ async def one_pass(market, engine, seen: set, notify) -> list:
     # Чужие копим за проход и говорим о них одним письмом: по письму на
     # заказ — это рассылка, а не помощь.
     unknown = []
+    orders = await market.paid_orders()
 
-    for order in await market.paid_orders():
-        if order.id in seen:
+    # Первый взгляд на витрину: всё, что висело до запуска, откладываем.
+    # Продавец мог выдать эти заказы руками — по сделке это не видно.
+    held = engine.hold_old(orders)
+
+    if held:
+        await notify(held_orders(held))
+
+    for order in orders:
+        if order.id in seen or engine.held(order.id):
             continue
 
         result = await engine.on_paid_order(order)

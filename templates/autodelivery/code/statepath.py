@@ -167,6 +167,36 @@ def _log(*lists) -> list:
     return rows[:LOG_MAX]
 
 
+def _shared(legacy, target) -> dict:
+    """Общий раздел: глушка и заказы на паузе.
+
+    Заказы на паузе объединяем: потерять отложенный значит выдать его
+    автоматически — а его, может быть, уже выдали руками.
+    """
+    legacy = legacy if isinstance(legacy, dict) else {}
+    target = target if isinstance(target, dict) else {}
+
+    if not legacy and not target:
+        return {}
+
+    out = dict(legacy)
+    out.update(target)
+    held = {}
+
+    for rows in (legacy.get("held"), target.get("held")):
+        if isinstance(rows, dict):
+            held.update(rows)
+
+    if held or "held" in out:
+        out["held"] = held
+
+    # «Витрину осматривали» — один раз навсегда: сказал хоть один файл,
+    # значит осматривали. Иначе первый запуск случился бы дважды.
+    out["started"] = bool(legacy.get("started") or target.get("started"))
+
+    return out
+
+
 def merged(target: dict, legacy: dict) -> dict:
     """Нынешнее состояние + старое. → что записать.
 
@@ -175,7 +205,12 @@ def merged(target: dict, legacy: dict) -> dict:
     деньги.
     """
     out = copy.deepcopy(legacy)
+    shared = _shared(out.get("shared"), target.get("shared"))
     out.update({k: v for k, v in target.items() if k != "cards"})
+
+    if shared:
+        out["shared"] = shared
+
     cards = out.setdefault("cards", {})
 
     if not isinstance(cards, dict):
@@ -192,6 +227,9 @@ def merged(target: dict, legacy: dict) -> dict:
                      if k not in ("delivered", "log")})
         card["delivered"] = _delivered(old.get("delivered"),
                                        fresh.get("delivered"))
+        # Закрытые — такие же деньги, как выданные: заказ, отмеченный
+        # «выдавать не надо», после потери отметки покупается заново.
+        card["closed"] = _delivered(old.get("closed"), fresh.get("closed"))
         card["log"] = _log(old.get("log"), fresh.get("log"))
         cards[slug] = card
 
@@ -200,6 +238,7 @@ def merged(target: dict, legacy: dict) -> dict:
     for slug, old in list(cards.items()):
         if isinstance(old, dict):
             old.setdefault("delivered", [])
+            old.setdefault("closed", [])
             old.setdefault("log", [])
 
     return out

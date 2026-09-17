@@ -86,6 +86,19 @@ class JsonStore:
             "delivered": [],       # номера заказов, по которым код ушёл
             "log": [],             # записи выдач, новые в начале
             "force": [],           # ручная очередь: выдать эти заказы
+            "closed": [],          # заказы, по которым выдача уже не нужна
+        })
+
+    def shared(self) -> dict:
+        """Общее на кабинет, а не на карту.
+
+        Глушка и заказы на паузе — не про товар: заказ может оказаться
+        вовсе не нашим, а остановить выдачу продавец хочет всю разом.
+        """
+        return self.data.setdefault("shared", {
+            "paused": False,       # глушка: не выдавать ничего
+            "held": {},            # заказы на паузе: номер → чем был
+            "started": False,      # витрину уже осматривали при запуске
         })
 
     def save(self) -> None:
@@ -109,6 +122,7 @@ class JsonStore:
             for conf in self.data.get("cards", {}).values():
                 del conf.setdefault("log", [])[LOG_MAX:]
                 del conf.setdefault("delivered", [])[:-DELIVERED_MAX]
+                del conf.setdefault("closed", [])[:-DELIVERED_MAX]
             folder = os.path.dirname(os.path.abspath(self.path)) or "."
             os.makedirs(folder, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp")
