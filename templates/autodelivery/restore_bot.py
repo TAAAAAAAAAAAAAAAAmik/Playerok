@@ -29,6 +29,7 @@ from alarm import Alarm, COOKIES_ADVICE                       # noqa: E402
 from auth import sign_in                                      # noqa: E402
 from playerok import is_auth_error                            # noqa: E402
 from envfile import load_env_file                             # noqa: E402
+import statepath                                  # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -41,7 +42,8 @@ PERIOD = float(os.environ.get("PLAYEROK_RESTORE_PERIOD", 120))
 # Сколько проданных товаров разбирать за проход.
 BATCH = 12
 
-HANDLED_FILE = os.environ.get("PLAYEROK_RESTORED", "state/restored.json")
+HANDLED_FILE = statepath.in_project(
+    os.environ.get("PLAYEROK_RESTORED", "state/restored.json"))
 
 # Насколько замедляться, когда площадка просит подождать, и до какого
 # предела. Продолжать долбить в том же темпе — верный способ получить

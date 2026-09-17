@@ -20,6 +20,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import delivery                                                 # noqa: E402
 import supplier as sup                                          # noqa: E402
@@ -215,6 +216,139 @@ def catalog_of(card, region):
     return [Denomination(service_id="svc-gl", item_id="den-1000", value=1000,
                          title="1000 Robux", price=1.2, in_stock=5,
                          region=region or "GL")]
+
+
+class OnePassTest(unittest.IsolatedAsyncioTestCase):
+    """Проход боевого цикла целиком: кого выдали, о ком сказали."""
+
+    class Engine:
+        """Движок-пустышка: отвечает тем, что положили."""
+
+        def __init__(self, answers):
+            self.answers = dict(answers)
+            self.asked: list = []
+            self.resumed = 0
+
+        async def on_paid_order(self, order):
+            self.asked.append(order.id)
+
+            return self.answers.get(order.id)
+
+        async def resume_unfinished(self):
+            self.resumed += 1
+
+            return []
+
+    class Shop:
+        def __init__(self, orders):
+            self.orders = list(orders)
+
+        async def paid_orders(self):
+            return list(self.orders)
+
+    def setUp(self):
+        import example_bot
+
+        self.example_bot = example_bot
+        self.notes: list = []
+
+    async def notify(self, text):
+        self.notes.append(text)
+
+    @staticmethod
+    def order(oid, title="🥳ПРОМОКОДОМ🥳"):
+        return Order(id=oid, title=title, status="paid", chat_id="c",
+                     description="")
+
+    async def once(self, orders, answers, seen=None):
+        engine = self.Engine(answers)
+        left = seen if seen is not None else set()
+        unknown = await self.example_bot.one_pass(
+            self.Shop(orders), engine, left, self.notify)
+
+        return engine, left, unknown
+
+    async def test_an_unrecognised_order_is_reported(self):
+        _, _, unknown = await self.once([self.order("1")], {})
+
+        self.assertEqual([o.id for o in unknown], ["1"])
+        self.assertTrue(self.notes, "продавцу не сказали ни слова")
+
+    async def test_a_delivered_order_is_not_reported(self):
+        await self.once([self.order("1")],
+                       {"1": delivery.Result(True, STATE_DONE, "")})
+
+        self.assertEqual(self.notes, [])
+
+    async def test_one_letter_for_the_whole_pass(self):
+        await self.once([self.order("1"), self.order("2")], {})
+
+        self.assertEqual(len(self.notes), 1)
+
+    async def test_the_same_order_is_not_reported_twice(self):
+        seen: set = set()
+        await self.once([self.order("1")], {}, seen)
+        self.notes.clear()
+        await self.once([self.order("1")], {}, seen)
+
+        self.assertEqual(self.notes, [])
+
+    async def test_a_refused_order_is_tried_again_next_pass(self):
+        """Отказ однажды проходит сам: номинал вернулся, связь поднялась."""
+        seen: set = set()
+        answers = {"1": delivery.Result(False, "отказ", "нет в наличии")}
+        await self.once([self.order("1")], answers, seen)
+        engine, _, _ = await self.once([self.order("1")], answers, seen)
+
+        self.assertEqual(engine.asked, ["1"])
+
+    async def test_unfinished_deliveries_are_resumed(self):
+        engine, _, _ = await self.once([], {})
+
+        self.assertEqual(engine.resumed, 1)
+
+
+class StrangerOrderTest(unittest.TestCase):
+    """Про непризнанный заказ бот обязан сказать.
+
+    Движок возвращает None, цикл идёт дальше — и со стороны это выглядит
+    как «автовыдача сломана»: заказ оплачен, покупатель ждёт, бот молчит.
+    """
+
+    def setUp(self):
+        import example_bot
+
+        self.example_bot = example_bot
+
+    def orders(self, count):
+        return [Order(id=str(n), title=f"🥳ПРОМОКОДОМ🥳 №{n}", status="paid",
+                      chat_id=f"c{n}", description="")
+                for n in range(count)]
+
+    def test_the_listing_name_is_named(self):
+        text = self.example_bot.strangers(self.orders(1))
+
+        self.assertIn("🥳ПРОМОКОДОМ🥳 №0", text)
+
+    def test_the_order_number_is_named(self):
+        """Без номера продавцу нечего открыть в кабинете."""
+        self.assertIn("(заказ 0)", self.example_bot.strangers(self.orders(1)))
+
+    def test_the_cure_is_named(self):
+        text = self.example_bot.strangers(self.orders(1))
+
+        self.assertIn("Слово-опознаватель", text)
+
+    def test_the_seller_is_told_to_hand_it_over_himself(self):
+        """Покупатель ждёт прямо сейчас, и это важнее объяснений."""
+        self.assertIn("вручную", self.example_bot.strangers(self.orders(1)))
+
+    def test_a_crowd_is_counted_not_listed(self):
+        text = self.example_bot.strangers(self.orders(40))
+
+        self.assertIn("Заказов: 40", text)
+        self.assertIn("и ещё 35", text)
+        self.assertLess(len(text.splitlines()), 20)
 
 
 class Base(unittest.IsolatedAsyncioTestCase):

@@ -29,6 +29,7 @@ code/
   supplier.py      клиент поставщика кодов AppRoute — переносится как есть
   catalog.py       номинал из названия, регион из описания, подбор у поставщика
   store.py         состояние выдачи, атомарная запись, журнал
+  statepath.py     ГДЕ лежит это состояние — один путь на весь проект
   delivery.py      движок: покупка, ожидание кода, отправка, возобновление
 tests/
   test_delivery.py 25 тестов движка на поддельных площадке и поставщике
@@ -72,7 +73,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 838 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 869 тестов, сети не требуют
 ```
 
 ---

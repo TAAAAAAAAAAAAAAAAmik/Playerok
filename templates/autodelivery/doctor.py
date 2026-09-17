@@ -342,16 +342,49 @@ def _whose(cards, is_card_order, conf, title: str):
 
 
 def _settings():
-    from accounts import AccountStore
     from settings import Settings
     from store import JsonStore
+    import statepath
 
-    accounts_dir = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
-    state = os.environ.get("PLAYEROK_STATE", "state/delivery")
-    current = AccountStore(os.path.join(HERE, accounts_dir)).current()
-    name = current.id if current else "default"
+    return Settings(JsonStore(statepath.settings_file()))
 
-    return Settings(JsonStore(os.path.join(HERE, state, f"{name}.json")))
+
+def state_check() -> None:
+    """Один ли файл состояния у бота и у выдачи.
+
+    Проверка выглядит лишней ровно до того дня, когда путь разъедется.
+    У нас он разъехался: бот писал настройки в state/delivery/<кабинет>,
+    движок читал state/seller-1.json — и молчал на каждом оплаченном
+    заказе, притом что и бот, и этот самый doctor показывали «включено».
+    """
+    print("\n── Состояние выдачи ──")
+
+    try:
+        import statepath
+    except ImportError as e:
+        say(BAD, f"не подключается расчёт пути: {e}")
+        return
+
+    path = statepath.settings_file()
+    print(f"     файл: {path}")
+
+    if not os.path.exists(path):
+        say(WARN, "файла состояния ещё нет — ничего не настраивали "
+                  "или настраивали в другом кабинете",
+            "бот → «⚙️ Автовыдача» → выберите товар → «▶️ Включить»")
+
+    legacy = statepath.legacy_file()
+
+    if os.path.exists(legacy):
+        say(WARN, f"рядом лежит старый файл движка {os.path.basename(legacy)}"
+                  f" — в нём могли остаться номера выданных заказов",
+            "запустите выдачу: sh run_bot.sh delivery_bot.py — она вольёт "
+            "его в нынешний и отодвинет в сторону")
+
+    moved = legacy + statepath.MOVED_SUFFIX
+
+    if os.path.exists(moved):
+        say(OK, "старый файл движка перенесён — журнал выдач сохранён")
 
 
 def delivery_check() -> None:
@@ -359,18 +392,11 @@ def delivery_check() -> None:
 
     try:
         from cards import CARDS
-        from accounts import AccountStore
-        from settings import Settings
-        from store import JsonStore
     except ImportError as e:
         say(BAD, f"не подключаются настройки: {e}")
         return
 
-    accounts_dir = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
-    state = os.environ.get("PLAYEROK_STATE", "state/delivery")
-    current = AccountStore(os.path.join(HERE, accounts_dir)).current()
-    name = current.id if current else "default"
-    conf = Settings(JsonStore(os.path.join(HERE, state, f"{name}.json")))
+    conf = _settings()
     on = [c for c in CARDS if conf.card(c.slug)["enabled"]]
 
     if not on:
@@ -458,11 +484,7 @@ def pinned_check(catalog) -> None:
     except ImportError:
         return
 
-    accounts_dir = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
-    state = os.environ.get("PLAYEROK_STATE", "state/delivery")
-    current = AccountStore(os.path.join(HERE, accounts_dir)).current()
-    name = current.id if current else "default"
-    conf = Settings(JsonStore(os.path.join(HERE, state, f"{name}.json")))
+    conf = _settings()
 
     for card in CARDS:
         for region in REGIONS:
@@ -558,6 +580,7 @@ def main() -> None:
     account = login_check()
     templates_check()
     listings_check(account)
+    state_check()
     delivery_check()
     supplier_check()
     orders_write_check()

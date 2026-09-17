@@ -31,6 +31,7 @@ from alarm import Alarm, COOKIES_ADVICE                       # noqa: E402
 from auth import sign_in                                      # noqa: E402
 from playerok import is_auth_error                            # noqa: E402
 from envfile import load_env_file                             # noqa: E402
+import statepath                                  # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -41,7 +42,8 @@ log = logging.getLogger("notify")
 PAUSE = 5
 MAX_PAUSE = 120
 
-SEEN_FILE = os.environ.get("PLAYEROK_SEEN", "state/seen.json")
+SEEN_FILE = statepath.in_project(
+    os.environ.get("PLAYEROK_SEEN", "state/seen.json"))
 
 
 def wanted() -> tuple:

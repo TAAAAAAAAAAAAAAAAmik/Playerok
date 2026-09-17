@@ -67,6 +67,7 @@ from owner import link_from_env                               # noqa: E402
 import listing                                                # noqa: E402
 import copyitem                                               # noqa: E402
 import grouping                                               # noqa: E402
+import statepath                                              # noqa: E402
 import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
@@ -152,7 +153,8 @@ SERIES_WORDS = ("серия", "серия номиналов", "номиналы
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
-TEMPLATE_DIR = os.environ.get("PLAYEROK_TEMPLATES", "state/templates")
+TEMPLATE_DIR = statepath.in_project(
+    os.environ.get("PLAYEROK_TEMPLATES", "state/templates"))
 
 # Приставка у значения кнопки шаблона. Нужна, чтобы номер шаблона нельзя
 # было спутать с ответом на другой вопрос.
@@ -178,7 +180,8 @@ PICK_LIVE = "liv:"
 # Где лежит состояние выдачи: и настройки, и журнал выданных заказов. На
 # кабинет: товары и слова-опознаватели у разных кабинетов разные, а
 # смешать журналы двух кабинетов означало бы не выдать оплаченный заказ.
-SETTINGS_DIR = os.environ.get("PLAYEROK_STATE", "state/delivery")
+SETTINGS_DIR = statepath.in_project(
+    os.environ.get("PLAYEROK_STATE", "state/delivery"))
 
 # User-agent, которым бот входит и работает. Раз сессию выдаём мы сами,
 # он наш: площадка сверяет его с тем, при котором сессия выдана, и
@@ -189,7 +192,8 @@ DEFAULT_UA = os.environ.get(
     "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
 
 # Где живут сохранённые кабинеты.
-ACCOUNTS_DIR = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
+ACCOUNTS_DIR = statepath.in_project(
+    os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts"))
 
 # Сколько ждать ответа на один вопрос. Полчаса: продавец может отвлечься,
 # и бот не должен ронять начатое из-за этого.
@@ -2568,8 +2572,14 @@ def settings_of() -> Settings:
     """
     current = AccountStore(ACCOUNTS_DIR).current()
     name = current.id if current else "default"
+    path = statepath.settings_file(name, SETTINGS_DIR)
 
-    return Settings(JsonStore(os.path.join(SETTINGS_DIR, f"{name}.json")))
+    # Старый файл движка вливаем и здесь: продавец может открыть настройки
+    # раньше, чем движок успеет запуститься, и тогда он увидел бы журнал
+    # без уже выданных заказов.
+    statepath.absorb_legacy(path)
+
+    return Settings(JsonStore(path))
 
 
 def settings_menu(link) -> None:

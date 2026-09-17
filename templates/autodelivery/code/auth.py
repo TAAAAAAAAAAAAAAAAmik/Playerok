@@ -24,14 +24,22 @@ from typing import Any
 
 from accounts import AccountStore
 from owner import CookieStore, cookies_now, link_from_env
+from statepath import in_project
 
 # Где лежат присланные куки. Рядом с состоянием выдач, а не в коде.
-COOKIE_FILE = os.environ.get("PLAYEROK_COOKIE_FILE", "state/cookies.json")
+#
+# Путь приводится к папке проекта нарочно: выдачу запускают и сторожем, и
+# руками из домашней папки, а «state/cookies.json» в этих случаях
+# указывает в разные места. Бот тогда просит куки заново, притом что они
+# лежат на диске.
+COOKIE_FILE = in_project(
+    os.environ.get("PLAYEROK_COOKIE_FILE", "state/cookies.json"))
 
 # Где живут сохранённые кабинеты. Если есть хоть один — вход идёт через
 # него, а не через одиночные куки: иначе переключение аккаунта ничего бы
 # не меняло.
-ACCOUNTS_DIR = os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts")
+ACCOUNTS_DIR = in_project(
+    os.environ.get("PLAYEROK_ACCOUNTS", "state/accounts"))
 
 
 def user_agent_from_env() -> str:
