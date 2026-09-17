@@ -16,7 +16,7 @@ from catalog import (UNITS, Card, denominations_for,            # noqa: E402
                      is_card_order, match_denomination, matches_service,
                      nominal_by_unit, nominal_for,
                      nominal_from_description, numbers_by_unit,
-                     numbers_in,
+                     numbers_in, stop_words, whose,
                      nominal_from_title, render, shown_number,
                      region_of_service, services_for)
 
@@ -743,6 +743,96 @@ class NumberAcrossLinesTest(unittest.TestCase):
         """«24\nробуксы начисляются» — это не «24 робукса»."""
         self.assertEqual(numbers_by_unit("выдача 24\nробуксы начисляются",
                                          ("робукс",)), [])
+
+
+class StopWordTest(unittest.TestCase):
+    """Слово-исключение: «это не мой товар, что бы ты там ни узнал».
+
+    Один и тот же робукс продают двумя способами: «80 РОБУКСОВ
+    промокодом» — это код, «80 РОБУКСОВ через геймпасс» — выдача внутри
+    игры. Названия почти совпадают, а выдать по второму код первого
+    значит купить не то, что продано.
+    """
+
+    CARD = Card(slug="robux", title="Roblox", emoji="🎮",
+                keywords=("robux", "робукс"), measure="Robux", unit=UNITS,
+                subcategory="Roblox Gift Cards", activation="")
+
+    def test_a_stop_word_rejects_the_order(self):
+        self.assertFalse(is_card_order(self.CARD, "80 РОБУКСОВ ГЕЙМПАСС",
+                                       stop="геймпасс"))
+
+    def test_without_it_the_order_is_ours(self):
+        self.assertTrue(is_card_order(self.CARD, "80 РОБУКСОВ ГЕЙМПАСС"))
+
+    def test_it_is_stronger_than_the_keyword(self):
+        """Продавец сказал «не мой» — спорить не с чем."""
+        self.assertFalse(is_card_order(self.CARD, "80 РОБУКСОВ ГЕЙМПАСС",
+                                       keyword="робукс", stop="геймпасс"))
+
+    def test_several_words_are_separated_by_commas(self):
+        for title in ("робукс аккаунт", "робукс геймпасс"):
+            self.assertFalse(is_card_order(self.CARD, title,
+                                           stop="геймпасс, аккаунт"), title)
+
+    def test_case_and_spaces_do_not_matter(self):
+        self.assertFalse(is_card_order(self.CARD, "80 Робуксов ГеймПасс",
+                                       stop="  ГЕЙМПАСС  "))
+
+    def test_an_empty_stop_changes_nothing(self):
+        self.assertTrue(is_card_order(self.CARD, "80 робуксов", stop="  "))
+
+    def test_the_words_are_split(self):
+        self.assertEqual(stop_words("геймпасс, аккаунт; пакет"),
+                         ("геймпасс", "аккаунт", "пакет"))
+
+
+class WhoseTest(unittest.TestCase):
+    """Кому достанется заказ и ПОЧЕМУ. Ответ идёт в письма и на экраны."""
+
+    CARD = Card(slug="robux", title="Roblox Gift Cards", emoji="🎮",
+                keywords=("robux", "робукс"), measure="Robux", unit=UNITS,
+                subcategory="Roblox Gift Cards", activation="")
+
+    def conf(self, **fields):
+        base = {"enabled": True}
+        base.update(fields)
+
+        return lambda slug: base
+
+    def test_ours_is_ours(self):
+        card, why = whose([self.CARD], "80 робуксов", self.conf())
+
+        self.assertIs(card, self.CARD)
+        self.assertEqual(why, "мой товар")
+
+    def test_a_disabled_card_is_named_as_disabled(self):
+        card, why = whose([self.CARD], "80 робуксов",
+                          self.conf(enabled=False))
+
+        self.assertIs(card, self.CARD)
+        self.assertIn("выключена", why)
+
+    def test_a_keyword_that_does_not_match_is_explained(self):
+        card, why = whose([self.CARD], "80 робуксов",
+                          self.conf(keyword="промокод"))
+
+        self.assertIsNone(card)
+        self.assertIn("промокод", why)
+
+    def test_a_stop_word_is_explained(self):
+        card, why = whose([self.CARD], "80 робуксов геймпасс",
+                          self.conf(stop="геймпасс"))
+
+        self.assertIsNone(card)
+        self.assertIn("геймпасс", why)
+
+    def test_a_foreign_order_is_foreign(self):
+        card, why = whose([self.CARD], "🏆 ПОПУЛЯРНЫЙ ПАКЕТ • 3 LVL",
+                          self.conf())
+
+        self.assertIsNone(card)
+        self.assertEqual(why, "не мой товар")
 
 
 if __name__ == "__main__":

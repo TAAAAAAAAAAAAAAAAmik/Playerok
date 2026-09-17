@@ -760,13 +760,28 @@ class MuteMenuTest(unittest.TestCase):
     её в «оплачено», пока покупатель не подтвердит.
     """
 
+    MINE = "🥳ПРОМОКОДОМ🥳😎 АВТОВЫДАЧА😎"
+    GAMEPASS = "🔴 80 РОБУКСОВ 🔴 АВТОВЫДАЧА ГЕЙМПАСС"
+    ALIEN = "🏆 ПОПУЛЯРНЫЙ ПАКЕТ • 50.000.000₽ • 3 LVL"
+
     def setUp(self):
         self.root = tempfile.mkdtemp()
         item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
         item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
 
-    def hold(self, **rows):
+    def hold(self, on=True, keyword="автовыдача", **rows):
+        """Кладём заказы на паузу.
+
+        Слово-опознаватель по умолчанию «автовыдача» — ровно как у
+        продавца: в названии его объявления нет ни «robux», ни «роблокс»,
+        и без своего слова бот не узнал бы даже свой товар.
+        """
         conf = item_bot.settings_of()
+
+        if on:
+            conf.set_enabled("robux", True)
+            conf.set_keyword("robux", keyword)
+
         held = conf.store.shared().setdefault("held", {})
 
         for order_id, title in rows.items():
@@ -780,7 +795,7 @@ class MuteMenuTest(unittest.TestCase):
         return [name for row in keys for name, _ in row]
 
     def test_the_settings_screen_counts_what_is_on_hold(self):
-        self.hold(o1="🥳ПРОМОКОДОМ🥳", o2="🥳ПРОМОКОДОМ🥳")
+        self.hold(o1=self.MINE, o2=self.MINE)
         link = FakeLink(["отмена"])
         item_bot.settings_menu(link)
         names = self.buttons(link.asked[0][1])
@@ -788,24 +803,84 @@ class MuteMenuTest(unittest.TestCase):
         self.assertTrue(any("2 заказа на паузе" in n for n in names), names)
 
     def test_the_held_orders_are_named(self):
-        self.hold(o1="🥳ПРОМОКОДОМ🥳 80 РОБУКСОВ")
+        self.hold(o1=self.MINE)
         link = FakeLink(["отмена"])
         item_bot.mute_menu(link)
 
-        self.assertIn("🥳ПРОМОКОДОМ🥳 80 РОБУКСОВ", link.asked[0][0])
-        self.assertIn("(заказ o1)", link.asked[0][0])
+        self.assertIn("ПРОМОКОДОМ", link.asked[0][0])
 
-    def test_releasing_lets_them_be_delivered(self):
-        conf = self.hold(o1="что-то")
+    def test_our_order_is_marked_as_ours(self):
+        self.hold(o1=self.MINE)
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("✅", link.asked[0][0])
+        self.assertIn("моих — 1", link.asked[0][0])
+
+    def test_a_gamepass_order_is_not_ours(self):
+        """Тот же робукс, но выдача через геймпасс — другой товар, и код
+        подарочной карты по нему покупать нельзя."""
+        self.hold(o1=self.GAMEPASS)
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("➖", link.asked[0][0])
+        self.assertIn("моих — 0", link.asked[0][0])
+
+    def test_a_foreign_order_is_explained(self):
+        self.hold(o1=self.ALIEN)
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("не мой товар", link.asked[0][0])
+
+    def test_a_keyword_that_does_not_match_is_explained(self):
+        """Иначе продавец не поймёт, почему его же товар «не мой»."""
+        self.hold(keyword="промокод", o1="🔴 80 РОБУКСОВ 🔴 АВТОВЫДАЧА")
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("промокод", link.asked[0][0])
+
+    def test_the_word_promo_separates_the_two_ways_of_selling(self):
+        """У продавца оба объявления про робуксы и оба «автовыдача».
+        Отличает их только слово «промокодом» — по нему и делим."""
+        self.hold(keyword="промокод", o1=self.MINE,
+                  o2="🔴 80 РОБУКСОВ 🔴 💫 АВТОВЫДАЧА 💫")
         link = FakeLink(["глушка:выдать"])
         item_bot.mute_menu(link)
 
-        self.assertEqual(item_bot.settings_of().held(), {})
+        self.assertEqual(list(item_bot.settings_of().held()), ["o2"])
+
+    def test_a_stop_word_of_the_seller_wins_over_the_keyword(self):
+        conf = self.hold(o1=self.MINE)
+        conf.set_stop("robux", "промокод")
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("моих — 0", link.asked[0][0])
+
+    def test_only_our_orders_are_released(self):
+        """Чужие бот всё равно не выдаст, и держать их в очереди — значит
+        заставлять продавца ждать выдачи, которой не будет."""
+        conf = self.hold(o1=self.MINE, o2=self.GAMEPASS, o3=self.ALIEN)
+        link = FakeLink(["глушка:выдать"])
+        item_bot.mute_menu(link)
+        left = item_bot.settings_of().held()
+
+        self.assertEqual(sorted(left), ["o2", "o3"])
         self.assertIn("Снял с паузы: 1 заказ", link.said[-1])
+
+    def test_the_rest_is_explained_not_silently_kept(self):
+        self.hold(o1=self.MINE, o2=self.ALIEN)
+        link = FakeLink(["глушка:выдать"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("оставил на паузе", link.said[-1])
 
     def test_closing_them_means_never(self):
         """«Считать закрытыми» — это «код уже у покупателя»."""
-        self.hold(o1="Roblox 1000 Robux")
+        self.hold(o1=self.MINE)
         link = FakeLink(["глушка:закрыть"])
         item_bot.mute_menu(link)
         conf = item_bot.settings_of()
@@ -816,13 +891,56 @@ class MuteMenuTest(unittest.TestCase):
 
     def test_the_two_answers_are_not_the_same_button(self):
         """Цена ошибки в разные стороны разная — решает продавец."""
-        self.hold(o1="что-то")
+        self.hold(o1=self.MINE)
         link = FakeLink(["отмена"])
         item_bot.mute_menu(link)
         names = self.buttons(link.asked[0][1])
 
-        self.assertIn("✅ Выдать их", names)
+        self.assertTrue(any("Выдать мои" in n for n in names), names)
         self.assertIn("🚫 Считать закрытыми", names)
+
+    def test_every_order_has_its_own_button(self):
+        """В списке разные товары, и решение по ним разное."""
+        self.hold(o1=self.MINE, o2=self.ALIEN)
+        link = FakeLink(["отмена"])
+        item_bot.mute_menu(link)
+        values = [value for row in link.asked[0][1] for _, value in row]
+
+        self.assertIn(item_bot.PICK_HELD + "o1", values)
+        self.assertIn(item_bot.PICK_HELD + "o2", values)
+
+    def test_one_order_can_be_released_alone(self):
+        self.hold(o1=self.MINE, o2=self.MINE)
+        link = FakeLink([item_bot.PICK_HELD + "o1", "один:выдать"])
+        item_bot.mute_menu(link)
+
+        self.assertEqual(list(item_bot.settings_of().held()), ["o2"])
+
+    def test_one_order_can_be_closed_alone(self):
+        self.hold(o1=self.MINE, o2=self.MINE)
+        link = FakeLink([item_bot.PICK_HELD + "o2", "один:закрыть"])
+        item_bot.mute_menu(link)
+        conf = item_bot.settings_of()
+
+        self.assertEqual(list(conf.held()), ["o1"])
+        self.assertIn("o2", conf.store.conf("robux").get("closed") or [])
+
+    def test_the_single_order_screen_shows_the_verdict(self):
+        self.hold(o1=self.GAMEPASS)
+        link = FakeLink([item_bot.PICK_HELD + "o1", "отмена"])
+        item_bot.mute_menu(link)
+
+        # Второй экран — про один заказ; «Назад» с него снова открывает
+        # список, поэтому смотрим именно на второй, а не на последний.
+        self.assertIn("Заказ o1", link.asked[1][0])
+        self.assertIn("не мой", link.asked[1][0])
+
+    def test_a_vanished_order_is_said_plainly(self):
+        self.hold(o1=self.MINE)
+        link = FakeLink([item_bot.PICK_HELD + "нет-такого"])
+        item_bot.mute_menu(link)
+
+        self.assertIn("уже нет", link.said[-1])
 
     def test_the_whole_delivery_can_be_stopped(self):
         link = FakeLink(["глушка:выкл"])

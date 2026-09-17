@@ -335,7 +335,9 @@ def _whose(cards, is_card_order, conf, title: str):
     одной.
     """
     for card in cards:
-        if is_card_order(card, title, conf.card(card.slug)["keyword"]):
+        saved = conf.card(card.slug)
+
+        if is_card_order(card, title, saved["keyword"], saved.get("stop", "")):
             return card
 
     return None

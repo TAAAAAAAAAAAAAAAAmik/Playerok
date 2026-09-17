@@ -240,6 +240,9 @@ class OnePassTest(unittest.IsolatedAsyncioTestCase):
         def held(self, order_id):
             return str(order_id) in self.hold
 
+        def whose(self, title):
+            return None, "не мой товар"
+
         async def on_paid_order(self, order):
             self.asked.append(order.id)
 
@@ -371,6 +374,27 @@ class StrangerOrderTest(unittest.TestCase):
     def test_the_seller_is_told_to_hand_it_over_himself(self):
         """Покупатель ждёт прямо сейчас, и это важнее объяснений."""
         self.assertIn("вручную", self.example_bot.strangers(self.orders(1)))
+
+    def test_our_order_is_marked(self):
+        text = self.example_bot.held_orders(
+            self.orders(1), lambda title: (object(), "мой товар"))
+
+        self.assertIn("✅", text)
+
+    def test_a_foreign_order_says_why(self):
+        """Продавец видит пять заказов, где его товар один, и должен
+        понимать, собирается ли бот выдать остальные четыре."""
+        text = self.example_bot.held_orders(
+            self.orders(1), lambda title: (None, "не мой товар"))
+
+        self.assertIn("➖", text)
+        self.assertIn("не мой товар", text)
+
+    def test_the_marks_are_explained(self):
+        text = self.example_bot.held_orders(
+            self.orders(1), lambda title: (None, "не мой товар"))
+
+        self.assertIn("✅ — мой товар", text)
 
     def test_a_crowd_is_counted_not_listed(self):
         text = self.example_bot.strangers(self.orders(40))

@@ -57,6 +57,7 @@ class Settings:
             "enabled": bool(conf.get("enabled")),
             "region": str(conf.get("region") or "").upper(),
             "keyword": str(conf.get("keyword") or ""),
+            "stop": str(conf.get("stop") or ""),
             "greeting": str(conf.get("greeting") or ""),
             "note": str(conf.get("note") or ""),
             "ad_title": str(conf.get("ad_title") or ""),
@@ -173,6 +174,10 @@ class Settings:
 
     def set_keyword(self, slug: str, word: str) -> None:
         self._change(slug, "keyword", " ".join(_text(word).split()))
+
+    def set_stop(self, slug: str, words: str) -> None:
+        """Слова-исключения: «геймпасс, аккаунт». Через запятую."""
+        self._change(slug, "stop", " ".join(_text(words).split()))
 
     def set_greeting(self, slug: str, text: str) -> None:
         self._change(slug, "greeting", _text(text))

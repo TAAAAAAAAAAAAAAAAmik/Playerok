@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 from catalog import (Card, Denomination, match_denomination,
                      nominal_for, order_reference, pick_card,
-                     region_from_description)
+                     region_from_description, whose)
 from marketplace import Marketplace, Order
 from store import (STATE_BUYING, STATE_DONE, STATE_NEW, STATE_SEND_FAILED,
                    STATE_SENDING, STATE_WAIT_CODE, UNFINISHED, Store,
@@ -188,6 +188,14 @@ class DeliveryEngine:
             logger.warning("первый запуск: придержал заказов %d", len(fresh))
 
         return fresh
+
+    def whose(self, title: str) -> tuple:
+        """Чей это заказ и почему → (карта или None, пояснение).
+
+        Нужно письмам и экранам: продавец, глядя на отложенные заказы,
+        должен видеть, что бот о них думает, ДО того как нажмёт «выдать».
+        """
+        return whose(self.cards, title, lambda slug: self.store.conf(slug))
 
     def _shared(self) -> dict:
         """Общий раздел состояния. У чужого хранилища его может не быть."""

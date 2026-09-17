@@ -80,7 +80,7 @@ from auth import open_account, sign_in                        # noqa: E402
 from cards import CARDS, card_by_slug                         # noqa: E402
 from catalog import (card_for_title, denominations_for,       # noqa: E402
                      nominal_from_title, nominal_shown, render,
-                     shown_number)
+                     shown_number, whose)
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
@@ -176,6 +176,7 @@ PICK_SET = "set:"
 PICK_SERIES = "ser:"
 PICK_COPY = "cpy:"
 PICK_LIVE = "liv:"
+PICK_HELD = "hld:"
 
 # Где лежит состояние выдачи: и настройки, и журнал выданных заказов. На
 # кабинет: товары и слова-опознаватели у разных кабинетов разные, а
@@ -2633,6 +2634,26 @@ def settings_menu(link) -> None:
 MUTE_SHOWN = 8
 
 
+def mute_verdicts(conf, held) -> list:
+    """Отложенные заказы вместе с тем, что о них думает выдача.
+
+    → [(номер, название, карта или None, пояснение)] в порядке показа:
+    свои сверху. Продавец, глядя на список, должен видеть, какие заказы
+    бот собирается выдать, ДО того как нажмёт «выдать».
+    """
+    rows = []
+
+    for order_id, about in (held or {}).items():
+        name = str((about or {}).get("title") or "")
+        card, why = whose(CARDS, name, lambda slug: conf.store.conf(slug))
+        rows.append((str(order_id), name or "без названия", card, why))
+
+    # Свои первыми: с ними продавец и будет что-то делать.
+    rows.sort(key=lambda row: 0 if row[3] == "мой товар" else 1)
+
+    return rows
+
+
 def mute_menu(link) -> None:
     """Глушка: остановить выдачу и разобрать отложенные заказы.
 
@@ -2640,9 +2661,15 @@ def mute_menu(link) -> None:
     у покупателя, выдавать не надо никогда». «Выдать их» — «нет, они ждут,
     покупай». Одной кнопкой тут не обойтись: цена ошибки в разные стороны
     разная, и решать должен продавец, а не бот.
+
+    И про каждый заказ сказано, что бот о нём думает. Продавец видел
+    список из пяти заказов, где его товар один, и не понимал, собирается
+    ли бот выдать остальные четыре: половина из них — тот же робукс, но
+    проданный через геймпасс, то есть совсем другой товар.
     """
     conf = settings_of()
-    held = conf.held()
+    rows = mute_verdicts(conf, conf.held())
+    mine = [r for r in rows if r[3] == "мой товар"]
     keys = []
 
     if conf.paused():
@@ -2650,9 +2677,19 @@ def mute_menu(link) -> None:
     else:
         keys.append([("⏸ Остановить выдачу совсем", "глушка:выкл")])
 
-    if held:
-        keys.append([("✅ Выдать их", "глушка:выдать")])
+    if mine:
+        keys.append([(f"✅ Выдать мои ({len(mine)})", "глушка:выдать")])
+
+    if rows:
         keys.append([("🚫 Считать закрытыми", "глушка:закрыть")])
+
+        # Разбор по одному: у продавца в списке разные товары, и решение
+        # по ним разное. Кнопка на заказ — единственный способ сказать
+        # «этот выдать, а этот нет».
+        for order_id, name, card, why in rows[:MUTE_SHOWN]:
+            mark = "✅" if why == "мой товар" else "➖"
+            keys.append([(f"{mark} {shorten(name, 28)}",
+                          PICK_HELD + order_id)])
 
     keys.append([("✖️ Назад", "отмена")])
 
@@ -2664,55 +2701,70 @@ def mute_menu(link) -> None:
     else:
         said.append("\nВыдача работает.")
 
-    if held:
-        said.append(f"\nНа паузе заказов: {len(held)}. Они висели ещё до "
-                    f"моего запуска, и по сделке не видно, выдали их "
-                    f"вручную или нет:")
+    if rows:
+        said.append(f"\nНа паузе заказов: {len(rows)}, из них моих — "
+                    f"{len(mine)}. Они висели ещё до моего запуска, и по "
+                    f"сделке не видно, выдали их вручную или нет:")
 
-        for number, (order_id, about) in enumerate(held.items()):
+        for number, (order_id, name, card, why) in enumerate(rows):
             if number >= MUTE_SHOWN:
-                said.append(f"  … и ещё {len(held) - MUTE_SHOWN}")
+                said.append(f"  … и ещё {len(rows) - MUTE_SHOWN}")
                 break
 
-            name = str((about or {}).get("title") or "без названия")
-            said.append(f"  • «{name[:40]}» (заказ {order_id})")
+            mark = "✅" if why == "мой товар" else "➖"
+            tail = "" if why == "мой товар" else f" — {why}"
+            said.append(f"  {mark} «{shorten(name, 40)}»{tail}")
 
-        said.append("\n«Выдать их» — бот купит коды и отправит. "
-                    "«Считать закрытыми» — не тронет их никогда.")
+        said.append("\n✅ — мой товар, выдам код. ➖ — не мой, не трону.")
+        said.append("«Выдать мои» — купит коды и отправит. «Считать "
+                    "закрытыми» — снимет с паузы все и не тронет их "
+                    "никогда. Можно и по одному: нажмите на заказ.")
     else:
         said.append("\nОтложенных заказов нет.")
 
     answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
-    text = str(answer.get("text") or "").strip().lower()
+    text = str(answer.get("text") or "").strip()
+    low = text.lower()
 
-    if text == "глушка:выкл":
+    if text.startswith(PICK_HELD):
+        one_held_menu(link, text[len(PICK_HELD):])
+        return
+
+    if low == "глушка:выкл":
         conf.set_paused(True)
         link.screen("Выдача остановлена. Бот больше ничего не купит и не "
                     "отправит.\n\nОплаченные заказы никуда не денутся: "
                     "сниму глушку — разберу их обычным путём.", buttons=MENU)
         return
 
-    if text == "глушка:вкл":
+    if low == "глушка:вкл":
         conf.set_paused(False)
         link.screen("Глушка снята — выдача работает.", buttons=MENU)
         return
 
-    if text == "глушка:выдать":
-        many = plural(conf.release(), "заказ", "заказа", "заказов")
+    if low == "глушка:выдать":
+        # Снимаем с паузы ТОЛЬКО свои. Чужие бот всё равно не выдаст, но
+        # в списке они мешают: продавец будет ждать выдачи, которой не
+        # будет, вместо того чтобы отдать код руками.
+        done = sum(conf.release(order_id) for order_id, _, _, _ in mine)
+        many = plural(done, "заказ", "заказа", "заказов")
+        left = len(rows) - done
+        tail = (f"\n\nОстальные {plural(left, 'заказ', 'заказа', 'заказов')} "
+                f"оставил на паузе: это не мой товар, код по ним я не "
+                f"куплю. Выдайте их сами." if left else "")
         link.screen(f"Снял с паузы: {many}.\n\nБот выдаст их ближайшим "
-                    f"проходом — это до минуты.", buttons=MENU)
+                    f"проходом — это до минуты.{tail}", buttons=MENU)
         return
 
-    if text == "глушка:закрыть":
+    if low == "глушка:закрыть":
         done = 0
 
         # Закрываем по той карте, которая узнаёт название. Не узнал никто —
         # кладём первой: список закрытых нужен, чтобы заказ больше не
         # всплыл, а по какой карте он лежит, на это не влияет.
-        for order_id, about in conf.held().items():
-            name = str((about or {}).get("title") or "")
-            card = card_for_title(CARDS, name) or CARDS[0]
-            done += conf.close(card.slug, order_id)
+        for order_id, name, card, _ in rows:
+            done += conf.close((card or card_for_title(CARDS, name)
+                                or CARDS[0]).slug, order_id)
 
         many = plural(done, "заказ", "заказа", "заказов")
         link.screen(f"Отметил закрытыми: {many}.\n\nБот к ним больше не "
@@ -2720,6 +2772,50 @@ def mute_menu(link) -> None:
         return
 
     link.screen("Отменил.", buttons=MENU)
+
+
+def one_held_menu(link, order_id: str) -> None:
+    """Один отложенный заказ: выдать или закрыть."""
+    conf = settings_of()
+    held = conf.held()
+    about = held.get(str(order_id))
+
+    if about is None:
+        link.screen("Этого заказа на паузе уже нет.", buttons=MENU)
+        return
+
+    name = str((about or {}).get("title") or "без названия")
+    card, why = whose(CARDS, name, lambda slug: conf.store.conf(slug))
+    keys = [[("✅ Выдать", "один:выдать"), ("🚫 Закрыть", "один:закрыть")],
+            [("✖️ Назад", "отмена")]]
+    said = [f"«{name}»", f"Заказ {order_id}", "", f"Бот: {why}."]
+
+    if why != "мой товар":
+        said.append("\nЗначит кода по нему бот не купит — «Выдать» только "
+                    "снимет его с паузы. Если это всё-таки ваш товар, "
+                    "поправьте «🔤 Слово-опознаватель» и «🚫 Слово-"
+                    "исключение» на экране карты.")
+
+    answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip().lower()
+
+    if text == "один:выдать":
+        conf.release(str(order_id))
+        link.screen(f"Снял с паузы.\n\n«{shorten(name, 40)}» — "
+                    + ("бот выдаст ближайшим проходом."
+                       if why == "мой товар"
+                       else "но это не мой товар, кода я не куплю."),
+                    buttons=MENU)
+        return
+
+    if text == "один:закрыть":
+        conf.close((card or card_for_title(CARDS, name) or CARDS[0]).slug,
+                   str(order_id))
+        link.screen(f"«{shorten(name, 40)}» — отметил закрытым. Больше не "
+                    f"подойду.", buttons=MENU)
+        return
+
+    mute_menu(link)
 
 
 def card_menu(link, conf, slug: str) -> None:
@@ -2783,6 +2879,7 @@ def card_menu(link, conf, slug: str) -> None:
 FIELDS = [
     ("region", "🌐 Регион", "set_region"),
     ("keyword", "🔤 Слово-опознаватель", "set_keyword"),
+    ("stop", "🚫 Слово-исключение", "set_stop"),
     ("greeting", "💬 Автоответ", "set_greeting"),
     ("note", "📝 Заметка", "set_note"),
     ("ad_title", "🏷 Название товара", "set_ad_title"),
@@ -2808,6 +2905,17 @@ HINTS = {
         "названия карты. Задавать своё стоит, только если у вас есть другие "
         "товары с тем же словом — скажем, аккаунты, — и они попадают в "
         "выдачу по ошибке."),
+    "stop": (
+        "Слова, по которым бот НЕ берёт заказ, даже если всё остальное "
+        "совпало. Несколько — через запятую.\n\n"
+        "Для чего. Один и тот же товар продают по-разному: «80 РОБУКСОВ "
+        "промокодом» — это код, а «80 РОБУКСОВ через геймпасс» — выдача "
+        "внутри игры. По названию они почти неотличимы, а выдать по "
+        "второму код первого значит купить не то, что продано.\n\n"
+        "Например «геймпасс, аккаунт»:\n"
+        "   ❌ «80 РОБУКСОВ • ГЕЙМПАСС» — пропустит\n"
+        "   ✅ «80 РОБУКСОВ • ПРОМОКОДОМ» — заберёт\n\n"
+        "Исключение сильнее слова-опознавателя: совпало — заказ не мой."),
     "greeting": (
         "Уходит в чат заказа сразу, как заказ взят в работу — ДО кода.\n\n"
         "Нужен не всегда: обычно код приходит через секунды, и «принял "

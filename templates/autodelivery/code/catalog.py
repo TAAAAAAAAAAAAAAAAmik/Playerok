@@ -70,12 +70,29 @@ class Card:
 # Узнавание заказа
 # ---------------------------------------------------------------------------
 
-def is_card_order(card: Card, title: str, keyword: str = "") -> bool:
+def stop_words(value) -> tuple:
+    """Слова-исключения продавца: «геймпасс, аккаунт» → («геймпасс», …)."""
+    text = str(value or "").lower()
+
+    for ch in ";\n\t":
+        text = text.replace(ch, ",")
+
+    return tuple(w.strip() for w in text.split(",") if w.strip())
+
+
+def is_card_order(card: Card, title: str, keyword: str = "",
+                  stop: str = "") -> bool:
     """Наш ли это заказ.
 
     Своё слово продавца (`keyword`) означает «только оно»: он задал его,
     чтобы отделить свои товары от чужих, и подмешивать к нему наши догадки
     значит отменять его решение.
+
+    Слово-исключение (`stop`) сильнее всего остального, включая `keyword`.
+    Продавец говорит им «вот это — не мой товар», и спорить тут не с чем:
+    он единственный, кто знает, чем «80 РОБУКСОВ через геймпасс»
+    отличается от «80 РОБУКСОВ промокодом». По названию они неотличимы, а
+    выдать по второму код первого — значит купить не то, что продано.
 
     А вот `name_must_not_have` сильнее и слова продавца, потому что оно про
     другое: это слово означает «здесь другой товар». «Xbox Game Pass
@@ -86,6 +103,9 @@ def is_card_order(card: Card, title: str, keyword: str = "") -> bool:
     text = " ".join(str(title or "").lower().split())
 
     if any(w in text for w in _spellings(card.name_must_not_have)):
+        return False
+
+    if any(w in text for w in stop_words(stop)):
         return False
 
     if keyword.strip():
@@ -197,9 +217,46 @@ def pick_card(cards: list[Card], title: str, conf_of) -> Card | None:
         conf = conf_of(card.slug) or {}
         if not conf.get("enabled"):
             continue
-        if is_card_order(card, title, str(conf.get("keyword") or "")):
+        if is_card_order(card, title, str(conf.get("keyword") or ""),
+                         str(conf.get("stop") or "")):
             return card
     return None
+
+
+def whose(cards: list[Card], title: str, conf_of) -> tuple:
+    """Кому достанется заказ и почему → (карта или None, пояснение).
+
+    Тот же подбор, что у выдачи, но с объяснением — для экранов и писем.
+    Без него продавец видит список отложенных заказов и не знает, что бот
+    о них думает: выдаст ли, а если нет, то из-за чего. А думает он разное:
+    товар может быть чужим, выключенным или не подошедшим по слову.
+    """
+    card = pick_card(cards, title, conf_of)
+
+    if card is not None:
+        return card, "мой товар"
+
+    guess = card_for_title(cards, title)
+
+    if guess is None:
+        return None, "не мой товар"
+
+    conf = conf_of(guess.slug) or {}
+    stop = [w for w in stop_words(conf.get("stop"))
+            if w in " ".join(str(title or "").lower().split())]
+
+    if stop:
+        return None, f"не мой: в названии есть «{stop[0]}»"
+
+    if not conf.get("enabled"):
+        return guess, f"{guess.title}: выдача выключена"
+
+    word = str(conf.get("keyword") or "").strip()
+
+    if word:
+        return None, f"не мой: в названии нет слова «{word}»"
+
+    return None, "не мой товар"
 
 
 # ---------------------------------------------------------------------------

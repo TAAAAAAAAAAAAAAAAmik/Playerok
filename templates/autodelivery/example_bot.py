@@ -181,24 +181,40 @@ def strangers(orders) -> str:
     return "\n".join(lines)
 
 
-def held_orders(orders) -> str:
-    """Письмо про заказы, отложенные при первом запуске."""
+def held_orders(orders, whose_of=None) -> str:
+    """Письмо про заказы, отложенные при первом запуске.
+
+    Про каждый сказано, что бот о нём думает. Без этого продавец видит
+    список из пяти заказов, в котором его товар один, и не понимает,
+    собирается ли бот выдать остальные четыре. А не собирается: половина
+    из них — другой товар, проданный другим способом.
+    """
     rows = list(orders)
     lines = [f"⛔ Глушка: отложил оплаченных заказов — {len(rows)}.", "",
              "Они висели ещё до моего запуска, и по сделке не видно, "
              "выдали их вручную или нет. Покупать коды вслепую я не стал: "
              "это ваши деньги.", ""]
+    mine = 0
 
     for order in rows[:STRANGERS_SHOWN]:
-        lines.append(f"  • «{order.title or 'без названия'}» "
-                     f"(заказ {order.id})")
+        card, why = whose_of(order.title) if whose_of else (None, "")
+        mark = "✅" if card is not None and why == "мой товар" else "➖"
+
+        if mark == "✅":
+            mine += 1
+
+        lines.append(f"  {mark} «{order.title or 'без названия'}»"
+                     + (f" — {why}" if why and mark != "✅" else ""))
+        lines.append(f"     заказ {order.id}")
 
     if len(rows) > STRANGERS_SHOWN:
         lines.append(f"  … и ещё {len(rows) - STRANGERS_SHOWN}")
 
     lines += [
         "",
-        "Если они и правда ждут кода — бот → «⚙️ Автовыдача» → «⛔ Глушка» "
+        "✅ — мой товар, выдам код. ➖ — не мой, не трону.",
+        "",
+        "Если мои и правда ждут кода — бот → «⚙️ Автовыдача» → «⛔ Глушка» "
         "→ «✅ Выдать их».",
         "Если уже выданы — там же «🚫 Считать закрытыми».",
         "",
@@ -224,7 +240,7 @@ async def one_pass(market, engine, seen: set, notify) -> list:
     held = engine.hold_old(orders)
 
     if held:
-        await notify(held_orders(held))
+        await notify(held_orders(held, engine.whose))
 
     for order in orders:
         if order.id in seen or engine.held(order.id):
