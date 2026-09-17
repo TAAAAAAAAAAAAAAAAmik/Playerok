@@ -979,10 +979,11 @@ class MuteMenuTest(unittest.TestCase):
 
 
 class RegionNoteTest(unittest.TestCase):
-    """Строка под вопросом о регионе: откуда кнопки и что делать иначе.
+    """Список регионов: что показано, что означает и как дойти до
+    остальных.
 
-    Без неё продавец видит восемь кнопок и решает, что остальных регионов
-    бот не умеет. Умеет — любой принимается текстом.
+    Продавец видел дюжину кнопок и решал, что других регионов бот не
+    умеет. Умеет он все шестьдесят — часть на следующих страницах.
     """
 
     def setUp(self):
@@ -991,41 +992,170 @@ class RegionNoteTest(unittest.TestCase):
         item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
         self.saved = item_bot._CATALOG.copy()
         item_bot._CATALOG.update({"raw": None, "at": 0})
-        self.key = os.environ.get("APPROUTE_KEY")
-        os.environ["APPROUTE_KEY"] = "ключ"
+        # Без ключа каталог даже не запрашивается — в тестах сети нет.
+        self.key = os.environ.pop("APPROUTE_KEY", None)
 
     def tearDown(self):
         item_bot._CATALOG.update(self.saved)
 
-        if self.key is None:
-            os.environ.pop("APPROUTE_KEY", None)
-        else:
+        if self.key is not None:
             os.environ["APPROUTE_KEY"] = self.key
 
-    def note(self, name="Apple Gift Card 10$"):
-        return item_bot.region_note(draft(name=name))
-
-    def test_any_region_can_be_typed(self):
-        self.assertIn("впишите", self.note().lower())
-
-    def test_the_supplier_regions_are_counted(self):
+    def stock(self, *regions):
+        """Каталог поставщика в кеше: сети это не требует."""
+        os.environ["APPROUTE_KEY"] = "ключ"
         item_bot._CATALOG.update({
             "raw": {"services": [
-                {"id": "s1", "name": "Apple Gift Cards TR",
-                 "subcategory": "Apple Gift Cards",
-                 "items": [{"id": "d1", "name": "10 USD", "inStock": 5}]},
-                {"id": "s2", "name": "Apple Gift Cards Saudi Arabia",
-                 "subcategory": "Apple Gift Cards",
-                 "items": [{"id": "d2", "name": "10 USD", "inStock": 5}]}]},
+                {"id": f"s{n}", "name": f"Apple Gift Cards {code}",
+                 "subcategoryName": "Apple Gift Cards",
+                 "items": [{"id": f"d{n}", "name": "10 USD", "inStock": 5}]}
+                for n, code in enumerate(regions)]},
             "at": time.time()})
 
-        self.assertIn("(2)", self.note())
+    def note(self, name="Apple Gift Card 10$", page=0):
+        return item_bot.region_note(draft(name=name), page)
+
+    def buttons(self, page=0, name="Apple Gift Card 10$"):
+        keys = item_bot.region_buttons(draft(name=name), page)
+
+        return [label for row in keys for label, _ in row]
+
+    def test_any_region_can_be_typed(self):
+        self.assertIn("вписать код", self.note().lower())
+
+    def test_every_region_is_reachable(self):
+        """Шестьдесят кодов не влезают на экран — значит листаем."""
+        codes = [code for code, _ in item_bot.region_choices(draft())]
+
+        self.assertEqual(sorted(codes), sorted(wizard.REGIONS))
+
+    def test_the_supplier_regions_go_first(self):
+        self.stock("TR", "SA")
+        codes = [code for code, ok in item_bot.region_choices(
+            draft(name="Apple Gift Card 10$")) if ok]
+
+        self.assertEqual(codes, ["SA", "TR"])
+
+    def test_they_are_marked_on_the_buttons(self):
+        self.stock("TR")
+
+        self.assertIn("✅ TR", self.buttons())
+
+    def test_the_mark_is_explained(self):
+        self.stock("TR")
+
+        self.assertIn("есть у поставщика", self.note())
+
+    def test_there_is_a_next_button(self):
+        self.assertTrue(any("Далее" in name for name in self.buttons()),
+                        self.buttons())
+
+    def test_the_first_page_has_no_back_button(self):
+        self.assertFalse(any("Назад" in name for name in self.buttons()))
+
+    def test_the_second_page_has_both(self):
+        names = self.buttons(page=1)
+
+        self.assertTrue(any("Назад" in n for n in names), names)
+        self.assertTrue(any("Далее" in n for n in names), names)
+
+    def test_the_last_page_has_no_next(self):
+        last = (len(wizard.REGIONS) - 1) // item_bot.REGIONS_PAGE
+        names = self.buttons(page=last)
+
+        self.assertFalse(any("Далее" in n for n in names), names)
+
+    def test_the_pages_are_counted_in_the_note(self):
+        self.assertIn("Страница 1 из", self.note())
+
+    def test_paging_does_not_lose_regions(self):
+        seen = []
+        page = 0
+
+        while True:
+            keys = item_bot.region_buttons(draft(), page)
+            seen += [value for row in keys for _, value in row
+                     if value in wizard.REGIONS]
+
+            if not any("Далее" in label for row in keys for label, _ in row):
+                break
+
+            page += 1
+
+        self.assertEqual(sorted(set(seen)), sorted(wizard.REGIONS))
+
+    def test_paging_is_not_an_answer(self):
+        """«Далее» принималось бы за выбор региона, и мастер пошёл бы
+        дальше со строкой «рег:1» вместо страны."""
+        link = FakeLink([item_bot.PICK_REGION + "1",
+                         item_bot.PICK_REGION + "2", "TR"])
+        answer = item_bot.ask_region(link, "Новый регион:")
+
+        self.assertEqual(answer.get("text"), "TR")
+        self.assertEqual(len(link.asked), 3)
+
+    def test_the_page_moves_with_the_button(self):
+        link = FakeLink([item_bot.PICK_REGION + "1", "TR"])
+        item_bot.ask_region(link, "Новый регион:")
+
+        self.assertIn("Страница 2 из", link.asked[1][0])
 
     def test_an_unreadable_catalog_is_explained(self):
         """Иначе кнопки выглядят как весь список умений бота."""
-        os.environ.pop("APPROUTE_KEY", None)
-
         self.assertIn("не прочитался", self.note())
+
+
+class RegionInTheWizardTest(unittest.TestCase):
+    """Листание страниц внутри самого опроса."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        self.key = os.environ.pop("APPROUTE_KEY", None)
+        self.saved = item_bot._CATALOG.copy()
+        item_bot._CATALOG.update({"raw": None, "at": 0})
+
+    def tearDown(self):
+        item_bot._CATALOG.update(self.saved)
+
+        if self.key is not None:
+            os.environ["APPROUTE_KEY"] = self.key
+
+    def ready(self):
+        """Черновик, которому осталось спросить только регион."""
+        d = wizard.Draft()
+        d.game, d.category, d.obtaining = GAME, CATEGORY, OBTAINING
+        d.name, d.price = "Apple Gift Card 10$", 900
+        d.description = "текст"
+        d.nominal = 10
+        d.photos = [PNG]
+        d.fields = []
+
+        return d
+
+    def test_the_wizard_asks_for_the_region(self):
+        draft_ = self.ready()
+        link = FakeLink(["отмена"])
+        item_bot.collect(link, None, draft_)
+
+        self.assertIn("Регион", link.asked[0][0])
+
+    def test_paging_keeps_the_question(self):
+        """Нажатие «Далее» не должно стать ответом на вопрос о регионе."""
+        draft_ = self.ready()
+        link = FakeLink([item_bot.PICK_REGION + "1", "TR"])
+        item_bot.collect(link, None, draft_)
+
+        self.assertEqual(draft_.region, "TR")
+        self.assertEqual(len(link.asked), 2)
+
+    def test_the_second_page_is_shown(self):
+        draft_ = self.ready()
+        link = FakeLink([item_bot.PICK_REGION + "1", "TR"])
+        item_bot.collect(link, None, draft_)
+
+        self.assertIn("Страница 2 из", link.asked[1][0])
 
 
 class SettingsMenuTest(unittest.TestCase):
@@ -1847,11 +1977,13 @@ class CopyFromMarketTest(unittest.TestCase):
 
 
 class RegionButtonsTest(unittest.TestCase):
-    """Кнопки региона: те, что есть у поставщика для этой карты.
+    """Кнопки региона: первыми те, что есть у поставщика.
 
-    Показать регион, которого у поставщика нет, — значит дать продавцу
-    выставить товар, который выдача не выдаст: узнает он об этом из
-    отказа, когда покупатель уже заплатил.
+    Показать регион, которого у поставщика нет, и промолчать об этом —
+    значит дать продавцу выставить товар, который выдача не выдаст. А
+    спрятать его совсем — соврать про умения бота: принимает он все
+    шестьдесят. Поэтому показываем все, но доступные помечены ✅ и идут
+    первыми.
     """
 
     CATALOG = {"services": [
@@ -1891,8 +2023,19 @@ class RegionButtonsTest(unittest.TestCase):
         self.assertIn("US", got)
         self.assertIn("SA", got)
 
-    def test_a_region_that_is_out_of_stock_is_not_offered(self):
-        self.assertNotIn("MX", self.codes("Apple Gift Card 10$"))
+    def test_a_region_that_is_out_of_stock_is_not_marked(self):
+        """Он доступен для выбора, но без ✅: у поставщика его сейчас нет."""
+        draft_ = wizard.Draft()
+        draft_.name = "Apple Gift Card 10$"
+        rows = dict(item_bot.region_choices(draft_))
+
+        self.assertFalse(rows["MX"])
+        self.assertTrue(rows["US"])
+
+    def test_the_marked_ones_come_first(self):
+        got = self.codes("Apple Gift Card 10$")
+
+        self.assertLess(got.index("SA"), got.index("GL"))
 
     def test_an_unknown_product_gets_the_usual_buttons(self):
         """Остаться вовсе без кнопок хуже, чем с неточными."""

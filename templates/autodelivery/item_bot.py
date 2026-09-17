@@ -119,15 +119,9 @@ COMMANDS = [
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
-# Ряды кнопок, а не список регионов: коды берём из settings.REGIONS, чтобы
-# бот и движок выдачи не разъехались.
-#
-# Кнопками — ходовые; остальные регионы продавец вводит текстом, и мастер
-# понимает их и словом («Турция»), и кодом. Два десятка кнопок на экран
-# телефона не помещаются, а торгующему одним регионом они и не нужны.
-REGION_BUTTONS = [("🌍 GL", "GL"), ("🇷🇺 RU", "RU"), ("🇺🇸 US", "US")]
-MORE_REGIONS = [("🇹🇷 TR", "TR"), ("🇪🇺 EU", "EU"), ("🇦🇷 AR", "AR"),
-                ("🇧🇷 BR", "BR")]
+# Списка регионов здесь нет нарочно: коды берём из wizard.REGIONS, чтобы
+# бот и движок выдачи не разъехались, а кнопки собирает region_buttons —
+# с листанием, потому что регионов шесть десятков.
 SKIP = [("⏭ Пропустить", "пропустить"), ("✖️ Отмена", "отмена")]
 PHOTOS_DONE = [("✅ Готово", wizard.DONE_WORD), ("✖️ Отмена", "отмена")]
 
@@ -241,14 +235,14 @@ def screen_text(draft, question: str, complaint: str = "") -> str:
     return "\n\n".join(p for p in (done, complaint, question) if p)
 
 
-def buttons_for(step: str, draft=None):
+def buttons_for(step: str, draft=None, page: int = 0):
     """Кнопки под вопрос. Там, где ответ свободный, кнопок нет.
 
     Название и цену кнопкой не выберешь, но «отмена» нужна на каждом шаге:
     передумать посреди опроса — обычное дело.
     """
     if step == "region":
-        return region_buttons(draft)
+        return region_buttons(draft, page)
 
     if step == "photos":
         return [PHOTOS_DONE]
@@ -262,54 +256,123 @@ def buttons_for(step: str, draft=None):
     return [CANCEL]
 
 
-def region_buttons(draft=None):
-    """Кнопки регионов. Лучше — те, что есть у поставщика для этой карты.
+# Сколько регионов показывать на одной странице. Три ряда по четыре —
+# столько влезает на экран телефона вместе с вопросом и рядом листания.
+REGIONS_PAGE = 12
 
-    Ходовые про запас всё равно показываем: каталог может не прочитаться
-    (ключа нет, лимит выбран, связь легла), и остаться в такой миг вовсе
-    без кнопок хуже, чем с неточными. Любой регион всё равно принимается
-    текстом.
+# Кнопка листания регионов. Значение не код региона, иначе ответ «дальше»
+# был бы принят за выбор.
+PICK_REGION = "рег:"
+
+
+def region_choices(draft=None) -> list:
+    """Все регионы, которые бот примет. → [(код, есть ли у поставщика)].
+
+    Сначала те, что есть у поставщика прямо сейчас, — по ним выдача
+    сработает. Следом ВСЕ остальные, какие мастер вообще понимает.
+
+    Раньше показывались только первые, и это читалось как «других бот не
+    умеет»: продавец видел восемь кнопок и уходил искать девятую. Умеет он
+    шестьдесят — просто у поставщика их сейчас нет или их название не
+    разобралось. Спрятать регион молча — значит соврать про умения.
     """
     card = card_for_title(CARDS, str(getattr(draft, "name", "") or ""))
     found = supplier_regions(card) if card is not None else []
+    # Ходовые сразу за ними: без каталога список иначе начинается с «AE,
+    # AM, AR» по алфавиту, а GL и RU уезжают на вторую страницу — то есть
+    # дальше, чем они были до всякого листания.
+    common = [code for code in wizard.COMMON_REGIONS if code not in found]
+    rest = [code for code in wizard.REGIONS
+            if code not in found and code not in common]
 
-    if not found:
-        return [REGION_BUTTONS, MORE_REGIONS, CANCEL]
-
-    rows = []
-
-    for start in range(0, len(found), 4):
-        rows.append([(code, code) for code in found[start:start + 4]])
-
-    rows.append(CANCEL)
-
-    return rows
+    return ([(code, True) for code in found]
+            + [(code, False) for code in common + rest])
 
 
-def region_note(draft=None) -> str:
-    """Откуда взялись кнопки регионов и что делать, если нужного нет.
+def ask_region(link, title: str, draft=None) -> dict:
+    """Спросить регион листаемым списком. → ответ, как его отдал телеграм.
 
-    Без этой строки продавец видит восемь кнопок и решает, что остальных
-    регионов бот не умеет. Умеет: любой регион принимается текстом, а
-    кнопками показаны те, что есть у поставщика прямо сейчас.
+    Листание не ответ: пока продавец ходит по страницам, вопрос остаётся
+    тем же. Без этого нажатие «Далее» принималось бы за выбор региона —
+    и мастер шёл бы дальше с «рег:1» вместо страны.
     """
-    card = card_for_title(CARDS, str(getattr(draft, "name", "") or ""))
-    found = supplier_regions(card) if card is not None else []
+    page = 0
 
-    if found:
-        return (f"\n\nКнопки — регионы, которые сейчас есть у поставщика "
-                f"({len(found)}). Нужен другой — впишите его кодом: "
-                f"US, TR, SA, HK, MX. Приму любой.")
+    while True:
+        answer = link.ask(title + region_note(draft, page), ANSWER_WAIT,
+                          buttons=region_buttons(draft, page))
+        text = str(answer.get("text") or "")
 
-    _, why = supplier_catalog()
+        if not text.startswith(PICK_REGION):
+            return answer
 
-    if why:
-        return (f"\n\nКаталог поставщика сейчас не прочитался ({why}), "
-                f"поэтому кнопки — ходовые. Любой другой регион впишите "
-                f"кодом: US, TR, SA, HK, MX.")
+        page = int(text[len(PICK_REGION):] or 0)
 
-    return ("\n\nКнопки — ходовые регионы. Любой другой впишите кодом: "
-            "US, TR, SA, HK, MX. Приму любой.")
+
+def region_buttons(draft=None, page: int = 0):
+    """Кнопки регионов с листанием. Любой регион принимается и текстом."""
+    rows = region_choices(draft)
+    shown, more, total = grouping.page(rows, page, REGIONS_PAGE)
+    keys = []
+    row = []
+
+    for code, ready in shown:
+        row.append((f"✅ {code}" if ready else code, code))
+
+        if len(row) == 4:
+            keys.append(row)
+            row = []
+
+    if row:
+        keys.append(row)
+
+    nav = []
+
+    if page > 0:
+        nav.append(("⬅️ Назад", PICK_REGION + str(page - 1)))
+
+    if more:
+        nav.append(("Далее ➡️", PICK_REGION + str(page + 1)))
+
+    if nav:
+        keys.append(nav)
+
+    keys.append(CANCEL)
+
+    return keys
+
+
+def region_note(draft=None, page: int = 0) -> str:
+    """Что означают кнопки регионов и как добраться до остальных.
+
+    Без этой строки продавец видит дюжину кнопок и решает, что остальных
+    регионов бот не умеет. Умеет он все шестьдесят: часть на следующих
+    страницах, а любой можно просто вписать кодом.
+    """
+    rows = region_choices(draft)
+    ready = [code for code, ok in rows if ok]
+    _, _, pages = grouping.page(rows, page, REGIONS_PAGE)
+    lines = []
+
+    if ready:
+        lines.append(f"✅ — есть у поставщика прямо сейчас ({len(ready)}): "
+                     f"{', '.join(ready[:12])}"
+                     + (" и другие." if len(ready) > 12 else "."))
+    else:
+        _, why = supplier_catalog()
+        lines.append(f"Каталог поставщика сейчас не прочитался ({why}), так "
+                     f"что какие регионы у него есть, не знаю."
+                     if why else
+                     "Ни одного региона этой карты у поставщика сейчас нет.")
+
+    if pages > 1:
+        lines.append(f"Страница {page + 1} из {pages} — остальные регионы "
+                     f"под кнопкой «Далее ➡️».")
+
+    lines.append("Можно и просто вписать код: US, TR, SA, HK, MX. Приму "
+                 "любой.")
+
+    return "\n\n" + "\n".join(lines)
 
 
 def regions_of(conf, card) -> list:
@@ -583,6 +646,9 @@ CHOOSE = {}          # заполняется ниже, когда функци�
 def collect(link, account, draft: wizard.Draft) -> bool:
     """Пройти опрос. → дошли ли до конца."""
     complaint = ""
+    # Страница списка регионов: их шесть десятков, на экран телефона
+    # влезает дюжина.
+    page = 0
 
     while True:
         step = draft.step
@@ -608,10 +674,10 @@ def collect(link, account, draft: wizard.Draft) -> bool:
         question = wizard.question_for(draft)
 
         if step == "region":
-            question += region_note(draft)
+            question += region_note(draft, page)
 
         message = link.ask(screen_text(draft, question, complaint),
-                           ANSWER_WAIT, buttons=buttons_for(step, draft))
+                           ANSWER_WAIT, buttons=buttons_for(step, draft, page))
         complaint = ""
 
         if not message:
@@ -625,7 +691,14 @@ def collect(link, account, draft: wizard.Draft) -> bool:
             link.screen("Отменил. Ничего не создано.", buttons=MENU)
             return False
 
+        if text.startswith(PICK_REGION):
+            # Листание — не ответ: показываем ту же страницу вопроса
+            # дальше, а собранное не трогаем.
+            page = int(text[len(PICK_REGION):] or 0)
+            continue
+
         if step != "photos":
+            page = 0
             complaint = wizard.apply(draft, text)
             continue
 
@@ -1141,9 +1214,7 @@ def edit_template(link, store, template_id: str) -> None:
         return
 
     if what == "region":
-        answer = link.ask("Новый регион:", ANSWER_WAIT,
-                          buttons=[REGION_BUTTONS, MORE_REGIONS,
-                                   CANCEL])
+        answer = ask_region(link, "Новый регион:")
         value, why = wizard.accept_region(str(answer.get("text") or ""))
     elif what == "price":
         answer = link.ask("Новая цена:", ANSWER_WAIT, buttons=[CANCEL])
