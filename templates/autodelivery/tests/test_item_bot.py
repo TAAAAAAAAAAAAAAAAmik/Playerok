@@ -1052,7 +1052,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
             obtaining={"id": "o", "name": "Без входа"})
 
     def test_the_supplier_nominals_are_offered_for_pricing(self):
-        link = FakeLink([item_bot.PICK_SERIES + self.template(),
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + self.template(),
                          "взять", "сам", "отмена"])
         item_bot.series_menu(link, "кабинет")
         sheet = next(t for t in link.said if t.startswith("100 ="))
@@ -1063,7 +1064,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
     def test_what_is_out_of_stock_is_not_offered(self):
         """Объявление по такому номиналу бот выдать не сможет, а покупатель
         заплатит и будет ждать."""
-        link = FakeLink([item_bot.PICK_SERIES + self.template(),
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + self.template(),
                          "взять", "сам", "отмена"])
         item_bot.series_menu(link, "кабинет")
         sheet = next(t for t in link.said if t.startswith("100 ="))
@@ -1073,7 +1075,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
     def test_another_regions_nominals_are_not_offered(self):
         """Код чужого региона покупатель не активирует — объявление по
         нему стало бы спором, а не продажей."""
-        link = FakeLink([item_bot.PICK_SERIES + self.template(),
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + self.template(),
                          "взять", "сам", "отмена"])
         item_bot.series_menu(link, "кабинет")
         sheet = next(t for t in link.said if t.startswith("100 ="))
@@ -1081,7 +1084,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
         self.assertNotIn("700", sheet)
 
     def test_prices_can_be_counted_from_the_purchase(self):
-        link = FakeLink([item_bot.PICK_SERIES + self.template(),
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + self.template(),
                          "взять", "посчитать", "100", "40", "отмена"])
         item_bot.series_menu(link, "кабинет")
         sheet = next(t for t in link.said if t.startswith("100 ="))
@@ -1093,7 +1097,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
     def test_without_a_key_the_seller_is_told_why(self):
         os.environ.pop("APPROUTE_KEY", None)
         item_bot._CATALOG["raw"] = None
-        link = FakeLink([item_bot.PICK_SERIES + self.template(), "взять"])
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + self.template(), "взять"])
         item_bot.series_menu(link, "кабинет")
 
         self.assertIn("APPROUTE_KEY", link.said[-1])
@@ -1103,7 +1108,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
         АВТОВЫДАЧА». Заставлять его переименовывать товар ради нашего
         разбора дороже, чем задать один вопрос."""
         tid = self.template("🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА")
-        link = FakeLink([item_bot.PICK_SERIES + tid, "так",
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + tid, "так",
                          "взять", "сам", "отмена"])
         item_bot.series_menu(link, "кабинет")
 
@@ -1113,7 +1119,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
 
     def test_the_offered_pattern_builds_real_names(self):
         tid = self.template("🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА")
-        link = FakeLink([item_bot.PICK_SERIES + tid, "так", "сам",
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + tid, "так", "сам",
                          "400 = 540", "отмена"])
         item_bot.series_menu(link, "кабинет")
 
@@ -1124,7 +1131,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
         """Десяток объявлений с одинаковым названием — мусор на витрине,
         который потом снимать руками."""
         tid = self.template("🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА")
-        link = FakeLink([item_bot.PICK_SERIES + tid, "Просто название"])
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + tid, "Просто название"])
         item_bot.series_menu(link, "кабинет")
 
         self.assertIn("нет места под номинал", link.said[-1])
@@ -1133,7 +1141,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
     def test_the_card_is_recognised_by_the_game_when_the_name_is_odd(self):
         """Продавец назвал товар по-своему — но игра в шаблоне записана, и
         по ней карта узнаётся."""
-        link = FakeLink([item_bot.PICK_SERIES + self.template("Валюта 100"),
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + self.template("Валюта 100"),
                          "взять", "сам", "отмена"])
         item_bot.series_menu(link, "кабинет")
 
@@ -1142,7 +1151,8 @@ class SeriesFromSupplierTest(unittest.TestCase):
     def test_an_unknown_card_still_allows_typing_by_hand(self):
         """Подкатегория живёт в карте: не узнав её, брать номиналы неоткуда
         — и предлагать несбыточное незачем."""
-        link = FakeLink([item_bot.PICK_SERIES + self.template(
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + self.template(
             "Валюта 100", game="Arizona RP"), "отмена"])
         item_bot.series_menu(link, "кабинет")
         asked = [q for q, _ in link.asked]
@@ -1174,11 +1184,12 @@ class LastWordTest(unittest.TestCase):
 
         return link
 
-    def test_an_empty_template_list_stays_on_screen(self):
-        """Ровно тот случай, с которого всё началось."""
+    def test_an_empty_answer_still_leaves_a_screen_with_buttons(self):
+        """Ровно тот случай, с которого всё началось: ответ показывался и
+        тут же затирался, и нажимать было некуда."""
         link = self.run_command("серия")
 
-        self.assertIn("Шаблонов пока нет", link.said[-1])
+        self.assertTrue(link.said)
         self.assertEqual(link.last_buttons, item_bot.MENU)
 
     def test_no_command_ends_without_buttons(self):
@@ -1228,7 +1239,8 @@ class VariedFieldsTest(unittest.TestCase):
                     {"id": "f2", "label": "Промокод",
                      "required": False, "value": ""}])
         account = FakeAccount()
-        link = FakeLink([item_bot.PICK_SERIES + tid, "сам", rows, "да"])
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + tid, "сам", rows, "да"])
         item_bot.series_menu(link, account)
 
         return account.created
@@ -1348,7 +1360,8 @@ class PriceBumpTest(unittest.TestCase):
         for _ in range(3):
             ledger.remember(400, 540)
 
-        link = FakeLink([item_bot.PICK_SERIES + self.tid, "сам",
+        link = FakeLink([item_bot.PICK_SOURCE + "tpl",
+                         item_bot.PICK_SERIES + self.tid, "сам",
                          "400 = 540", "отмена"])
         item_bot.series_menu(link, FakeAccount())
         plan = next(t for t in link.said if "Создам" in t)
@@ -2038,6 +2051,156 @@ class NotOnlyRobuxTest(unittest.TestCase):
         _, text = self.made("Валюта в Arizona RP 1000000", 500, "RU")
 
         self.assertNotIn("roblox", text.lower())
+
+
+class SeriesFromShopTest(unittest.TestCase):
+    """Серия с профиля, а не из того, что создано через бота.
+
+    Серия умела строиться только из шаблона, а шаблон запоминается при
+    создании товара через бота. У продавца, выставившего всё в кабинете на
+    сайте, шаблонов нет вовсе — и серия была ему недоступна, хотя именно
+    ему она нужнее всего.
+    """
+
+    CATALOG = {"services": [
+        {"id": "s", "name": "Roblox Gift Cards Global",
+         "subcategoryName": "Roblox Gift Cards",
+         "items": [{"id": f"i{v}", "value": v, "inStock": 9, "price": 1.0}
+                   for v in (100, 400, 800)]}]}
+
+    LIVE = "100 🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА"
+
+    class Market(FakeAccount):
+        def __init__(self, description="Регион кода: GL\nНоминал: 100"):
+            super().__init__()
+            self.description = description
+            self.read = []
+
+        def get_games(self, name="", count=12):
+            return type("P", (), {"games": [
+                type("G", (), {"id": "g1", "name": "Roblox"})()]})()
+
+        def get_game(self, id=None):                       # noqa: A002
+            return type("G", (), {"categories": [
+                type("C", (), {"id": "c1", "name": "Робуксы"})()]})()
+
+        def get_my_items(self, count=24, after_cursor=None, **kw):
+            rows = [type("I", (), {
+                "id": "live-1",
+                "name": SeriesFromShopTest.LIVE,
+                "price": 179})()]
+
+            return type("P", (), {
+                "items": rows,
+                "page_info": type("I", (), {"has_next_page": False,
+                                            "end_cursor": None})()})()
+
+        def get_item(self, id):                            # noqa: A002
+            self.read.append(id)
+            node = type("N", (), {})
+
+            return type("Item", (), {
+                "id": "live-1", "name": SeriesFromShopTest.LIVE,
+                "price": 179, "description": self.description,
+                "game": type("G", (), {"id": "g1", "name": "Roblox"})(),
+                "category": type("C", (), {"id": "c1",
+                                           "name": "Робуксы"})(),
+                "obtaining_type": type("O", (), {"id": "o1",
+                                                 "name": "Без входа"})(),
+                "attributes": {"a1": "Global"},
+                "data_fields": [type("F", (), {
+                    "id": "f1", "label": "Комментарий",
+                    "required": False, "value": ""})()],
+                "attachments": [type("A", (), {
+                    "url": "https://cdn/1.jpg"})()],
+            })()
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.forget_items()
+        self._pause, item_bot.PAGE_PAUSE = item_bot.PAGE_PAUSE, 0
+        self._fetch = item_bot.fetch_photos
+        item_bot.fetch_photos = lambda urls: [PNG for _ in urls]
+        os.environ["APPROUTE_KEY"] = "ключ"
+        item_bot._CATALOG["raw"] = self.CATALOG
+        item_bot._CATALOG["at"] = time.time()
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.fetch_photos = self._fetch
+        item_bot._CATALOG["raw"] = None
+        item_bot.forget_items()
+        os.environ.pop("APPROUTE_KEY", None)
+
+    def run_series(self, *answers):
+        market = self.Market()
+        link = FakeLink([item_bot.PICK_SOURCE + "live", "роблокс",
+                         item_bot.PICK_GAME + "g1", item_bot.PICK_CAT + "c1",
+                         item_bot.PICK_LIVE + "live-1"] + list(answers))
+        item_bot.series_menu(link, market)
+
+        return link, market
+
+    def test_a_series_is_built_without_any_template(self):
+        _, market = self.run_series("сам", "400 = 540\n800 = 1060", "да")
+
+        self.assertEqual([c["name"] for c in market.created],
+                         ["400 🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА",
+                          "800 🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА"])
+        self.assertEqual([c["price"] for c in market.created], [540, 1060])
+
+    def test_the_shop_is_offered_first(self):
+        """Шаблонов у продавца может не быть вовсе."""
+        link = FakeLink(["отмена"])
+        item_bot.series_menu(link, self.Market())
+        names = [n for row in link.asked[0][1] for n, _ in row]
+
+        self.assertIn("📋 С витрины", names)
+
+    def test_templates_are_not_offered_when_there_are_none(self):
+        link = FakeLink(["отмена"])
+        item_bot.series_menu(link, self.Market())
+        names = [n for row in link.asked[0][1] for n, _ in row]
+
+        self.assertFalse(any("шаблон" in n.lower() for n in names))
+
+    def test_a_saved_template_is_still_offered(self):
+        item_bot.templates_of().save("100 Robux", 179, "GL", [PNG],
+                                     game=GAME, category=CATEGORY,
+                                     obtaining=OBTAINING)
+        link = FakeLink(["отмена"])
+        item_bot.series_menu(link, self.Market())
+        names = [n for row in link.asked[0][1] for n, _ in row]
+
+        self.assertTrue(any("шаблон" in n.lower() for n in names))
+
+    def test_the_sample_keeps_its_category_and_attributes(self):
+        _, market = self.run_series("сам", "400 = 540", "да")
+        sent = market.created[0]
+
+        self.assertEqual(sent["game_category_id"], "c1")
+        self.assertEqual(sent["obtaining_type_id"], "o1")
+        self.assertEqual(sent["options"], {"a1": "Global"})
+
+    def test_the_description_gets_one_region_line_not_two(self):
+        """Строки про регион и номинал бот ставит свои. Скопированные как
+        есть, они встали бы вторыми, и движок выдачи прочитал бы не ту."""
+        _, market = self.run_series("сам", "400 = 540", "да")
+        text = market.created[0]["description"]
+
+        self.assertEqual(text.count("Регион кода:"), 1)
+        self.assertEqual(text.count("Номинал:"), 1)
+        self.assertIn("Номинал: 400", text)
+
+    def test_the_nominals_come_from_the_supplier(self):
+        link, _ = self.run_series("взять", "сам", "400 = 540", "да")
+        sheet = next(t for t in link.said if t.startswith("100 ="))
+
+        self.assertIn("400 =", sheet)
+        self.assertIn("800 =", sheet)
 
 
 if __name__ == "__main__":

@@ -1191,21 +1191,79 @@ def make_from_template(link, account, store, template_id: str) -> None:
         ledger.remember(draft.nominal, draft.price)
 
 
+PICK_SOURCE = "src:"
+
+
+class LiveSample:
+    """Живое объявление в том виде, в каком его ждёт серия.
+
+    Серия умела строиться только из шаблона, а шаблон запоминается при
+    создании товара через бота. У продавца, выставившего всё в кабинете на
+    сайте, шаблонов нет вовсе — и серия была ему недоступна, хотя именно
+    ему она нужнее всего.
+    """
+
+    def __init__(self, plan: dict, photos: list, description: str):
+        self.name = plan["name"]
+        self.price = plan["price"]
+        self.region = plan["region"]
+        self.description = description
+        self.game = plan["game"]
+        self.category = plan["category"]
+        self.obtaining = plan["obtaining"]
+        self.fields = plan["fields"]
+        self.options = plan["options"]
+        self._photos = photos
+
+    def photos(self) -> list:
+        return list(self._photos)
+
+    def complete(self) -> bool:
+        return True
+
+
 def series_menu(link, account) -> None:
-    """Серия объявлений из одного шаблона: остальные номиналы."""
+    """Серия объявлений: остальные номиналы одного и того же товара."""
+    saved = templates_of().all()
+
+    keys = [[("📋 С витрины", PICK_SOURCE + "live")]]
+
+    if saved:
+        keys.append([("⚡ Из шаблона", PICK_SOURCE + "tpl")])
+
+    keys.append([("✖️ Назад", "отмена")])
+
+    answer = link.ask(
+        "Серия — это сразу все номиналы одного товара.\n\n"
+        "С какого объявления её делать?", ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_SOURCE):
+        link.screen("Отменил.", buttons=MENU)
+        return
+
+    if text[len(PICK_SOURCE):] == "tpl":
+        from_template_series(link, account)
+        return
+
+    sample = pick_live_sample(link, account)
+
+    if sample is not None:
+        make_series(link, account, sample)
+
+
+def from_template_series(link, account) -> None:
+    """Серия из сохранённого шаблона."""
     store = templates_of()
     saved = store.all()
 
     if not saved:
-        link.screen(
-            "Шаблонов пока нет.\n\nСоздайте одно объявление на любой "
-            "номинал, сохраните его шаблоном — и отсюда я выставлю "
-            "остальные номиналы, меняя только число и цену.", buttons=MENU)
+        link.screen("Шаблонов пока нет.", buttons=MENU)
         return
 
     keys = [[(t.label(), PICK_SERIES + t.id)] for t in saved[:MAX_CHOICES]]
     keys.append([("✖️ Назад", "отмена")])
-    answer = link.ask("С какого объявления делаем серию?", ANSWER_WAIT,
+    answer = link.ask("С какого шаблона делаем серию?", ANSWER_WAIT,
                       buttons=keys)
     text = str(answer.get("text") or "").strip()
 
@@ -1213,7 +1271,57 @@ def series_menu(link, account) -> None:
         link.screen("Отменил.", buttons=MENU)
         return
 
-    make_series(link, account, store, text[len(PICK_SERIES):])
+    template = store.get(text[len(PICK_SERIES):])
+
+    if template is None:
+        link.screen("Такого шаблона больше нет.", buttons=MENU)
+        return
+
+    if not template.complete():
+        link.screen("Этот шаблон сохранён до того, как бот стал спрашивать "
+                    "категорию, и повторить его нечем.", buttons=MENU)
+        return
+
+    make_series(link, account, template)
+
+
+def pick_live_sample(link, account):
+    """Выбрать объявление с витрины и прочитать его целиком. → образец."""
+    item_id = choose_live_item(link, account)
+
+    if item_id is None:
+        return None
+
+    link.screen("Читаю объявление…")
+
+    try:
+        item = account.get_item(item_id)
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Объявление прочитать не вышло: {e}", buttons=MENU)
+        return None
+
+    plan, gaps = copyitem.plan(item)
+
+    if gaps:
+        link.screen(f"Взять за образец не выйдет — площадка не отдала: "
+                    f"{', '.join(gaps)}.", buttons=MENU)
+        return None
+
+    link.screen(f"Скачиваю картинки ({len(plan['photos'])})…")
+    photos = fetch_photos(plan["photos"])
+
+    if not photos:
+        link.screen("Картинки скачать не вышло — без них товар не создать.",
+                    buttons=MENU)
+        return None
+
+    # Описание чистим так же, как при копии: строки про регион и номинал
+    # бот поставит свои, а две одинаковые строки в одном описании движок
+    # выдачи прочитает неверно.
+    body, why = wizard.accept_description(
+        str(getattr(item, "description", "") or ""))
+
+    return LiveSample(plan, photos, "" if why else body)
 
 
 # Каталог поставщика читается не чаще двух раз в минуту, а ответ — больше
@@ -1276,19 +1384,13 @@ def supplier_nominals(link, card, region: str):
     return costs
 
 
-def make_series(link, account, store, template_id: str) -> None:
-    """Собрать номиналы с ценами, показать план, создать по согласию."""
-    template = store.get(template_id)
+def make_series(link, account, template) -> None:
+    """Собрать номиналы с ценами, показать план, создать по согласию.
 
-    if template is None:
-        link.screen("Такого шаблона больше нет.", buttons=MENU)
-        return
-
-    if not template.complete():
-        link.screen("Этот шаблон сохранён до того, как бот стал спрашивать "
-                    "категорию, и повторить его нечем.", buttons=MENU)
-        return
-
+    `template` — образец: сохранённый шаблон или живое объявление с
+    витрины. Серии всё равно, откуда он взялся, лишь бы отдавал название,
+    цену, категорию и картинки.
+    """
     photos = template.photos()
 
     if not photos:
@@ -1928,7 +2030,19 @@ PICK_CAT = "cat2:"
 
 
 def copy_live(link, account) -> None:
-    """Копия объявления, которое уже стоит на витрине.
+    """Копия объявления, которое уже стоит на витрине."""
+    item_id = choose_live_item(link, account)
+
+    if item_id is not None:
+        make_copy(link, account, item_id)
+
+
+def choose_live_item(link, account):
+    """Выбрать объявление с витрины → его номер или None.
+
+    Общий выбор для копии и для серии: обеим нужен образец, и обеим он
+    нужен с профиля продавца, а не из того, что он когда-то создавал
+    через бота.
 
     Шаблон запоминается при создании товара — а то, что заведено раньше
     бота или в кабинете на сайте, шаблона не имеет. Повторить такое было
@@ -1946,19 +2060,18 @@ def copy_live(link, account) -> None:
     game = ask_game(link, account)
 
     if game is None:
-        return
+        return None
 
     if game == "все":
-        show_items(link, account)
-        return
+        return show_items(link, account)
 
     category = ask_category(link, account, game)
 
     if category is None:
-        return
+        return None
 
-    show_items(link, account, game=game,
-               category=None if category == "все" else category)
+    return show_items(link, account, game=game,
+                      category=None if category == "все" else category)
 
 
 def ask_game(link, account):
@@ -2042,8 +2155,8 @@ def ask_category(link, account, game):
     return {"id": str(found.id), "name": str(found.name)}
 
 
-def show_items(link, account, game=None, category=None) -> None:
-    """Прочитать отобранные объявления и показать списком."""
+def show_items(link, account, game=None, category=None):
+    """Прочитать отобранные объявления и показать списком. → номер."""
     where = " · ".join(x["name"] for x in (game, category) if isinstance(x, dict))
     link.screen(f"Читаю объявления{' — ' + where if where else ''}…")
 
@@ -2063,23 +2176,22 @@ def show_items(link, account, game=None, category=None) -> None:
         else:
             link.screen(f"Объявления прочитать не вышло: {e}", buttons=MENU)
 
-        return
+        return None
 
     if not items:
         link.screen(f"Объявлений{' — ' + where if where else ''} не "
-                    f"нашлось.\n\nКопировать можно только то, что уже стоит "
-                    f"на витрине.", buttons=MENU)
-        return
+                    f"нашлось.\n\nБрать за образец можно только то, что уже "
+                    f"стоит на витрине.", buttons=MENU)
+        return None
 
     if where:
         # Отбор уже сделан площадкой — делить дальше по названию незачем.
-        items_menu(link, account, items, where, whole=whole)
-        return
+        return items_menu(link, account, items, where, whole=whole)
 
-    groups_menu(link, account, items, whole)
+    return groups_menu(link, account, items, whole)
 
 
-def groups_menu(link, account, items, whole: bool = True) -> None:
+def groups_menu(link, account, items, whole: bool = True):
     """Кучки объявлений: по началу названия.
 
     Полсотни строк подряд, где половина выглядит одинаково, выбрать не
@@ -2091,8 +2203,7 @@ def groups_menu(link, account, items, whole: bool = True) -> None:
 
     if len(found) < 2:
         # Делить нечего — сразу список.
-        items_menu(link, account, items, "Все объявления", whole=whole)
-        return
+        return items_menu(link, account, items, "Все объявления", whole=whole)
 
     keys = []
 
@@ -2114,13 +2225,12 @@ def groups_menu(link, account, items, whole: bool = True) -> None:
 
     if not text.startswith(PICK_GROUP):
         link.screen("Отменил.", buttons=MENU)
-        return
+        return None
 
     what = text[len(PICK_GROUP):]
 
     if what == "all":
-        items_menu(link, account, items, "Все объявления", whole=whole)
-        return
+        return items_menu(link, account, items, "Все объявления", whole=whole)
 
     if what == "find":
         answer = link.ask("Какое слово есть в названии?", ANSWER_WAIT,
@@ -2128,8 +2238,7 @@ def groups_menu(link, account, items, whole: bool = True) -> None:
         word = str(answer.get("text") or "")
 
         if wizard.cancelled(word) or not word.strip():
-            groups_menu(link, account, items, whole)
-            return
+            return groups_menu(link, account, items, whole)
 
         chosen = grouping.matching(items, word)
 
@@ -2138,22 +2247,22 @@ def groups_menu(link, account, items, whole: bool = True) -> None:
                         + ("" if whole else "\n\nСписок неполный: площадка "
                            "просила сбавить темп. Попробуйте через минуту."),
                         buttons=MENU)
-            return
+            return None
 
-        items_menu(link, account, chosen, f"Со словом «{word}»", whole=whole)
-        return
+        return items_menu(link, account, chosen, f"Со словом «{word}»",
+                          whole=whole)
 
     if not what.isdigit() or int(what) >= len(found):
-        groups_menu(link, account, items, whole)
-        return
+        return groups_menu(link, account, items, whole)
 
     label, rows = found[int(what)]
-    items_menu(link, account, rows, label, whole=whole)
+
+    return items_menu(link, account, rows, label, whole=whole)
 
 
 def items_menu(link, account, items, title: str, number: int = 0,
-               whole: bool = True) -> None:
-    """Список объявлений с листанием."""
+               whole: bool = True):
+    """Список объявлений с листанием. → номер выбранного или None."""
     shown, more, total = grouping.page(items, number, PAGE)
     keys = [[(f"{getattr(i, 'price', '?')} ₽ · {grouping.head(i.name)}",
               PICK_LIVE + str(i.id))] for i in shown]
@@ -2181,15 +2290,14 @@ def items_menu(link, account, items, title: str, number: int = 0,
     text = str(answer.get("text") or "").strip()
 
     if text.startswith(PICK_PAGE):
-        items_menu(link, account, items, title,
-                   int(text[len(PICK_PAGE):]), whole)
-        return
+        return items_menu(link, account, items, title,
+                          int(text[len(PICK_PAGE):]), whole)
 
     if not text.startswith(PICK_LIVE):
         link.screen("Отменил.", buttons=MENU)
-        return
+        return None
 
-    make_copy(link, account, text[len(PICK_LIVE):])
+    return text[len(PICK_LIVE):]
 
 
 def make_copy(link, account, item_id: str) -> None:
