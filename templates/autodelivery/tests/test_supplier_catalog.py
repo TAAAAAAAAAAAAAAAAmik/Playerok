@@ -15,7 +15,7 @@ from catalog import (Card, denominations_for,                   # noqa: E402
                      denominations_from, find_service, items_of,
                      is_card_order, match_denomination, matches_service,
                      nominal_for, nominal_from_description,
-                     shown_number,
+                     nominal_from_title, render, shown_number,
                      region_of_service, services_for)
 
 
@@ -500,6 +500,63 @@ class BigNumberTest(unittest.TestCase):
             line = f"Номинал: {shown_number(value)}"
 
             self.assertEqual(nominal_from_description(line), value, line)
+
+
+class MoneyCardTest(unittest.TestCase):
+    """Денежные карты — не робуксы, и разбор под них не был готов.
+
+    У робуксов номинал больше цены, и «самое крупное число» случайно
+    совпадало с верным. У Apple наоборот: номинал 10, цена 900.
+    """
+
+    def test_the_price_written_in_the_name_is_not_the_nominal(self):
+        """Продавцы денежных карт пишут её прямо в названии."""
+        self.assertEqual(
+            nominal_from_title("Apple Gift Card 10$ за 900 рублей", 900), 10)
+        self.assertEqual(
+            nominal_from_title("Xbox 25 USD — всего 2100₽", 2100), 25)
+
+    def test_without_the_price_the_old_guess_still_applies(self):
+        """Цена известна не всегда: у чужих объявлений её может не быть."""
+        self.assertEqual(
+            nominal_from_title("Roblox 1000 Robux"), 1000)
+
+    def test_a_nominal_equal_to_the_price_survives(self):
+        """«Steam 500 ₽» за 500 ₽ — это всё ещё номинал 500. Выбросив
+        единственное число, мы остались бы вовсе без номинала."""
+        self.assertEqual(nominal_from_title("Steam 500 ₽", 500), 500)
+
+    def test_the_robux_case_is_unchanged(self):
+        self.assertEqual(nominal_from_title("Roblox 1000 Robux", 700), 1000)
+
+    def test_the_currency_follows_the_region_not_the_card(self):
+        """«Steam 500» в России — рубли, в США доллары, а карта одна и та
+        же. Раньше знак стоял в карте, и российский Steam получал описание
+        «Код пополнения Steam на 500$»."""
+        from cards import card_by_slug
+
+        steam = card_by_slug("steam")
+
+        self.assertIn("500₽", render("{номинал}", steam, 500, "RU"))
+        self.assertIn("20$", render("{номинал}", steam, 20, "US"))
+        self.assertIn("100₺", render("{номинал}", steam, 100, "TR"))
+
+    def test_a_unit_card_ignores_the_region(self):
+        """Робуксы остаются робуксами и в России, и в мире."""
+        from cards import card_by_slug
+
+        robux = card_by_slug("robux")
+
+        self.assertIn("1000 Robux", render("{номинал}", robux, 1000, "RU"))
+        self.assertIn("1000 Robux", render("{номинал}", robux, 1000, "GL"))
+
+    def test_an_unknown_region_gets_no_sign_at_all(self):
+        """Лучше без знака, чем с неверным."""
+        from cards import card_by_slug
+
+        got = render("{номинал}", card_by_slug("apple"), 10, "ZZ")
+
+        self.assertEqual(got, "10")
 
 
 if __name__ == "__main__":

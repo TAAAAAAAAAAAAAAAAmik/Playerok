@@ -104,7 +104,8 @@ def plan(item) -> tuple:
     """
     text = str(getattr(item, "description", "") or "")
     name = str(getattr(item, "name", "") or "")
-    value, _ = nominal_for(name, text)
+    price = int(getattr(item, "price", 0) or 0)
+    value, _ = nominal_for(name, text, price)
 
     draft = {
         "game": _ref(getattr(item, "game", None)),

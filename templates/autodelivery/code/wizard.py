@@ -85,9 +85,11 @@ DESCRIPTION_LIMIT = 2000
 
 FIELD_LIMIT = 500
 
-# Текст, которым описание заполняется, если продавец его пропустил.
-DEFAULT_TAIL = ("Код приходит в чат сразу после оплаты.\n"
-                "Активация: roblox.com/redeem")
+# Текст, которым описание заполняется, если продавец его пропустил И бот
+# не узнал карту. Про активацию тут ни слова нарочно: у Apple она в App
+# Store, у Xbox на xbox.com, у Steam в самом Steam — а неверная подсказка
+# хуже её отсутствия. Узнанная карта подставляет свою.
+DEFAULT_TAIL = "Код приходит в чат сразу после оплаты."
 
 # Своя строка про регион в описании продавца: её надо убрать, иначе в
 # описании окажутся две, и движок прочитает не ту. Ошибка тихая и
@@ -476,12 +478,7 @@ def apply(draft: Draft, text: str) -> str:
         return why
 
     setattr(draft, step, value)
-
-    if step == "name":
-        # Номинал обычно виден прямо в названии — берём молча. Спрашивать
-        # то, что уже знаешь, значит лишнее нажатие на каждом товаре;
-        # шаг «nominal» появится, только если число не нашлось.
-        draft.nominal = nominal_from_title(value) or 0.0
+    _guess_nominal(draft, step)
 
     return ""
 
@@ -507,12 +504,26 @@ def accept_one(draft: Draft, field: str, text: str) -> str:
 
     setattr(draft, field, value)
 
-    if field == "name" and not draft.nominal:
-        # Номинал из названия — как и в пошаговом опросе. «Не затирать
-        # заданное» важно: строка «Номинал» могла прийти раньше названия.
-        draft.nominal = nominal_from_title(value) or 0.0
+    # «Не затирать заданное» важно: строка «Номинал» могла прийти раньше
+    # названия, и она сильнее догадки по названию.
+    if not draft.nominal:
+        _guess_nominal(draft, field)
 
     return ""
+
+
+def _guess_nominal(draft: Draft, step: str) -> None:
+    """Догадаться о номинале по названию — когда есть по чему.
+
+    Считаем и на названии, и на цене. На названии — чтобы не спрашивать
+    лишний раз то, что и так видно. На цене — потому что цену продавцы
+    денежных карт пишут прямо в названии («Apple 10$ за 900 рублей»), и,
+    зная её, мы выбрасываем её из кандидатов вместо того, чтобы гадать.
+    """
+    if step not in ("name", "price") or not draft.name:
+        return
+
+    draft.nominal = nominal_from_title(draft.name, draft.price) or 0.0
 
 
 def apply_field(draft: Draft, field_id: str, text: str) -> str:

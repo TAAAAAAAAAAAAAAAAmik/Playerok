@@ -112,7 +112,7 @@ def render(template: str, card: Card | None = None, nominal="",
     витрине выглядит поломкой магазина, а не пропуском настройки.
     """
     values = {
-        "{номинал}": _shown_nominal(card, nominal),
+        "{номинал}": _shown_nominal(card, nominal, region),
         "{регион}": str(region or ""),
         "{цена}": "" if price in (None, "") else f"{price} ₽",
         "{карта}": card.title if card else "",
@@ -127,14 +127,52 @@ def render(template: str, card: Card | None = None, nominal="",
     return re.sub(r"[ \t]{2,}", " ", text).strip(" -—·,").strip()
 
 
-def _shown_nominal(card: Card | None, nominal) -> str:
+# Чем меряются деньги в каждом регионе. Знак валюты зависит от РЕГИОНА, а
+# не от карты: «Steam 500» в России — это рубли, а в США доллары, и карта
+# тут одна и та же.
+#
+# Так и было: у денежных карт знак стоял в самой карте, и российский Steam
+# получал описание «Код пополнения Steam на 500$».
+CURRENCY = {
+    "RU": "₽", "UA": "₴", "KZ": "₸", "BY": "Br",
+    "US": "$", "GL": "$", "CA": "$", "AU": "$", "NZ": "$",
+    "EU": "€", "DE": "€", "FR": "€", "IT": "€", "ES": "€", "PT": "€",
+    "NL": "€", "BE": "€", "AT": "€", "IE": "€", "FI": "€", "GR": "€",
+    "GB": "£", "TR": "₺", "IN": "₹", "JP": "¥", "CN": "¥",
+    "PL": "zł", "CZ": "Kč", "SE": "kr", "NO": "kr", "DK": "kr",
+    "BR": "R$", "MX": "MXN", "AR": "ARS", "AE": "AED", "SA": "SAR",
+    "QA": "QAR", "KW": "KWD", "IL": "₪", "KR": "₩", "HK": "HK$",
+    "SG": "S$", "TH": "฿", "ID": "Rp", "MY": "RM", "PH": "₱",
+    "VN": "₫", "ZA": "R", "NG": "₦", "EG": "EGP", "CH": "CHF",
+}
+
+
+def measure_of(card: Card | None, region: str = "") -> str:
+    """Чем меряется номинал: «Robux», «₽», «$».
+
+    У штучных карт это название единицы и оно не зависит ни от чего.
+    У денежных — валюта РЕГИОНА, а не карты.
+    """
+    if card is not None and card.unit == UNITS:
+        return card.measure
+
+    known = CURRENCY.get(str(region or "").upper())
+
+    if known:
+        return known
+
+    # Регион не назван или незнаком — лучше без знака, чем с неверным.
+    return card.measure if card is not None and not region else ""
+
+
+def _shown_nominal(card: Card | None, nominal, region: str = "") -> str:
     """Номинал так, как его читает покупатель: «10$», «1000 Robux»."""
     if nominal in (None, ""):
         return ""
 
     value = shown_number(nominal) if isinstance(nominal, (int, float)) \
         else str(nominal)
-    measure = card.measure if card else ""
+    measure = measure_of(card, region)
 
     if not measure:
         return value
@@ -189,24 +227,48 @@ def shown_number(value) -> str:
     return f"{number:.6f}".rstrip("0").rstrip(".")
 
 
-def nominal_from_title(title: str) -> float | None:
+def numbers_in(title: str) -> list:
+    """Все числа из названия, в том порядке, в каком написаны."""
+    out = []
+
+    for raw in _NUM.findall(str(title or "")):
+        clean = "".join(ch for ch in raw if not ch.isspace()).replace(",", ".")
+
+        try:
+            out.append(float(clean))
+        except ValueError:
+            continue
+
+    return out
+
+
+def nominal_from_title(title: str, price=None) -> float | None:
     """Число из названия товара: «Roblox 1000 Robux» → 1000.
 
     Берётся САМОЕ КРУПНОЕ число, а не первое. В названиях попадаются
     «Roblox Gift Card 10 USD (1000 Robux)» и «Steam 500 ₽ — скидка 5%»:
     первое число там бывает и годом, и процентом, и версией.
+
+    А вот ЦЕНА из названия выбрасывается, когда она известна. Продавцы
+    денежных карт пишут её прямо в названии: «Apple Gift Card 10$ за 900
+    рублей». Номинал там 10, а самое крупное число — 900, и бот пошёл бы
+    покупать номинал 900. У робуксов это не всплывало: там номинал больше
+    цены, и «самое крупное» случайно совпадало с верным.
+
+    Гадать тут не нужно — цену продавец называет сам, на шаге прямо перед
+    этим.
     """
-    best: float | None = None
-    for raw in _NUM.findall(str(title or "")):
-        clean = raw.replace(" ", "").replace(" ", "").replace(
-            " ", "").replace(",", ".")
-        try:
-            val = float(clean)
-        except ValueError:
-            continue
-        if best is None or val > best:
-            best = val
-    return best
+    found = numbers_in(title)
+
+    if price:
+        without = [n for n in found if abs(n - float(price)) > 1e-9]
+
+        # Выбрасываем цену, только если после неё что-то осталось:
+        # «Steam 500 ₽» с ценой 500 — это всё ещё номинал 500.
+        if without:
+            found = without
+
+    return max(found) if found else None
 
 
 # Строка номинала в описании: «Номинал: 1000». Ставит её бот при создании
@@ -238,7 +300,7 @@ def nominal_from_description(text: str) -> float | None:
         return None
 
 
-def nominal_for(title: str, description: str = "") -> tuple:
+def nominal_for(title: str, description: str = "", price=None) -> tuple:
     """Сколько покупать → (номинал, причина отказа).
 
     Два источника, и они разные по надёжности: в описании номинал СКАЗАН
@@ -252,7 +314,7 @@ def nominal_for(title: str, description: str = "") -> tuple:
     ни другое не наше решение.
     """
     said = nominal_from_description(description)
-    guessed = nominal_from_title(title)
+    guessed = nominal_from_title(title, price)
 
     if said is not None and guessed is not None \
             and abs(said - guessed) > 1e-9:

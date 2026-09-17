@@ -18,6 +18,7 @@ import item_bot                                                 # noqa: E402
 import wizard                                                   # noqa: E402
 from accounts import AccountStore                               # noqa: E402
 import vary                                                     # noqa: E402
+from catalog import nominal_for                                 # noqa: E402
 from templates import TemplateStore, folder_for                 # noqa: E402
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"pixels"
@@ -1972,6 +1973,71 @@ class LiveShopCountTest(unittest.TestCase):
                       item_bot.PICK_ACT + "make"]), market)
 
         self.assertEqual(market.created[0]["price"], 179)
+
+
+class NotOnlyRobuxTest(unittest.TestCase):
+    """Создание товара было заточено под робуксы. Проверяем остальных."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+
+    def made(self, name, price, region, description="пропустить"):
+        draft = wizard.Draft()
+        draft.game = draft.category = draft.obtaining = {"id": "1",
+                                                         "name": "x"}
+
+        for answer in (name, str(price), region, description):
+            wizard.apply(draft, answer)
+
+        item_bot.apply_card_template(draft)
+
+        return draft, wizard.description_for(draft)
+
+    def test_apple_gets_apple_activation_not_roblox(self):
+        _, text = self.made("Apple Gift Card 10$", 900, "US")
+
+        self.assertIn("App Store", text)
+        self.assertNotIn("roblox", text.lower())
+
+    def test_xbox_gets_xbox_activation(self):
+        _, text = self.made("Xbox Gift Card 25 USD", 2100, "US")
+
+        self.assertIn("xbox.com/redeem", text)
+        self.assertNotIn("roblox", text.lower())
+
+    def test_a_russian_steam_card_is_not_priced_in_dollars(self):
+        _, text = self.made("Steam 500 ₽", 550, "RU")
+
+        self.assertIn("500₽", text)
+        self.assertNotIn("500$", text)
+
+    def test_the_price_in_the_name_does_not_become_the_nominal(self):
+        """Иначе бот пошёл бы покупать у поставщика номинал 900."""
+        draft, text = self.made("Apple Gift Card 10$ за 900 рублей", 900,
+                                "US")
+
+        self.assertEqual(draft.nominal, 10)
+        self.assertIn("Номинал: 10", text)
+
+    def test_what_we_wrote_is_what_the_delivery_reads(self):
+        for name, price, region, want in [
+                ("Apple Gift Card 10$ за 900 рублей", 900, "US", 10),
+                ("Xbox Gift Card 25 USD", 2100, "US", 25),
+                ("Steam 500 ₽", 550, "RU", 500),
+                ("Apple Gift Card 100 TL", 1400, "TR", 100),
+                ("Roblox 1000 Robux", 700, "GL", 1000)]:
+            _, text = self.made(name, price, region)
+            got, why = nominal_for(name, text, price)
+
+            self.assertEqual(got, want, f"{name}: {why}")
+
+    def test_an_unknown_card_is_not_told_to_redeem_on_roblox(self):
+        """Неверная подсказка про активацию хуже её отсутствия."""
+        _, text = self.made("Валюта в Arizona RP 1000000", 500, "RU")
+
+        self.assertNotIn("roblox", text.lower())
 
 
 if __name__ == "__main__":

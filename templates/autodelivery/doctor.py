@@ -285,7 +285,8 @@ def listings_check(account) -> None:
         short = name if len(name) <= 40 else name[:39] + "…"
         # Описание у списка товаров бывает пустым — читаем, что дали.
         text = str(getattr(item, "description", "") or "")
-        value, why_value = nominal_for(name, text)
+        value, why_value = nominal_for(name, text,
+                                       getattr(item, "price", None))
         region = (region_from_description(text)
                   or conf.card(card.slug)["region"])
 

@@ -1151,7 +1151,7 @@ def make_from_template(link, account, store, template_id: str) -> None:
     draft = wizard.Draft()
     draft.name = template.name
     draft.price = template.price
-    draft.nominal = nominal_from_title(template.name) or 0.0
+    draft.nominal = nominal_from_title(template.name, template.price) or 0.0
     draft.region = template.region
     draft.description = template.description
     draft.game = template.game
@@ -1296,7 +1296,7 @@ def make_series(link, account, store, template_id: str) -> None:
                     buttons=MENU)
         return
 
-    old = nominal_from_title(template.name)
+    old = nominal_from_title(template.name, template.price)
     pattern = series.pattern_from(template.name, old) if old else ""
 
     if not pattern:
@@ -1662,7 +1662,8 @@ def live_counts(account, game=None, category=None) -> dict:
     found: dict = {}
 
     for item in items:
-        value = nominal_from_title(str(getattr(item, "name", "") or ""))
+        value = nominal_from_title(str(getattr(item, "name", "") or ""),
+                                   getattr(item, "price", None))
         price = int(getattr(item, "price", 0) or 0)
 
         if not value or not price:

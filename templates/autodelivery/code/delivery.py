@@ -171,7 +171,11 @@ class DeliveryEngine:
 
         # 5. Номинал: из описания, где он сказан, иначе из названия, где
         #    его приходится угадывать по самому крупному числу.
-        want, why = nominal_for(order.title, order.description)
+        # Цену заказа отдаём разбору: продавцы денежных карт пишут её
+        # прямо в названии («Apple 10$ за 900 рублей»), и без неё самым
+        # крупным числом окажется она, а не номинал.
+        want, why = nominal_for(order.title, order.description,
+                                getattr(order, "amount", None))
 
         if want is None:
             return await self._stop(card, order.id, why)
