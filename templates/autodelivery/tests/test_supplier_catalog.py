@@ -16,6 +16,7 @@ from catalog import (UNITS, Card, denominations_for,            # noqa: E402
                      is_card_order, match_denomination, matches_service,
                      nominal_by_unit, nominal_for,
                      nominal_from_description, numbers_by_unit,
+                     numbers_in,
                      nominal_from_title, render, shown_number,
                      region_of_service, services_for)
 
@@ -682,6 +683,66 @@ class NominalByUnitTest(unittest.TestCase):
 
     def test_nothing_to_read_is_not_a_refusal(self):
         self.assertEqual(nominal_by_unit("", self.ROBUX), (None, ""))
+
+
+class NumberAcrossLinesTest(unittest.TestCase):
+    """Число не склеивается через перевод строки.
+
+    Живое описание продавца:
+
+        Регион кода: GL
+        Номинал: 50
+
+        50 робуксов
+        🎮 Пополнение 50 ROBUX для аккаунта Roblox (GLOBAL).
+
+    Пробел в разряде числа («1 000») задавался через `\\s`, а оно ловит и
+    перевод строки. «Номинал: 50» плюс следующая строка читались как одно
+    число «50\\n\\n50», float на нём падал — и строка «Номинал: 50» не
+    читалась ВООБЩЕ. Продавец видел «номинал не найден», глядя на номинал,
+    написанный в карточке прямым текстом.
+    """
+
+    ROBUX = Card(slug="robux", title="Roblox", emoji="🎮",
+                 keywords=("robux", "робукс"), measure="Robux", unit=UNITS,
+                 measure_words=("робукс",), subcategory="Roblox Gift Cards",
+                 activation="")
+
+    LIVE = ("Регион кода: GL\n"
+            "Номинал: 50\n"
+            "\n"
+            "50 робуксов\n"
+            "🎮 Пополнение 50 ROBUX для аккаунта Roblox (GLOBAL).\n"
+            "\n"
+            "⚡ Моментальная выдача кода после покупки.\n"
+            "🕐 Поддержка и выдача 24/7.")
+
+    def test_the_live_description_is_read(self):
+        got, why = nominal_for("🥳ПРОМОКОДОМ🥳😎 АВТОВЫДАЧА😎", self.LIVE,
+                               119, self.ROBUX)
+
+        self.assertEqual(got, 50)
+        self.assertEqual(why, "")
+
+    def test_the_marked_line_survives_the_next_line(self):
+        self.assertEqual(nominal_from_description("Номинал: 50\n\n50 робуксов"),
+                         50)
+
+    def test_two_lines_are_two_numbers(self):
+        self.assertEqual(numbers_in("50\n400"), [50.0, 400.0])
+
+    def test_a_thousand_separator_still_works(self):
+        """Ради него `\\s` там и стоял: «1 000» — одно число."""
+        self.assertEqual(nominal_from_description("Номинал: 1 000"), 1000)
+
+    def test_a_non_breaking_space_works_too(self):
+        self.assertEqual(numbers_by_unit("50\u00a0робуксов", ("робукс",)),
+                         [50.0])
+
+    def test_the_unit_must_stand_on_the_same_line(self):
+        """«24\nробуксы начисляются» — это не «24 робукса»."""
+        self.assertEqual(numbers_by_unit("выдача 24\nробуксы начисляются",
+                                         ("робукс",)), [])
 
 
 if __name__ == "__main__":

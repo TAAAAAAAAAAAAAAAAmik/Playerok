@@ -206,7 +206,42 @@ def pick_card(cards: list[Card], title: str, conf_of) -> Card | None:
 # Номинал из названия
 # ---------------------------------------------------------------------------
 
-_NUM = re.compile(r"(\d[\d\s  ]*(?:[.,]\d+)?)")
+# Чем разделяют разряды внутри ОДНОГО числа: обычный пробел, табуляция,
+# неразрывный, тонкий и узкий неразрывный. Перевода строки здесь нет
+# нарочно, и это не мелочь.
+#
+# Раньше стояло `\s`, а оно ловит и перенос. Описание вида
+#
+#     Номинал: 50
+#
+#     50 робуксов
+#
+# читалось как одно число «50\n\n50», float на нём падал — и строка
+# «Номинал: 50» не читалась ВООБЩЕ. Продавец видел «номинал не найден»,
+# глядя на номинал, написанный в карточке прямым текстом.
+_THIN = " \t\u00a0\u2009\u202f"
+
+# Пробел, который НЕ переводит строку. Им же разделяют число и единицу:
+# «50 робуксов», «50\u00a0робуксов».
+_H = r"[" + _THIN + r"]"
+
+# Одно число вместе с разрядами: «1 000», «9,99».
+_NUMBER = r"(\d[\d" + _THIN + r"]*(?:[.,]\d+)?)"
+
+_NUM = re.compile(_NUMBER)
+
+
+def _to_float(raw: str):
+    """Число из куска текста. Не число — None."""
+    clean = str(raw or "")
+
+    for ch in _THIN:
+        clean = clean.replace(ch, "")
+
+    try:
+        return float(clean.replace(",", "."))
+    except ValueError:
+        return None
 
 
 def shown_number(value) -> str:
@@ -237,12 +272,10 @@ def numbers_in(title: str) -> list:
     out = []
 
     for raw in _NUM.findall(str(title or "")):
-        clean = "".join(ch for ch in raw if not ch.isspace()).replace(",", ".")
+        value = _to_float(raw)
 
-        try:
-            out.append(float(clean))
-        except ValueError:
-            continue
+        if value is not None:
+            out.append(value)
 
     return out
 
@@ -279,8 +312,8 @@ def nominal_from_title(title: str, price=None) -> float | None:
 # Строка номинала в описании: «Номинал: 1000». Ставит её бот при создании
 # товара — как и строку региона, — чтобы потом не гадать по названию.
 _NOMINAL_LINE = re.compile(
-    r"(?:номинал|количество|кол-во|сумма|nominal|amount)\s*[:\-—]?\s*"
-    r"(\d[\d\s  ]*(?:[.,]\d+)?)", re.I)
+    r"(?:номинал|количество|кол-во|сумма|nominal|amount)"
+    + _H + r"*[:\-—]?" + _H + r"*" + _NUMBER, re.I)
 
 
 def nominal_from_description(text: str) -> float | None:
@@ -296,13 +329,7 @@ def nominal_from_description(text: str) -> float | None:
     if not m:
         return None
 
-    clean = m.group(1).replace(" ", "").replace("\u00a0", "").replace(
-        "\u2009", "").replace(",", ".").strip()
-
-    try:
-        return float(clean)
-    except ValueError:
-        return None
+    return _to_float(m.group(1))
 
 
 # Как пишут деньги рядом с числом. Список общий на все денежные карты:
@@ -336,7 +363,9 @@ def numbers_by_unit(text: str, words) -> list:
     пишут и «50 робуксов», и «$10». Всё остальное в описании остаётся
     просто числами: год, срок действия, номер поддержки.
     """
-    text = " ".join(str(text or "").lower().split())
+    # Переводы строк НЕ схлопываем: описание — это строки, и число из
+    # одной строки не должно склеиваться с числом из следующей.
+    text = str(text or "").lower()
     found: list = []
 
     if not text:
@@ -353,21 +382,18 @@ def numbers_by_unit(text: str, words) -> list:
         # неё любой: по-русски единица склоняется, и «робукс», «робукса»,
         # «робуксов» — одно и то же слово.
         edge = r"(?<![а-яёa-z])" if word[0].isalpha() else ""
-        number = r"(\d[\d\s\u00a0\u2009]*(?:[.,]\d+)?)"
-        after = re.compile(number + r"\s*" + edge + re.escape(word), re.I)
-        before = re.compile(edge + re.escape(word) + r"\s*" + number, re.I)
+        # Между числом и единицей — только пробел, не перенос строки:
+        # «50\nробуксов начисляются» это уже не «50 робуксов».
+        after = re.compile(_NUMBER + _H + r"*" + edge + re.escape(word),
+                           re.I)
+        before = re.compile(edge + re.escape(word) + _H + r"*" + _NUMBER,
+                            re.I)
 
         for pattern in (after, before):
             for m in pattern.finditer(text):
-                clean = "".join(ch for ch in m.group(1)
-                                if not ch.isspace()).replace(",", ".")
+                value = _to_float(m.group(1))
 
-                try:
-                    value = float(clean)
-                except ValueError:
-                    continue
-
-                if value > 0:
+                if value is not None and value > 0:
                     found.append((m.start(), value))
 
     # По порядку в тексте, а не по порядку написаний единицы: продавец
@@ -387,14 +413,13 @@ def numbers_by_unit(text: str, words) -> list:
 # пополнением на любую сумму, и купить по нему «то число, рядом с которым
 # стоит единица» значит взять самый дорогой номинал из перечисленных.
 _RANGE = re.compile(
-    r"(?:от|from)\s*\d[\d\s\u00a0\u2009]*(?:[.,]\d+)?\s*"
-    r"(?:до|to|[-—–])\s*\d"
-    r"|\d[\d\s\u00a0\u2009]*\s*[—–]\s*\d", re.I)
+    r"(?:от|from)" + _H + r"*" + _NUMBER + _H + r"*(?:до|to|[-—–])" + _H + r"*\d"
+    r"|" + _NUMBER + _H + r"*[—–]" + _H + r"*\d", re.I)
 
 
 def looks_like_range(text: str) -> bool:
     """В описании назван диапазон, а не один номинал."""
-    return bool(_RANGE.search(" ".join(str(text or "").lower().split())))
+    return bool(_RANGE.search(str(text or "").lower()))
 
 
 def nominal_by_unit(text: str, card: Card | None) -> tuple:

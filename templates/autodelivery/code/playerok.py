@@ -154,44 +154,94 @@ class PlayerokMarketplace:
             if not cursor:
                 break
 
-        # Чат дочитываем после отбора: у списка и у одиночной сделки на
-        # площадке РАЗНЫЕ наборы полей, и в списке чата нет вовсе.
-        return [await self._with_chat(order) for order in orders]
+        # Чат и описание дочитываем после отбора: у списка и у одиночной
+        # сделки на площадке РАЗНЫЕ наборы полей, и в списке нет ни того,
+        # ни другого.
+        return [await self._filled(order) for order in orders]
 
-    async def _with_chat(self, order: Order) -> Order:
-        """Заказ с номером чата, дочитанным отдельным запросом.
+    async def _filled(self, order: Order) -> Order:
+        """Заказ с чатом и описанием, дочитанными отдельными запросами.
 
-        Проверено на живом кабинете: «список сделок» возвращает сделку без
-        поля chat, и заказ приходит с пустым чатом — то есть выдавать код
-        некуда. Одиночный запрос сделки это поле отдаёт.
+        Проверено на живом кабинете дважды, и оба раза дорого.
+
+        Чат: «список сделок» возвращает сделку без поля chat, и заказ
+        приходит с пустым чатом — то есть выдавать код некуда.
+
+        Описание: его в списке тоже нет. А в описании у продавца написан
+        и регион, и номинал («Регион кода: GL», «Номинал: 50»), и без него
+        выдача останавливалась на «номинал не найден» — притом что в
+        карточке товара номинал стоял прямым текстом. Со стороны это
+        выглядит как «бот не умеет читать», а на деле он читал пустоту.
 
         Дочитываем только оплаченные, уже отобранные: их единицы, а лишний
         запрос на каждую сделку подряд стоил бы темпа опроса.
         """
-        if order.chat_id:
+        if order.chat_id and order.description:
             return order
 
+        full = await self._read_deal(order.id)
+        chat = order.chat_id or (full.chat_id if full else "")
+        text = order.description or (full.description if full else "")
+
+        if not text:
+            # Сделка описания не отдала — спрашиваем сам товар. Это ещё
+            # один запрос, но он случается раз на заказ и только когда
+            # иначе выдачи не будет вовсе.
+            text = await self._item_text(order)
+
+        if chat == order.chat_id and text == order.description:
+            return order
+
+        # Берём ТОЛЬКО недостающее: остальное уже прочитано из списка, и
+        # подменять его целиком значит доверять второму ответу больше
+        # первого без причины.
+        return replace(order, chat_id=chat, description=text)
+
+    async def _read_deal(self, order_id: str) -> Order | None:
+        """Сделка поштучно. Не достучались — None, и это не поломка."""
         get_deal = getattr(self.account, "get_deal", None)
 
         if not callable(get_deal):
-            return order
+            return None
 
         try:
-            deal = await _run(get_deal, order.id)
+            deal = await _run(get_deal, str(order_id))
         except Exception:                                  # noqa: BLE001
-            # Не достучались — отдаём как есть. Движок скажет «нет чата»
-            # и оставит заказ на ручную выдачу, а это видно и чинится.
-            return order
+            # Движок скажет «нет чата» или «номинал не найден» и оставит
+            # заказ на ручную выдачу, а это видно и чинится.
+            return None
 
-        full = self._to_order(deal) if deal is not None else None
+        return self._to_order(deal) if deal is not None else None
 
-        if full is None or not full.chat_id:
-            return order
+    async def _item_text(self, order: Order) -> str:
+        """Описание товара, прочитанное у самого товара.
 
-        # Берём ТОЛЬКО чат: остальное уже прочитано из списка, и подменять
-        # его целиком значит доверять второму ответу больше первого без
-        # причины.
-        return replace(order, chat_id=full.chat_id)
+        Сюда же дописываются значения характеристик: у этого продавца
+        количество стоит именно там — «Количество: 50 робуксов», — а в
+        описании его может не быть вовсе.
+        """
+        item_id = _text((order.raw or {}).get("item_id"))
+
+        if not item_id:
+            return order.description
+
+        get_item = getattr(self.account, "get_item", None)
+
+        if not callable(get_item):
+            return order.description
+
+        try:
+            item = await _run(lambda: get_item(id=item_id))
+        except Exception:                                  # noqa: BLE001
+            return order.description
+
+        if item is None:
+            return order.description
+
+        parts = [_text(getattr(item, "description", ""))]
+        parts += _attribute_lines(item)
+
+        return "\n".join(p for p in parts if p)
 
     async def get_order(self, order_id: str) -> Order | None:
         """Одна сделка по номеру — для возобновления оборванной выдачи."""
@@ -209,7 +259,12 @@ class PlayerokMarketplace:
                 deal = None
 
             if deal is not None:
-                return self._to_order(deal)
+                # Через то же дочитывание: ручная выдача и возобновление
+                # читают описание оттуда же, откуда обычная, — иначе они
+                # встали бы на «номинал не найден» там, где обычная идёт.
+                order = self._to_order(deal)
+
+                return await self._filled(order) if order else order
 
         # Запасной путь: библиотека может не уметь брать сделку поштучно.
         # Листаем страницы, пока не найдём нужную.
@@ -222,7 +277,7 @@ class PlayerokMarketplace:
                 order = self._to_order(deal)
 
                 if order is not None and order.id == wanted:
-                    return order
+                    return await self._filled(order)
 
             cursor = self._next_cursor(page)
 
@@ -342,8 +397,33 @@ class PlayerokMarketplace:
             description=_text(getattr(item, "description", None)),
             buyer=_text(getattr(user, "username", None) or getattr(user, "name", None)),
             amount=_amount(deal),
-            raw={"deal": deal},
+            # Номер товара — чтобы дочитать описание, если сделка его не
+            # отдала. Держим в raw: движку он не нужен, адаптеру нужен.
+            raw={"deal": deal, "item_id": _text(getattr(item, "id", ""))},
         )
+
+
+def _attribute_lines(item: Any) -> list:
+    """Характеристики товара строками: «Количество: 50 робуксов».
+
+    Названия поля площадка в товаре не отдаёт — только его внутреннее имя
+    и значение. Нам и не нужно: читаем мы значение, а имя пишем рядом
+    только чтобы строка выглядела строкой.
+    """
+    found = getattr(item, "attributes", None)
+
+    if not isinstance(found, dict):
+        return []
+
+    out = []
+
+    for name, value in found.items():
+        text = _text(value)
+
+        if text:
+            out.append(f"{_text(name)}: {text}" if _text(name) else text)
+
+    return out
 
 
 def _status_sent():

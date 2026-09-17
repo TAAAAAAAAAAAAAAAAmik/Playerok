@@ -23,9 +23,12 @@ class FakeStatus:
 
 
 class FakeItem:
-    def __init__(self, name: str, description: str = ""):
+    def __init__(self, name: str, description: str = "", item_id="i1",
+                 attributes=None):
         self.name = name
         self.description = description
+        self.id = item_id
+        self.attributes = attributes
 
 
 class FakeChat:
@@ -40,10 +43,10 @@ class FakeUser:
 
 class FakeDeal:
     def __init__(self, deal_id, status, title="", description="",
-                 chat_id="", buyer=""):
+                 chat_id="", buyer="", item_id="i1"):
         self.id = deal_id
         self.status = FakeStatus(status)
-        self.item = FakeItem(title, description)
+        self.item = FakeItem(title, description, item_id)
         self.chat = FakeChat(chat_id) if chat_id else None
         self.user = FakeUser(buyer)
         self.transaction = None
@@ -63,13 +66,23 @@ class FakeAccount:
     разные запросы с разными наборами полей, и чата в списке нет.
     """
 
-    def __init__(self, pages=None, send_error=None, single=None):
+    def __init__(self, pages=None, send_error=None, single=None, items=None):
         self.pages = pages or [FakePage([])]
         self.send_error = send_error
         self.single = single or {}
+        self.items = items or {}
         self.calls = []
         self.single_calls = []
+        self.item_calls = []
         self.sent = []
+
+    def get_item(self, id=None):                           # noqa: A002
+        self.item_calls.append(id)
+
+        if id not in self.items:
+            raise RuntimeError("нет такого товара")
+
+        return self.items[id]
 
     def get_deal(self, deal_id):
         self.single_calls.append(deal_id)
@@ -189,6 +202,62 @@ class PaidOrdersTest(unittest.TestCase):
         self.assertEqual([o.id for o in orders], ["2"])
 
 
+class DescriptionFromTheItemTest(unittest.TestCase):
+    """Последний источник описания — сам товар.
+
+    У этого продавца номинал стоит в характеристике «Количество: 50
+    робуксов», и в сделке её нет вовсе. Без неё выдача вставала на
+    «номинал не найден» при номинале, написанном в карточке прямым
+    текстом.
+    """
+
+    def market(self, item=None):
+        account = FakeAccount(
+            [FakePage([FakeDeal("d1", "PAID", chat_id="c1")])],
+            single={"d1": FakeDeal("d1", "PAID", chat_id="c1")},
+            items={"i1": item} if item is not None else None,
+        )
+
+        return account, run(PlayerokMarketplace(account).paid_orders())[0]
+
+    def test_the_item_description_is_used(self):
+        account, order = self.market(
+            FakeItem("50 робуксов", "Регион кода: GL\nНоминал: 50"))
+
+        self.assertIn("Номинал: 50", order.description)
+        self.assertEqual(account.item_calls, ["i1"])
+
+    def test_the_attributes_are_added_to_the_text(self):
+        """«Количество: 50 робуксов» — это характеристика, а не описание."""
+        _, order = self.market(
+            FakeItem("промокод", "", attributes={"Количество": "50 робуксов"}))
+
+        self.assertIn("50 робуксов", order.description)
+
+    def test_empty_attributes_are_skipped(self):
+        _, order = self.market(
+            FakeItem("промокод", "текст", attributes={"a": "", "b": None}))
+
+        self.assertEqual(order.description, "текст")
+
+    def test_the_item_is_not_asked_when_the_deal_answered(self):
+        """Лишний запрос на каждый заказ стоил бы темпа опроса."""
+        account = FakeAccount(
+            [FakePage([FakeDeal("d1", "PAID", chat_id="c1")])],
+            single={"d1": FakeDeal("d1", "PAID", chat_id="c1",
+                                   description="Номинал: 50")},
+        )
+        run(PlayerokMarketplace(account).paid_orders())
+
+        self.assertEqual(account.item_calls, [])
+
+    def test_an_unreachable_item_is_not_a_crash(self):
+        account, order = self.market()
+
+        self.assertEqual(order.description, "")
+        self.assertEqual(order.chat_id, "c1")
+
+
 class ChatIsReadSeparatelyTest(unittest.TestCase):
     """Найдено на живом кабинете: в ответе на «список сделок» поля chat нет,
     и заказ приходит с пустым чатом — то есть код отправить некуда."""
@@ -203,13 +272,39 @@ class ChatIsReadSeparatelyTest(unittest.TestCase):
         self.assertEqual(order.chat_id, "chat-9")
         self.assertEqual(account.single_calls, ["d1"])
 
-    def test_chat_from_the_list_is_not_refetched(self):
+    def test_a_complete_deal_is_not_refetched(self):
         """Лишний запрос на каждую сделку стоил бы темпа опроса."""
-        account = FakeAccount([FakePage([FakeDeal("d1", "PAID", chat_id="c1")])])
+        account = FakeAccount([FakePage([
+            FakeDeal("d1", "PAID", chat_id="c1", description="Номинал: 50")])])
         order = run(PlayerokMarketplace(account).paid_orders())[0]
 
         self.assertEqual(order.chat_id, "c1")
         self.assertEqual(account.single_calls, [])
+
+    def test_missing_description_is_fetched_too(self):
+        """В описании у продавца и регион, и номинал. Без него выдача
+        вставала на «номинал не найден» — притом что в карточке товара он
+        стоял прямым текстом."""
+        account = FakeAccount(
+            [FakePage([FakeDeal("d1", "PAID", chat_id="c1")])],
+            single={"d1": FakeDeal("d1", "PAID", chat_id="c1",
+                                   description="Регион кода: GL\nНоминал: 50")},
+        )
+        order = run(PlayerokMarketplace(account).paid_orders())[0]
+
+        self.assertIn("Номинал: 50", order.description)
+        self.assertEqual(account.single_calls, ["d1"])
+
+    def test_the_description_from_the_list_is_kept(self):
+        account = FakeAccount(
+            [FakePage([FakeDeal("d1", "PAID", chat_id="c1",
+                                description="из списка")])],
+            single={"d1": FakeDeal("d1", "PAID", chat_id="c1",
+                                   description="из сделки")},
+        )
+        order = run(PlayerokMarketplace(account).paid_orders())[0]
+
+        self.assertEqual(order.description, "из списка")
 
     def test_only_the_chat_is_taken_from_the_second_answer(self):
         """Остальное уже прочитано из списка; доверять второму ответу
