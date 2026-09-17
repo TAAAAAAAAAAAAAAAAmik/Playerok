@@ -978,6 +978,56 @@ class MuteMenuTest(unittest.TestCase):
         self.assertIn("Глушка", link.asked[-1][0])
 
 
+class RegionNoteTest(unittest.TestCase):
+    """Строка под вопросом о регионе: откуда кнопки и что делать иначе.
+
+    Без неё продавец видит восемь кнопок и решает, что остальных регионов
+    бот не умеет. Умеет — любой принимается текстом.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        self.saved = item_bot._CATALOG.copy()
+        item_bot._CATALOG.update({"raw": None, "at": 0})
+        self.key = os.environ.get("APPROUTE_KEY")
+        os.environ["APPROUTE_KEY"] = "ключ"
+
+    def tearDown(self):
+        item_bot._CATALOG.update(self.saved)
+
+        if self.key is None:
+            os.environ.pop("APPROUTE_KEY", None)
+        else:
+            os.environ["APPROUTE_KEY"] = self.key
+
+    def note(self, name="Apple Gift Card 10$"):
+        return item_bot.region_note(draft(name=name))
+
+    def test_any_region_can_be_typed(self):
+        self.assertIn("впишите", self.note().lower())
+
+    def test_the_supplier_regions_are_counted(self):
+        item_bot._CATALOG.update({
+            "raw": {"services": [
+                {"id": "s1", "name": "Apple Gift Cards TR",
+                 "subcategory": "Apple Gift Cards",
+                 "items": [{"id": "d1", "name": "10 USD", "inStock": 5}]},
+                {"id": "s2", "name": "Apple Gift Cards Saudi Arabia",
+                 "subcategory": "Apple Gift Cards",
+                 "items": [{"id": "d2", "name": "10 USD", "inStock": 5}]}]},
+            "at": time.time()})
+
+        self.assertIn("(2)", self.note())
+
+    def test_an_unreadable_catalog_is_explained(self):
+        """Иначе кнопки выглядят как весь список умений бота."""
+        os.environ.pop("APPROUTE_KEY", None)
+
+        self.assertIn("не прочитался", self.note())
+
+
 class SettingsMenuTest(unittest.TestCase):
     """«Автовыдача» — кнопка, за которой продавец включает выдачу кодов.
 

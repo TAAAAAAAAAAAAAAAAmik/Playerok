@@ -6,7 +6,14 @@
 
     python3 supplier_ids.py robux            # услуги и все их номиналы
     python3 supplier_ids.py robux --кратко   # только названия и ID
+    python3 supplier_ids.py robux --регионы  # какие регионы бот видит
     python3 supplier_ids.py robux --raw      # плюс сырой ответ в файл
+
+Режим «--регионы» отвечает на вопрос «почему при создании товара не все
+регионы». Он берёт карту по её названию (robux, apple, xbox…), проходит по
+её услугам у поставщика и показывает, какой регион бот прочитал у каждой.
+Услуги, где регион прочитать не вышло, перечислены отдельно: их регионы
+кнопками не появятся, потому что бот не знает, что они за регионы.
 
 Кратко — когда услуг много: полный список номиналов на телефон не влезает,
 а выбирать услугу всё равно надо по названию.
@@ -111,6 +118,70 @@ def show(service: dict) -> None:
               f" | остаток {item.get('inStock')}")
 
 
+def regions(search: str, data) -> bool:
+    """Регионы карты глазами бота. → нашлась ли такая карта.
+
+    Печатает ровно то, из чего складываются кнопки регионов в мастере:
+    услуга → прочитанный регион → остаток. Если региона нет в списке, то
+    и кнопки его не будет, и здесь сразу видно, почему: услуги нет вовсе,
+    остаток нулевой или название не разобралось.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    from cards import CARDS
+    from catalog import (denominations_for, region_of_service,
+                         services_for)
+
+    card = next((c for c in CARDS
+                 if search in c.slug or search in c.title.lower()), None)
+
+    if card is None:
+        print(f"Карты «{search}» нет. Есть: "
+              + ", ".join(c.slug for c in CARDS))
+        return False
+
+    print(f"\n{card.emoji} {card.title} — подкатегория «{card.subcategory}»")
+
+    found = services_for(card, data)
+
+    if not found:
+        print("  услуг этой подкатегории у поставщика не нашлось")
+        print("  → проверьте точное имя подкатегории в cards.py")
+        return True
+
+    print(f"  услуг: {len(found)}")
+    unknown = []
+
+    for service in found:
+        name = str(service.get("name") or service.get("title") or "?")
+        region = region_of_service(service)
+
+        if not region:
+            unknown.append(name)
+
+        print(f"    {region or '??'}  ←  {name}")
+
+    rows = denominations_for(card, data)
+    in_stock = sorted({r.region for r in rows if r.region and r.in_stock > 0})
+    empty = sorted({r.region for r in rows if r.region} - set(in_stock))
+
+    print(f"\n  кнопками в мастере покажутся ({len(in_stock)}): "
+          + (", ".join(in_stock) or "ни одного"))
+
+    if empty:
+        print(f"  есть, но всё кончилось: {', '.join(empty)}")
+
+    if unknown:
+        print(f"\n  ⚠️  регион не прочитан у {len(unknown)} услуг:")
+
+        for name in unknown[:15]:
+            print(f"      {name}")
+
+        print("  → пришлите эти названия — добавим их в разбор регионов")
+
+    return True
+
+
 def main() -> None:
     load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -160,6 +231,10 @@ def main() -> None:
         return
 
     print(f"Всего услуг: {len(services)}")
+
+    if "--регионы" in sys.argv or "--regions" in sys.argv:
+        regions(search, data)
+        return
 
     found = [s for s in services
              if isinstance(s, dict) and search in text_of(s).lower()]

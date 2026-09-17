@@ -16,7 +16,7 @@ from catalog import (UNITS, Card, denominations_for,            # noqa: E402
                      is_card_order, match_denomination, matches_service,
                      nominal_by_unit, nominal_for,
                      nominal_from_description, numbers_by_unit,
-                     numbers_in, stop_words, whose,
+                     numbers_in, region_in, stop_words, whose,
                      nominal_from_title, render, shown_number,
                      region_of_service, services_for)
 
@@ -833,6 +833,56 @@ class WhoseTest(unittest.TestCase):
 
         self.assertIsNone(card)
         self.assertEqual(why, "не мой товар")
+
+
+class RegionSpellingTest(unittest.TestCase):
+    """Регион, который не прочитался, кнопкой не появится.
+
+    Продавец видел «не все регионы» у Apple и Xbox: у этих карт поставщик
+    называет регион словом по-английски — «Apple Gift Cards Turkey», — а
+    разбор знал только коды и русские названия.
+    """
+
+    def test_a_country_written_in_english(self):
+        self.assertEqual(region_in("Apple Gift Cards Turkey"), "TR")
+
+    def test_a_two_word_country(self):
+        self.assertEqual(region_in("Xbox Gift Card Saudi Arabia"), "SA")
+
+    def test_the_longer_name_wins(self):
+        """«SOUTH KOREA» — это KR, а не «KOREA неизвестно»."""
+        self.assertEqual(region_in("Gift Card South Korea"), "KR")
+
+    def test_a_code_in_brackets(self):
+        self.assertEqual(region_in("Apple Gift Card (Global)"), "GL")
+
+    def test_an_english_preposition_is_not_a_country(self):
+        """«in» — это предлог, а не Индия. Коды пишут заглавными."""
+        self.assertEqual(region_in("Apple Gift Card in Turkey"), "TR")
+
+    def test_a_lowercase_code_is_ignored(self):
+        self.assertEqual(region_in("apple gift card it works"), "")
+
+    def test_an_uppercase_code_still_works(self):
+        self.assertEqual(region_in("Apple Gift Cards US"), "US")
+
+    def test_nothing_to_read_is_empty(self):
+        self.assertEqual(region_in("Apple Gift Card 10 USD"), "")
+
+    def test_the_field_is_stronger_than_the_name(self):
+        """Сказанное полем сильнее угаданного из названия."""
+        got = region_of_service({"name": "Apple Gift Card",
+                                 "country": "Turkey"})
+
+        self.assertEqual(got, "TR")
+
+    def test_a_country_code_field_is_understood(self):
+        self.assertEqual(region_of_service({"name": "Apple",
+                                            "countryCode": "ae"}), "AE")
+
+    def test_the_name_still_works_without_a_field(self):
+        self.assertEqual(region_of_service({"name": "Apple Gift Cards TR"}),
+                         "TR")
 
 
 if __name__ == "__main__":

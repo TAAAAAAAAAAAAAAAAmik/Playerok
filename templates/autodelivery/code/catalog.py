@@ -612,6 +612,47 @@ REGION_ALIASES = {
     "ЯПОНИЯ": "JP", "JP": "JP",
 }
 
+# Как регион называют в каталоге поставщика — словом, а не кодом.
+# «Apple Gift Cards Turkey» — та же Турция, что и «… TR», но кнопки этого
+# региона у продавца не было: разбор искал только коды и русские названия,
+# а поставщик пишет по-английски. Регион, который не прочитался, не
+# показывается вовсе — и выглядит это как «не все регионы появляются».
+REGION_NAMES = {
+    "GLOBAL": "GL", "WORLDWIDE": "GL", "WORLD": "GL",
+    "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US",
+    "AMERICA": "US", "USA": "US",
+    "RUSSIA": "RU", "RUSSIAN FEDERATION": "RU",
+    "TURKEY": "TR", "TURKIYE": "TR", "TÜRKIYE": "TR", "TÜRKİYE": "TR",
+    "EUROPE": "EU", "EUROPEAN UNION": "EU",
+    "UNITED KINGDOM": "GB", "GREAT BRITAIN": "GB", "BRITAIN": "GB",
+    "ENGLAND": "GB",
+    "UNITED ARAB EMIRATES": "AE", "EMIRATES": "AE",
+    "SAUDI ARABIA": "SA", "SAUDI": "SA", "KSA": "SA",
+    "GERMANY": "DE", "DEUTSCHLAND": "DE",
+    "FRANCE": "FR", "ITALY": "IT", "SPAIN": "ES", "PORTUGAL": "PT",
+    "NETHERLANDS": "NL", "HOLLAND": "NL", "BELGIUM": "BE",
+    "AUSTRIA": "AT", "SWITZERLAND": "CH", "IRELAND": "IE",
+    "SWEDEN": "SE", "NORWAY": "NO", "DENMARK": "DK", "FINLAND": "FI",
+    "POLAND": "PL", "CZECH": "CZ", "CZECH REPUBLIC": "CZ",
+    "HUNGARY": "HU", "ROMANIA": "RO", "GREECE": "GR",
+    "UKRAINE": "UA", "BELARUS": "BY", "KAZAKHSTAN": "KZ",
+    "ARMENIA": "AM", "GEORGIA": "GE", "AZERBAIJAN": "AZ",
+    "INDIA": "IN", "BRAZIL": "BR", "BRASIL": "BR", "ARGENTINA": "AR",
+    "MEXICO": "MX", "CHILE": "CL", "COLOMBIA": "CO", "PERU": "PE",
+    "CANADA": "CA", "AUSTRALIA": "AU", "NEW ZEALAND": "NZ",
+    "JAPAN": "JP", "KOREA": "KR", "SOUTH KOREA": "KR",
+    "CHINA": "CN", "HONG KONG": "HK", "TAIWAN": "TW", "SINGAPORE": "SG",
+    "MALAYSIA": "MY", "THAILAND": "TH", "INDONESIA": "ID",
+    "PHILIPPINES": "PH", "VIETNAM": "VN", "VIET NAM": "VN",
+    "ISRAEL": "IL", "QATAR": "QA", "KUWAIT": "KW",
+    "SOUTH AFRICA": "ZA", "NIGERIA": "NG", "EGYPT": "EG",
+}
+
+# Поля, в которых поставщик может назвать регион прямо. Сказанное полем
+# сильнее прочитанного из названия: в названии регион ещё надо угадать.
+REGION_FIELDS = ("region", "country", "countryCode", "country_code",
+                 "locale", "geo", "market")
+
 
 def normalize_region(word: str) -> str:
     """Слово продавца → код региона: «Россия» → "RU", «us» → "US".
@@ -850,6 +891,10 @@ REGION_CODES = frozenset((
 
 _WORD = re.compile(r"[A-Za-zА-Яа-яЁё]{2,12}")
 
+# Названия регионов, длинные первыми: «SOUTH KOREA» должна сработать
+# раньше, чем «KOREA», иначе двухсловные названия не прочитаются никогда.
+_REGION_PHRASES = tuple(sorted(REGION_NAMES, key=len, reverse=True))
+
 
 def _spellings(value) -> tuple:
     """Написания уточняющего слова — одно или несколько."""
@@ -891,16 +936,35 @@ def matches_service(card: Card, service: dict) -> bool:
     return True
 
 
-def region_of_service(service: dict) -> str:
-    """Регион из названия услуги: «Apple Gift Cards US» → "US".
+def region_in(text: str) -> str:
+    """Регион из произвольной строки: «Apple Gift Cards Turkey» → "TR".
 
-    Не нашли — пусто, и это нормально: номинал без региона подойдёт любому
-    региону, а выдуманный регион отсёк бы верный номинал.
+    Сначала названия словом, и сначала длинные: «SAUDI ARABIA» — это SA, а
+    не «ARABIA неизвестно». Потом коды.
+
+    Двухбуквенный код признаётся, только если он написан ЗАГЛАВНЫМИ. Иначе
+    «Apple Gift Card in Turkey» читалось бы как Индия: «in» — это IN.
+    Поставщики пишут коды капсом, а предлоги строчными, и это единственное,
+    чем они здесь отличаются.
     """
-    name = str(_first(service, NAME_FIELDS, "") or "")
+    name = " ".join(str(text or "").split())
+
+    if not name:
+        return ""
+
+    upper = f" {name.upper()} "
+
+    # Длинные названия раньше коротких: «SOUTH KOREA» сильнее, чем «KOREA».
+    for phrase in _REGION_PHRASES:
+        if f" {phrase} " in upper:
+            return REGION_NAMES[phrase]
 
     for word in _WORD.findall(name):
         code = word.upper()
+
+        if len(code) == 2 and word != code:
+            # Строчными — это слово языка, а не код региона.
+            continue
 
         if code in REGION_ALIASES:
             return REGION_ALIASES[code]
@@ -909,6 +973,24 @@ def region_of_service(service: dict) -> str:
             return "GB" if code == "UK" else code
 
     return ""
+
+
+def region_of_service(service: dict) -> str:
+    """Регион услуги: из поля, если оно есть, иначе из названия.
+
+    Не нашли — пусто, и это нормально: номинал без региона подойдёт любому
+    региону, а выдуманный регион отсёк бы верный номинал.
+    """
+    if isinstance(service, dict):
+        said = _first(service, REGION_FIELDS, "")
+
+        if said:
+            code = normalize_region(said) or region_in(str(said))
+
+            if code:
+                return code
+
+    return region_in(str(_first(service, NAME_FIELDS, "") or ""))
 
 
 def services_for(card: Card, catalog) -> list:

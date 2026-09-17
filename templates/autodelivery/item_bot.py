@@ -286,6 +286,32 @@ def region_buttons(draft=None):
     return rows
 
 
+def region_note(draft=None) -> str:
+    """Откуда взялись кнопки регионов и что делать, если нужного нет.
+
+    Без этой строки продавец видит восемь кнопок и решает, что остальных
+    регионов бот не умеет. Умеет: любой регион принимается текстом, а
+    кнопками показаны те, что есть у поставщика прямо сейчас.
+    """
+    card = card_for_title(CARDS, str(getattr(draft, "name", "") or ""))
+    found = supplier_regions(card) if card is not None else []
+
+    if found:
+        return (f"\n\nКнопки — регионы, которые сейчас есть у поставщика "
+                f"({len(found)}). Нужен другой — впишите его кодом: "
+                f"US, TR, SA, HK, MX. Приму любой.")
+
+    _, why = supplier_catalog()
+
+    if why:
+        return (f"\n\nКаталог поставщика сейчас не прочитался ({why}), "
+                f"поэтому кнопки — ходовые. Любой другой регион впишите "
+                f"кодом: US, TR, SA, HK, MX.")
+
+    return ("\n\nКнопки — ходовые регионы. Любой другой впишите кодом: "
+            "US, TR, SA, HK, MX. Приму любой.")
+
+
 def regions_of(conf, card) -> list:
     """Какие регионы показывать в настройках карты.
 
@@ -579,9 +605,13 @@ def collect(link, account, draft: wizard.Draft) -> bool:
 
             continue
 
-        message = link.ask(
-            screen_text(draft, wizard.question_for(draft), complaint),
-            ANSWER_WAIT, buttons=buttons_for(step, draft))
+        question = wizard.question_for(draft)
+
+        if step == "region":
+            question += region_note(draft)
+
+        message = link.ask(screen_text(draft, question, complaint),
+                           ANSWER_WAIT, buttons=buttons_for(step, draft))
         complaint = ""
 
         if not message:
