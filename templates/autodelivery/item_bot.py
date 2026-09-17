@@ -944,6 +944,32 @@ def templates_of(account_id: str = "") -> TemplateStore:
     return TemplateStore(folder_for(TEMPLATE_DIR, account_id))
 
 
+def save_from_shop(link, account) -> None:
+    """Сделать шаблон из объявления, которое уже стоит на витрине.
+
+    Ничего не создаёт на площадке: товар уже есть, второй такой же сейчас
+    не нужен. Нужен шаблон — чтобы потом повторять одним нажатием.
+    """
+    sample = pick_live_sample(link, account)
+
+    if sample is None:
+        return
+
+    store = templates_of()
+
+    try:
+        store.save(sample.name, sample.price, sample.region, sample.photos(),
+                   description=sample.description, game=sample.game,
+                   category=sample.category, obtaining=sample.obtaining,
+                   fields=sample.fields, options=sample.options)
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Сохранить шаблон не вышло: {e}", buttons=MENU)
+        return
+
+    link.screen(f"Шаблон «{sample.name}» сохранён.\n\nТеперь такой товар "
+                f"создаётся одним нажатием — «⚡ Из шаблона».", buttons=MENU)
+
+
 def offer_template(link, draft: wizard.Draft) -> None:
     """Предложить сохранить объявление шаблоном.
 
@@ -978,19 +1004,27 @@ def from_template(link, account) -> None:
     store = templates_of()
     saved = store.all()
 
-    if not saved:
-        link.screen("У этого кабинета шаблонов пока нет. Создайте товар и "
-                 "сохраните его шаблоном — дальше он будет создаваться "
-                 "одним нажатием.", buttons=MENU)
-        return
-
     keys = [[(t.label(), PICK + t.id)] for t in saved]
+    # Шаблоны заводились только из товаров, созданных через бота. У
+    # продавца, выставившего всё в кабинете на сайте, их нет вовсе — и
+    # повторять одним нажатием ему было нечего, хотя объявления у него
+    # есть. Отсюда эта кнопка: взять готовое с витрины.
+    keys.append([("📥 Взять с витрины", PICK + "shop")])
     keys.append([("✖️ Отмена", "отмена")])
-    answer = link.ask("Шаблоны этого кабинета:", ANSWER_WAIT, buttons=keys)
+
+    said = ("Шаблоны этого кабинета:" if saved else
+            "Шаблонов пока нет.\n\nШаблон — это объявление, которое "
+            "повторяется одним нажатием. Возьмите готовое с витрины или "
+            "создайте товар и сохраните его шаблоном.")
+    answer = link.ask(said, ANSWER_WAIT, buttons=keys)
     text = str(answer.get("text") or "").strip()
 
     if not text.startswith(PICK):
         link.screen("Отменил.", buttons=MENU)
+        return
+
+    if text[len(PICK):] == "shop":
+        save_from_shop(link, account)
         return
 
     template_id = text[len(PICK):]

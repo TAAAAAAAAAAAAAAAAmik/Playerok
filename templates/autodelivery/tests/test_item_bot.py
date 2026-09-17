@@ -2203,5 +2203,97 @@ class SeriesFromShopTest(unittest.TestCase):
         self.assertIn("800 =", sheet)
 
 
+class TemplateFromShopTest(unittest.TestCase):
+    """Шаблон из объявления, которое уже стоит на витрине.
+
+    Шаблоны заводились только из товаров, созданных через бота. У
+    продавца, выставившего всё в кабинете на сайте, их нет вовсе — и
+    повторять одним нажатием ему было нечего, хотя объявления у него есть.
+    """
+
+    Market = SeriesFromShopTest.Market
+    LIVE = SeriesFromShopTest.LIVE
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.forget_items()
+        self._pause, item_bot.PAGE_PAUSE = item_bot.PAGE_PAUSE, 0
+        self._fetch = item_bot.fetch_photos
+        item_bot.fetch_photos = lambda urls: [PNG for _ in urls]
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.fetch_photos = self._fetch
+        item_bot.forget_items()
+
+    def take(self, market=None):
+        market = market or self.Market()
+        link = FakeLink([item_bot.PICK + "shop", "роблокс",
+                         item_bot.PICK_GAME + "g1", item_bot.PICK_CAT + "c1",
+                         item_bot.PICK_LIVE + "live-1"])
+        item_bot.from_template(link, market)
+
+        return link, market
+
+    def test_an_empty_list_offers_the_shop_instead_of_a_dead_end(self):
+        link = FakeLink(["отмена"])
+        item_bot.from_template(link, self.Market())
+        names = [n for row in link.asked[0][1] for n, _ in row]
+
+        self.assertIn("📥 Взять с витрины", names)
+
+    def test_a_live_listing_becomes_a_template(self):
+        self.take()
+        saved = item_bot.templates_of().all()
+
+        self.assertEqual([t.name for t in saved], [self.LIVE])
+
+    def test_nothing_is_created_on_the_marketplace(self):
+        """Товар уже есть — второй такой же сейчас не нужен."""
+        _, market = self.take()
+
+        self.assertEqual(market.created, [])
+
+    def test_the_template_keeps_everything_needed_to_repeat(self):
+        self.take()
+        template = item_bot.templates_of().all()[0]
+
+        self.assertEqual(template.price, 179)
+        self.assertEqual(template.region, "GL")
+        self.assertEqual(template.category["id"], "c1")
+        self.assertEqual(template.obtaining["id"], "o1")
+        self.assertTrue(template.photos())
+
+    def test_the_saved_template_then_repeats_in_one_press(self):
+        self.take()
+        tid = item_bot.templates_of().all()[0].id
+        market = self.Market()
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + tid, item_bot.PICK_ACT + "make"]),
+            market)
+
+        self.assertEqual(market.created[0]["name"], self.LIVE)
+
+    def test_the_seller_is_told_where_to_use_it(self):
+        link, _ = self.take()
+
+        self.assertIn("одним нажатием", link.said[-1])
+
+    def test_the_description_gets_one_region_line_not_two(self):
+        self.take()
+        tid = item_bot.templates_of().all()[0].id
+        market = self.Market()
+        item_bot.from_template(
+            FakeLink([item_bot.PICK + tid, item_bot.PICK_ACT + "make"]),
+            market)
+        text = market.created[0]["description"]
+
+        self.assertEqual(text.count("Регион кода:"), 1)
+        self.assertEqual(text.count("Номинал:"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
