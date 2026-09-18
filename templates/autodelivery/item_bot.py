@@ -73,6 +73,7 @@ import alive                                                  # noqa: E402
 import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
+import setup                                                  # noqa: E402
 import vary                                                   # noqa: E402
 import bump                                                   # noqa: E402
 from bump import Ledger                                       # noqa: E402
@@ -3431,7 +3432,7 @@ def settings_of() -> Settings:
     return Settings(JsonStore(path))
 
 
-def settings_menu(link) -> None:
+def settings_menu(link, account=None) -> None:
     """Что бот умеет выдавать сам. Список карт."""
     conf = settings_of()
     keys = []
@@ -3473,7 +3474,7 @@ def settings_menu(link) -> None:
         link.screen("Отменил.", buttons=MENU)
         return
 
-    card_menu(link, conf, text[len(PICK_CARD):])
+    card_menu(link, conf, text[len(PICK_CARD):], account)
 
 
 # Сколько отложенных заказов перечислять на экране. Дальше — числом.
@@ -3664,7 +3665,156 @@ def one_held_menu(link, order_id: str) -> None:
     mute_menu(link)
 
 
-def card_menu(link, conf, slug: str) -> None:
+# Приставка у кнопок мастера настройки карты.
+PICK_TUNE = "tune:"
+
+
+def tune_card(link, account, conf, card) -> None:
+    """🚀 Настроить выдачу карты по тому, что уже стоит на витрине.
+
+    Три настройки решают, будет ли выдача работать: включена ли карта, по
+    какому слову она узнаёт свои объявления и какой регион считать
+    запасным. Первую продавец видит, вторую и третью — нет, и обе уже
+    стоили молчаливой выдачи.
+
+    Слово подбирается с витрины: годное — то, что есть у ВСЕХ похожих
+    объявлений и ни у одного чужого. Это же слово проверяется на чужих
+    товарах, потому что забрать чужой заказ дороже, чем пропустить свой:
+    пропущенный видно по жалобе покупателя, а забранный — по списанным
+    деньгам за не тот товар.
+    """
+    if account is None:
+        link.screen("Сначала нужен рабочий кабинет: откройте «Аккаунт».",
+                    buttons=MENU)
+        return
+
+    link.screen(f"{card.emoji} {card.title}: смотрю витрину и каталог "
+                f"поставщика…")
+
+    # 1. Что есть у поставщика. Без этого включать нечего: выдача встанет
+    #    на первом же заказе, и узнает об этом покупатель.
+    regions = supplier_regions(card)
+    lines = [f"🚀 {card.emoji} {card.title} — настройка выдачи", ""]
+
+    if regions:
+        lines.append(f"✅ У поставщика есть: {', '.join(regions[:10])}"
+                     + (" и другие" if len(regions) > 10 else ""))
+    else:
+        catalog, why = supplier_catalog()
+        lines.append("⚠️ У поставщика ничего не нашлось"
+                     + (f": {shorten(why, 40)}" if why else
+                        f" по подкатегории «{card.subcategory}»"))
+
+    # 2. Ваши объявления. Своими считаем те, что узнаёт разбор названий;
+    #    остальные — чужие, и по ним слово проверяется на запрет.
+    try:
+        items, whole = my_items(account)
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Объявления прочитать не вышло: {e}\n\nПопробуйте "
+                    f"через минуту.", buttons=MENU)
+        return
+
+    names = [str(getattr(i, "name", "") or "") for i in items]
+    ours = [n for n in names if card_for_title(CARDS, n) is card]
+    others = [n for n in names if n not in ours]
+
+    lines.append(f"📋 Ваших объявлений: {len(names)}"
+                 + ("" if whole else " (список неполный — площадка просила "
+                    "сбавить темп)"))
+
+    if ours:
+        lines.append(f"Похожих на {card.title}: {len(ours)}")
+
+        for name in ours[:3]:
+            lines.append(f"  • {shorten(name, 38)}")
+    else:
+        lines.append(f"Объявлений, похожих на {card.title}, не нашлось — "
+                     f"слово подберу по вашему.")
+
+    # 3. Слово-опознаватель.
+    found = setup.keywords(ours, others, extra=card.keywords,
+                           prefer=card.keywords)
+    region = setup.region_of(ours, region_in) or (regions[0] if regions
+                                                  else "")
+    keys = []
+
+    if found:
+        word, mine = found[0]
+        about = (f"оно есть у "
+                 f"{plural(mine, 'объявления', 'объявлений', 'объявлений')} "
+                 f"и ни у одного из остальных {len(others)}" if mine
+                 else f"объявлений этой карты у вас пока нет, а среди "
+                      f"остальных {len(others)} этого слова нет")
+        lines += ["", f"🔤 Предлагаю слово «{word}»: {about}."]
+        keys.append([(f"✅ Включить со словом «{word}»",
+                      PICK_TUNE + "w:" + word)])
+
+        for other, count in found[1:4]:
+            keys.append([(f"«{other}» — {count}", PICK_TUNE + "w:" + other)])
+    else:
+        lines += ["", "🔤 Слово подобрать не вышло: у похожих объявлений нет "
+                      "ничего общего, чего не было бы у остальных. Впишите "
+                      "его сами — это слово из названия ваших объявлений."]
+
+    if region:
+        lines.append(f"🌐 Запасной регион: {region}")
+
+    keys.append([("✍️ Вписать своё слово", PICK_TUNE + "сам")])
+    keys.append([("✖️ Назад", "отмена")])
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_TUNE):
+        card_menu(link, conf, card.slug, account)
+        return
+
+    what = text[len(PICK_TUNE):]
+
+    if what == "сам":
+        answer = link.ask("Какое слово есть в названии ваших объявлений "
+                          "этой карты — и нет в остальных?", ANSWER_WAIT,
+                          buttons=[CANCEL])
+        word = " ".join(str(answer.get("text") or "").split())
+
+        if not word or wizard.cancelled(word):
+            card_menu(link, conf, card.slug, account)
+            return
+    else:
+        word = what[2:] if what.startswith("w:") else ""
+
+    if not word:
+        card_menu(link, conf, card.slug, account)
+        return
+
+    mine = setup.covered(names, word)
+    strangers = [n for n in mine if card_for_title(CARDS, n) is not card]
+    conf.set_enabled(card.slug, True)
+    conf.set_keyword(card.slug, word)
+
+    if region:
+        conf.set_region(card.slug, region)
+
+    said = [f"✅ {card.emoji} {card.title}: выдача включена.", "",
+            f"Слово-опознаватель: «{word}»",
+            f"Под него попадает объявлений: {len(mine)}"]
+
+    if region:
+        said.append(f"Запасной регион: {region}")
+
+    if strangers:
+        # Не молчим: продавец видит ровно те объявления, по которым бот
+        # теперь купит код, — и если среди них чужой товар, он это увидит
+        # до первой продажи, а не после списания.
+        said += ["", f"⚠️ Среди них есть не похожие на {card.title}:"]
+        said += [f"  • {shorten(n, 38)}" for n in strangers[:3]]
+        said.append("Если это другой товар — поменяйте слово или добавьте "
+                    "«🚫 Слово-исключение».")
+
+    said += ["", "Проверить целиком: «🩺 Проверка выдачи»."]
+    link.screen("\n".join(said), buttons=MENU)
+
+
+def card_menu(link, conf, slug: str, account=None) -> None:
     """Экран одной карты: включить, настроить, посмотреть журнал."""
     card = card_by_slug(slug)
 
@@ -3693,7 +3843,8 @@ def card_menu(link, conf, slug: str) -> None:
     if why:
         lines += ["", f"⚠️ {why}"]
 
-    keys = [[(("⏸ Выключить" if saved["enabled"] else "▶️ Включить"),
+    keys = [[("🚀 Настроить выдачу", PICK_SET + "tune")],
+            [(("⏸ Выключить" if saved["enabled"] else "▶️ Включить"),
               PICK_SET + "on"),
              ("⚙️ Настройки", PICK_SET + "cfg")],
             [("📜 Журнал выдач", PICK_SET + "log"),
@@ -3708,7 +3859,10 @@ def card_menu(link, conf, slug: str) -> None:
 
     what = what[len(PICK_SET):]
 
-    if what == "on":
+    if what == "tune":
+        tune_card(link, account, conf, card)
+        return
+    elif what == "on":
         conf.set_enabled(slug, not saved["enabled"])
     elif what == "cfg":
         card_settings(link, conf, card)
@@ -3717,7 +3871,7 @@ def card_menu(link, conf, slug: str) -> None:
         card_log(link, conf, card)
         return
 
-    card_menu(link, conf, slug)
+    card_menu(link, conf, slug, account)
 
 
 # Настройки карты: что спрашиваем и куда кладём ответ. Порядок — тот же,
@@ -4640,7 +4794,7 @@ def handle_command(link, account, text: str):
     elif text in COPIES_WORDS:
         copies_menu(link)
     elif text in SETTINGS_WORDS:
-        settings_menu(link)
+        settings_menu(link, account)
     elif text in CHECK_WORDS:
         check_session(link, account)
     elif text in HEALTH_WORDS:

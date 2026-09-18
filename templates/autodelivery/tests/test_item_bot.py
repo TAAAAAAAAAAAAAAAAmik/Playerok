@@ -2140,6 +2140,169 @@ class AttributeRetryTest(unittest.TestCase):
                                                "куки истекли"), "")
 
 
+class TuneCardTest(unittest.TestCase):
+    """🚀 «Настроить выдачу»: включить карту по тому, что уже на витрине.
+
+    Три настройки решают, будет ли выдача работать, и две из них продавцу
+    не видны. Обе уже стоили молчаливой выдачи: сначала слова не было
+    вовсе, потом оно совпало с чужим товаром.
+    """
+
+    CATALOG = {"services": [
+        {"id": "xbox-tr", "name": "Xbox Gift Cards Turkey",
+         "subcategoryName": "Xbox Gift Cards",
+         "items": [{"id": "d1", "value": 100, "inStock": 5, "price": 3.0}]},
+        {"id": "xbox-us", "name": "Xbox Gift Cards US",
+         "subcategoryName": "Xbox Gift Cards",
+         "items": [{"id": "d2", "value": 10, "inStock": 5, "price": 9.6}]},
+    ]}
+
+    NAMES = ["Xbox Gift Card 100 TR — промокодом",
+             "Xbox Gift Card 500 TR — промокодом",
+             "🔴 80 РОБУКСОВ 🔴 АВТОВЫДАЧА",
+             "🏆 ПОПУЛЯРНЫЙ ПАКЕТ • 3 LVL"]
+
+    class Market:
+        def __init__(self, names):
+            self.names = names
+
+        def get_my_items(self, count=24, after_cursor=None, **kw):
+            rows = [type("I", (), {"id": f"i{n}", "name": name,
+                                   "price": 100 + n})()
+                    for n, name in enumerate(self.names)]
+
+            return type("P", (), {
+                "items": rows,
+                "page_info": type("PI", (), {"has_next_page": False,
+                                             "end_cursor": "0"})()})()
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.forget_items()
+        self.key = os.environ.get("APPROUTE_KEY")
+        os.environ["APPROUTE_KEY"] = "ключ"
+        self.saved = item_bot._CATALOG.copy()
+        item_bot._CATALOG.update({"raw": self.CATALOG, "at": time.time()})
+        self._pause = item_bot.PAGE_PAUSE
+        item_bot.PAGE_PAUSE = 0
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot._CATALOG.update(self.saved)
+        item_bot.forget_items()
+
+        if self.key is None:
+            os.environ.pop("APPROUTE_KEY", None)
+        else:
+            os.environ["APPROUTE_KEY"] = self.key
+
+    def tune(self, answers, names=None, slug="xbox"):
+        link = FakeLink(list(answers))
+        conf = item_bot.settings_of()
+        item_bot.tune_card(link, self.Market(names or self.NAMES), conf,
+                           item_bot.card_by_slug(slug))
+
+        return link, item_bot.settings_of()
+
+    def buttons(self, link, which=0):
+        return [name for row in link.asked[which][1] for name, _ in row]
+
+    def test_the_supplier_regions_are_shown(self):
+        link, _ = self.tune(["отмена"])
+
+        self.assertIn("TR", link.asked[0][0])
+        self.assertIn("US", link.asked[0][0])
+
+    def test_our_listings_are_counted(self):
+        link, _ = self.tune(["отмена"])
+
+        self.assertIn("Похожих на Xbox: 2", link.asked[0][0])
+
+    def test_a_word_is_offered(self):
+        link, _ = self.tune(["отмена"])
+
+        self.assertTrue(any("xbox" in n.lower() for n in self.buttons(link)),
+                        self.buttons(link))
+
+    def test_the_word_is_not_one_of_the_others(self):
+        """«Автовыдача» есть у геймпасса — по ней бот забрал бы чужое."""
+        link, _ = self.tune(["отмена"])
+
+        self.assertNotIn("автовыдача", link.asked[0][0].lower())
+
+    def test_pressing_it_turns_the_delivery_on(self):
+        link, conf = self.tune([item_bot.PICK_TUNE + "w:xbox"])
+
+        self.assertTrue(conf.card("xbox")["enabled"])
+        self.assertEqual(conf.card("xbox")["keyword"], "xbox")
+
+    def test_the_region_is_filled_from_the_listings(self):
+        link, conf = self.tune([item_bot.PICK_TUNE + "w:xbox"])
+
+        self.assertEqual(conf.card("xbox")["region"], "TR")
+
+    def test_it_says_how_many_listings_are_covered(self):
+        link, _ = self.tune([item_bot.PICK_TUNE + "w:xbox"])
+
+        self.assertIn("объявлений: 2", link.said[-1])
+
+    def test_a_dangerous_word_is_shown_with_its_catch(self):
+        """Продавец должен увидеть чужой товар до первой продажи, а не
+        после списания."""
+        link, _ = self.tune([item_bot.PICK_TUNE + "w:автовыдача"])
+
+        self.assertIn("не похожие на Xbox", link.said[-1])
+
+    def test_a_word_can_be_typed(self):
+        link, conf = self.tune([item_bot.PICK_TUNE + "сам", "промокодом"])
+
+        self.assertEqual(conf.card("xbox")["keyword"], "промокодом")
+
+    def test_nothing_is_saved_on_cancel(self):
+        link, conf = self.tune([item_bot.PICK_TUNE + "сам", "отмена"])
+
+        self.assertFalse(conf.card("xbox")["enabled"])
+
+    def test_an_empty_supplier_is_named(self):
+        item_bot._CATALOG.update({"raw": {"services": []},
+                                  "at": time.time()})
+        link, _ = self.tune(["отмена"])
+
+        self.assertIn("У поставщика ничего не нашлось", link.asked[0][0])
+
+    def test_no_listings_still_offers_the_cards_own_word(self):
+        link, _ = self.tune(["отмена"], names=["🏆 ПАКЕТ • 3 LVL"])
+
+        self.assertTrue(any("xbox" in n.lower() for n in self.buttons(link)),
+                        self.buttons(link))
+
+    def test_apple_is_tuned_the_same_way(self):
+        names = ["Apple Gift Card 10 USD — моментально",
+                 "Apple Gift Card 25 USD — моментально",
+                 "🔴 80 РОБУКСОВ 🔴 АВТОВЫДАЧА"]
+        link, conf = self.tune([item_bot.PICK_TUNE + "w:apple"], names,
+                               slug="apple")
+
+        self.assertTrue(conf.card("apple")["enabled"])
+        self.assertEqual(conf.card("apple")["keyword"], "apple")
+
+    def test_without_an_account_it_says_so(self):
+        link = FakeLink([])
+        item_bot.tune_card(link, None, item_bot.settings_of(),
+                           item_bot.card_by_slug("xbox"))
+
+        self.assertIn("кабинет", link.said[-1])
+
+    def test_the_button_is_on_the_card_screen(self):
+        link = FakeLink([item_bot.PICK_CARD + "xbox", "отмена"])
+        item_bot.settings_menu(link, self.Market(self.NAMES))
+        names = [n for row in link.asked[-1][1] for n, _ in row]
+
+        self.assertIn("🚀 Настроить выдачу", names)
+
+
 class SettingsMenuTest(unittest.TestCase):
     """«Автовыдача» — кнопка, за которой продавец включает выдачу кодов.
 
