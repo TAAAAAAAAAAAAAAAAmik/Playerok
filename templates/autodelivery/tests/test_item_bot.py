@@ -1523,6 +1523,32 @@ class HealthMenuTest(unittest.TestCase):
 
         self.assertIn("номинал не найден", self.report())
 
+    def with_balance(self, money, why=""):
+        """Отчёт с подставленным балансом и ключом поставщика."""
+        saved = item_bot.supplier_balance
+        catalog = item_bot._CATALOG.copy()
+        os.environ["APPROUTE_KEY"] = "ключ"
+        item_bot.supplier_balance = lambda: (money, why)
+        item_bot._CATALOG.update({"raw": {"services": []},
+                                  "at": time.time()})
+
+        try:
+            return self.report()
+        finally:
+            item_bot.supplier_balance = saved
+            item_bot._CATALOG.update(catalog)
+            os.environ.pop("APPROUTE_KEY", None)
+
+    def test_the_balance_is_shown(self):
+        """Пустой счёт останавливает выдачу так же наглухо, как выключенная
+        карта, и узнать об этом лучше до того, как покупатель заплатит."""
+        self.assertIn("USD 0.42", self.with_balance("USD 0.42 · RUB 0"))
+
+    def test_an_unreadable_balance_is_not_a_disaster(self):
+        said = self.with_balance("", "связь оборвалась")
+
+        self.assertIn("Баланс прочитать не вышло", said)
+
     def test_the_cure_is_collected_at_the_end(self):
         item_bot.alive.delivery_running = lambda: False
 

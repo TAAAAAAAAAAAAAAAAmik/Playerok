@@ -72,6 +72,47 @@ _RU = {
 }
 
 
+# Как поставщик называет сумму и валюту счёта. Полей несколько, потому
+# что у него самого они разные в разных ответах.
+BALANCE_FIELDS = ("balance", "amount", "value", "sum", "available")
+CURRENCY_FIELDS = ("currency", "currencyCode", "code", "name")
+
+
+def balance_line(accounts) -> str:
+    """Счета одной строкой: «USD 0.42 · RUB 0». Пусто — значит не прочли."""
+    parts = []
+
+    for row in accounts or []:
+        if not isinstance(row, dict):
+            continue
+
+        money = None
+
+        for field in BALANCE_FIELDS:
+            if row.get(field) is not None:
+                money = row[field]
+                break
+
+        if money is None:
+            continue
+
+        currency = ""
+
+        for field in CURRENCY_FIELDS:
+            if row.get(field):
+                currency = str(row[field])
+                break
+
+        try:
+            shown = f"{float(money):.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            shown = str(money)
+
+        parts.append(f"{currency} {shown}".strip())
+
+    return " · ".join(parts)
+
+
 class SupplierError(Exception):
     def __init__(self, code: str, why: str, http: int = 0, trace: str = ""):
         self.code, self.why, self.http, self.trace = code, why, http, trace
@@ -307,6 +348,34 @@ class ApprouteSupplier:
         решать это за него.
         """
         return self._call("GET", "/services")
+
+    def accounts(self) -> list:
+        """Счета кабинета: сколько денег и в какой валюте.
+
+        Нужны ровно для одного: сказать продавцу «не хватает денег» вместе
+        с тем, СКОЛЬКО их. Отказ поставщика этого не говорит, а без числа
+        продавец идёт смотреть в кабинет — то есть делает работу, которую
+        бот мог сделать за него.
+
+        Живой ответ отдал три счёта: USD, RUB, EUR. Цены каталога в USD.
+        """
+        data = self._call("GET", "/accounts")
+
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+
+        if isinstance(data, dict):
+            for key in ("accounts", "items", "data", "results"):
+                found = data.get(key)
+
+                if isinstance(found, list):
+                    return [row for row in found if isinstance(row, dict)]
+
+            # Одиночный счёт тоже бывает — отдаём списком, чтобы у
+            # вызывающего была одна форма на все случаи.
+            return [data] if data else []
+
+        return []
 
     def item(self, service_id: str, item_id: str) -> dict:
         """Цена и остаток ОДНОГО номинала. Замена сухому прогону.

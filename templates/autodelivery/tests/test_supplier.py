@@ -348,5 +348,64 @@ class NotACodeTest(unittest.TestCase):
         self.assertEqual(sup.codes_from(data), ["XMXQ4T7PLKD9"])
 
 
+class AccountsTest(unittest.TestCase):
+    """Счета кабинета: нужны, чтобы сказать «денег нет» вместе с суммой."""
+
+    def test_a_list_comes_back_as_is(self):
+        rows = [{"currency": "USD", "balance": 0.42},
+                {"currency": "RUB", "balance": 0}]
+        got = client([Response({"statusCode": 0, "data": rows})]).accounts()
+
+        self.assertEqual(got, rows)
+
+    def test_a_wrapped_list_is_unwrapped(self):
+        rows = [{"currency": "USD", "balance": 1}]
+        got = client([Response({"statusCode": 0,
+                                "data": {"accounts": rows}})]).accounts()
+
+        self.assertEqual(got, rows)
+
+    def test_a_single_account_is_still_a_list(self):
+        got = client([Response({"statusCode": 0,
+                                "data": {"currency": "USD",
+                                         "balance": 3}})]).accounts()
+
+        self.assertEqual(got, [{"currency": "USD", "balance": 3}])
+
+    def test_the_right_path_is_asked(self):
+        http = FakeHttp([Response({"statusCode": 0, "data": []})])
+        supplier = sup.ApprouteSupplier(api_key="ключ")
+        supplier.session = http
+        supplier.accounts()
+
+        self.assertTrue(http.calls[0]["url"].endswith("/accounts"))
+
+    def test_a_refusal_is_raised(self):
+        with self.assertRaises(sup.SupplierError):
+            client([Response({"statusCode": 4})]).accounts()
+
+
+class BalanceLineTest(unittest.TestCase):
+    """Счета одной строкой — её читает человек, а не машина."""
+
+    def test_the_currency_stands_by_the_money(self):
+        got = sup.balance_line([{"currency": "USD", "balance": 0.42},
+                                {"currency": "RUB", "balance": 1500}])
+
+        self.assertEqual(got, "USD 0.42 · RUB 1500")
+
+    def test_other_field_names_are_understood(self):
+        """У поставщика они разные в разных ответах."""
+        got = sup.balance_line([{"currencyCode": "EUR", "amount": "10.5"}])
+
+        self.assertEqual(got, "EUR 10.5")
+
+    def test_nothing_readable_is_an_empty_string(self):
+        self.assertEqual(sup.balance_line([{"что-то": "иное"}]), "")
+
+    def test_no_accounts_at_all(self):
+        self.assertEqual(sup.balance_line([]), "")
+
+
 if __name__ == "__main__":
     unittest.main()

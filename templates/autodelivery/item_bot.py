@@ -2137,6 +2137,32 @@ _CATALOG: dict = {"at": 0.0, "raw": None}
 CATALOG_TTL = 120.0
 
 
+def supplier_balance() -> tuple:
+    """Счета кабинета поставщика → (строка, причина отказа).
+
+    Отдельно от каталога: у каталога свой суровый лимит (два раза в
+    минуту), а счета читаются другим вызовом и нужны там, где каталог уже
+    прочитан.
+    """
+    key = os.environ.get("APPROUTE_KEY", "").strip()
+
+    if not key:
+        return "", "ключа нет"
+
+    try:
+        from supplier import ApprouteSupplier, balance_line
+    except ImportError as e:                                  # noqa: BLE001
+        return "", str(e)
+
+    try:
+        client = ApprouteSupplier(
+            api_key=key, proxy=os.environ.get("APPROUTE_PROXY", ""))
+
+        return balance_line(client.accounts()), ""
+    except Exception as e:                                    # noqa: BLE001
+        return "", str(e)
+
+
 def supplier_catalog():
     """Каталог поставщика → (каталог, причина отказа)."""
     key = os.environ.get("APPROUTE_KEY", "").strip()
@@ -4114,6 +4140,18 @@ def health_menu(link, account) -> None:
             bad.append("проверьте ключ и APPROUTE_PROXY в .env")
         else:
             lines.append("✅ Каталог поставщика читается.")
+
+        # Баланс — не любопытство: пустой счёт останавливает выдачу так
+        # же наглухо, как выключенная карта, и узнать об этом лучше до
+        # того, как покупатель заплатит. Спрашиваем его даже когда каталог
+        # не прочитался: это разные вызовы с разными лимитами.
+        money, why_money = supplier_balance()
+
+        if money:
+            lines.append(f"💰 Счета у поставщика: {money}")
+        elif why_money:
+            lines.append(f"⚠️ Баланс прочитать не вышло: "
+                         f"{shorten(why_money, 50)}")
 
     # 4. Включённые карты и слова-опознаватели.
     on = [c for c in CARDS if conf.card(c.slug)["enabled"]]

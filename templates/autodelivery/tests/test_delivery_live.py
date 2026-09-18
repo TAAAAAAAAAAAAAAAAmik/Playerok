@@ -604,6 +604,109 @@ class Base(unittest.IsolatedAsyncioTestCase):
 
 # ---------------------------------------------------------------------------
 
+class NoMoneyTest(Base):
+    """Денег на счёте у поставщика нет — и продавец должен узнать первым.
+
+    Это не поломка бота и не ошибка объявления: починить может только он.
+    Значит сказать надо так, чтобы было понятно, что делать, — и не по
+    письму на каждый ждущий заказ.
+    """
+
+    class Broke(Approute):
+        """Поставщик, у которого кончились деньги."""
+
+        def _place(self, body):
+            return self._wrap(10)          # INSUFFICIENT_FUNDS
+
+    def build_broke(self, accounts=None):
+        client = sup.ApprouteSupplier(api_key="ключ")
+        client.session = self.Broke()
+
+        if accounts is not None:
+            client.accounts = lambda: accounts
+
+        market = Market([self.order()])
+        engine = DeliveryEngine(market, client, self.store, [CARD],
+                               self.notify, catalog_of,
+                               reference_prefix="pk")
+        self.market = market
+
+        return engine, market
+
+    async def test_the_seller_is_told_about_the_money(self):
+        engine, market = self.build_broke()
+        await self.pass_once(engine)
+
+        self.assertTrue(self.notes)
+        self.assertIn("не хватает денег", " ".join(self.notes))
+
+    async def test_the_message_says_what_to_do(self):
+        engine, _ = self.build_broke()
+        await self.pass_once(engine)
+
+        self.assertIn("Пополните", " ".join(self.notes))
+
+    async def test_the_balance_is_named(self):
+        """Иначе продавец идёт смотреть в кабинет — делает работу, которую
+        бот мог сделать за него."""
+        engine, _ = self.build_broke(accounts=[{"currency": "USD",
+                                                "balance": 0.42},
+                                               {"currency": "RUB",
+                                                "balance": 0}])
+        await self.pass_once(engine)
+
+        self.assertIn("USD 0.42", " ".join(self.notes))
+
+    async def test_the_waiting_order_is_not_lost(self):
+        engine, _ = self.build_broke()
+        await self.pass_once(engine)
+
+        self.assertIn("никуда не денутся", " ".join(self.notes))
+
+    async def test_nothing_is_marked_delivered(self):
+        engine, market = self.build_broke()
+        await self.pass_once(engine)
+
+        self.assertEqual(market.sent, [])
+        self.assertEqual(self.store.conf("robux").get("delivered"), [])
+
+    async def test_it_is_not_repeated_on_every_order(self):
+        """Пока счёт пуст, беда одна на все заказы."""
+        engine, _ = self.build_broke()
+        await self.pass_once(engine)
+        await self.pass_once(engine)
+
+        self.assertEqual(len(self.notes), 1)
+
+    async def test_it_comes_back_later(self):
+        engine, _ = self.build_broke()
+        await self.pass_once(engine)
+        engine._money_at -= delivery.MONEY_EVERY + 1
+        await self.pass_once(engine)
+
+        self.assertEqual(len(self.notes), 2)
+
+    async def test_an_unreadable_balance_does_not_swallow_the_message(self):
+        def broken():
+            raise RuntimeError("связь оборвалась")
+
+        engine, _ = self.build_broke()
+        engine.supplier.accounts = broken
+        await self.pass_once(engine)
+
+        self.assertIn("не хватает денег", " ".join(self.notes))
+
+    async def test_the_order_is_delivered_once_the_money_is_back(self):
+        """Ради этого заказ и не помечается: он доводится сам."""
+        engine, market = self.build_broke()
+        await self.pass_once(engine)
+        engine.supplier.session = Approute()      # деньги появились
+        await self.pass_once(engine)
+
+        self.assertEqual(len(market.sent), 1)
+        self.assertIn(REAL_CODE, market.sent[0][1])
+
+
 class MuteTest(Base):
     """Глушка. Всё, что мешает выдать код второй раз."""
 

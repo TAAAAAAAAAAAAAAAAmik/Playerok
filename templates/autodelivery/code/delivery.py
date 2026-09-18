@@ -36,7 +36,7 @@ from marketplace import Marketplace, Order
 from store import (STATE_BUYING, STATE_DONE, STATE_NEW, STATE_SEND_FAILED,
                    STATE_SENDING, STATE_WAIT_CODE, UNFINISHED, Store,
                    find_entry)
-from supplier import TERMINAL_STATUSES, Supplier
+from supplier import TERMINAL_STATUSES, Supplier, balance_line
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,23 @@ logger = logging.getLogger(__name__)
 # Незаконченная запись не теряется: её подберёт `resume_unfinished`.
 POLL_STEPS = (12, 12, 15, 20, 30, 30, 30, 45, 60, 60)
 POLL_CEILING = 120.0
+
+# Как узнаётся «на счёте не хватает денег». По словам, а не по коду,
+# потому что до движка отказ доходит уже текстом — и от поставщика, и от
+# площадки, и от чужого клиента, если его однажды подменят.
+MONEY_WORDS = ("не хватает денег", "insufficient", "недостаточно средств",
+               "недостаточно денег", "не хватает средств")
+
+# Как часто напоминать про пустой счёт. Пока он пуст, беда одна и та же на
+# все заказы, и письмо на каждый — это рассылка.
+MONEY_EVERY = 600.0
+
+
+def is_money_problem(why: str) -> bool:
+    """Отказ про деньги на счёте у поставщика?"""
+    low = " ".join(str(why or "").lower().split())
+
+    return any(word in low for word in MONEY_WORDS)
 
 
 @dataclass
@@ -80,6 +97,11 @@ class DeliveryEngine:
         # О какой причине по какому заказу уже говорили. Живёт в процессе:
         # после перезапуска про беду стоит напомнить.
         self._told: set = set()
+        # Когда в последний раз говорили про пустой счёт у поставщика.
+        # Отдельно от `_told`, потому что беда не про заказ: пока счёт
+        # пуст, её видят ВСЕ заказы, и по сообщению на каждый — это
+        # рассылка, в которой потеряется сама беда.
+        self._money_at = 0.0
 
     # ------------------------------------------------------------------
     # Входы
@@ -582,6 +604,39 @@ class DeliveryEngine:
             closed.append(str(order_id))
             self.store.save()
 
+    async def _money_alarm(self, why: str) -> None:
+        """Сказать про пустой счёт у поставщика — с суммой и не каждый раз.
+
+        Это не поломка бота и не ошибка объявления: деньги кончились, и
+        починить может только продавец. Поэтому говорим отдельно от
+        «выдача не пошла», называем баланс и сразу — что будет дальше:
+        заказы никуда не денутся, бот доведёт их сам, как только деньги
+        появятся.
+        """
+        now = time.time()
+
+        if now - self._money_at < MONEY_EVERY:
+            return
+
+        self._money_at = now
+        balance = ""
+
+        try:
+            accounts = getattr(self.supplier, "accounts", None)
+
+            if callable(accounts):
+                balance = balance_line(await self._run(accounts))
+        except Exception as e:                       # noqa: BLE001
+            logger.warning("баланс поставщика не прочитан: %s", e)
+
+        await self.notify(
+            "💸 На счёте у поставщика не хватает денег — коды не покупаются."
+            + (f"\n\nСейчас на счетах: {balance}." if balance else "")
+            + "\n\nПополните кабинет AppRoute. Оплаченные заказы никуда не "
+              "денутся: бот пробует их каждую минуту и выдаст сам, как "
+              "только деньги появятся."
+            + (f"\n\nОтвет поставщика: {why}" if why else ""))
+
     async def _stop(self, card: Card, order_id: str, why: str,
                     record: bool = True, once: bool = True) -> Result:
         """Сказать продавцу, почему выдачи не будет.
@@ -601,6 +656,14 @@ class DeliveryEngine:
         новость. Память живёт в процессе: после перезапуска стоит
         напомнить.
         """
+        if is_money_problem(why):
+            # Про деньги говорим своим сообщением и один раз на всех, а не
+            # по письму на каждый ждущий заказ.
+            await self._money_alarm(why)
+            logger.info("%s: заказ %s — %s", card.slug, order_id, why)
+
+            return Result(False, "", why)
+
         key = (str(order_id), str(why))
 
         if not once or key not in self._told:
