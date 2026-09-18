@@ -427,27 +427,82 @@ def choose(link, question, rows, prefix, wait=None):
 
     Значение кнопки — приставка плюс id, чтобы нажатие нельзя было принять
     за ответ на другой вопрос.
+
+    Список ЛИСТАЕТСЯ, а не обрезается. Обрезался он молча по двенадцать, и
+    тринадцатая категория для продавца просто не существовала: он видел
+    конец списка и решал, что бот её не умеет.
+
+    Набранное слово тоже принимается: у площадки подписи длинные, и
+    «валюта» набрать быстрее, чем искать её глазами.
     """
-    rows = list(rows)[:MAX_CHOICES]
+    rows = list(rows)
 
     if not rows:
         return None
 
-    keys = [[(name, prefix + str(value))] for value, name in rows]
-    keys.append([("✖️ Отмена", "отмена")])
-    answer = link.ask(question, wait or ANSWER_WAIT, buttons=keys)
-    text = str(answer.get("text") or "").strip()
+    page = 0
+    shown_rows = rows
+    complaint = ""
 
-    if not text.startswith(prefix):
-        return None
+    while True:
+        shown, more, pages = grouping.page(shown_rows, page, MAX_CHOICES)
+        keys = [[(name, prefix + str(value))] for value, name in shown]
+        nav = []
 
-    chosen = text[len(prefix):]
+        if page > 0:
+            nav.append(("⬅️ Назад", prefix + "стр" + str(page - 1)))
 
-    for value, name in rows:
-        if str(value) == chosen:
-            return {"id": str(value), "name": name}
+        if more:
+            nav.append(("Далее ➡️", prefix + "стр" + str(page + 1)))
 
-    return None
+        if nav:
+            keys.append(nav)
+
+        keys.append([("✖️ Отмена", "отмена")])
+        said = question
+
+        if pages > 1:
+            said += (f"\n\nСтраница {page + 1} из {pages} — остальное под "
+                     f"кнопкой «Далее ➡️». Можно просто написать слово.")
+
+        if complaint:
+            said += f"\n\n{complaint}"
+
+        complaint = ""
+        answer = link.ask(said, wait or ANSWER_WAIT, buttons=keys)
+        text = str(answer.get("text") or "").strip()
+
+        if not text or wizard.cancelled(text):
+            return None
+
+        if text.startswith(prefix):
+            chosen = text[len(prefix):]
+
+            if chosen.startswith("стр") and chosen[3:].isdigit():
+                page = int(chosen[3:])
+                continue
+
+            for value, name in rows:
+                if str(value) == chosen:
+                    return {"id": str(value), "name": name}
+
+            return None
+
+        # Набрано словом.
+        word = " ".join(text.lower().split())
+        found = [(value, name) for value, name in rows
+                 if word in str(name).lower()]
+
+        if len(found) == 1:
+            return {"id": str(found[0][0]), "name": found[0][1]}
+
+        if not found:
+            complaint = f"«{text}» в списке нет."
+            continue
+
+        shown_rows = found
+        page = 0
+        complaint = f"По слову «{text}» нашлось {len(found)}:"
 
 
 def choose_game(link, account, draft) -> bool:
@@ -576,8 +631,34 @@ def category_options(account, category_id: str) -> list:
     return list(groups.values())
 
 
-def choose_option(link, account, draft) -> bool:
-    """Спросить одну характеристику. → продолжать ли."""
+def option_matches(choices, word: str) -> list:
+    """Варианты характеристики, подходящие под слово. → [(номер, вариант)].
+
+    Ищем по подписи целиком: у площадки она вида «Турция (TRY)», и
+    продавец набирает то «турция», то «try».
+    """
+    word = " ".join(str(word or "").lower().split())
+
+    if not word:
+        return []
+
+    return [(number, c) for number, c in enumerate(choices)
+            if word in str(c.get("label") or "").lower()]
+
+
+def choose_option(link, account, draft, page: int = 0) -> bool:
+    """Спросить одну характеристику. → продолжать ли.
+
+    Вариантов у площадки бывает три десятка: «Валюта» у Xbox — это все
+    страны магазина. Раньше показывались первые двенадцать и молча
+    обрезались остальные: продавец искал Турцию и США, а список кончался
+    на Индии — по алфавиту. Выглядело это как «бот не умеет такие
+    регионы», хотя он просто не дорисовал список.
+
+    Поэтому листаем и принимаем набранное слово: тридцать кнопок на экран
+    телефона всё равно не помещаются, а «турция» набрать быстрее, чем
+    долистать до буквы Т.
+    """
     step = draft.step
     option = draft.option(step[len(wizard.OPTION):])
 
@@ -591,29 +672,82 @@ def choose_option(link, account, draft) -> bool:
         option["value"] = ""
         return True
 
-    keys = [[(c["label"], PICK_OPTION + str(number))]
-            for number, c in enumerate(choices[:MAX_CHOICES])]
-    keys.append([("✖️ Отмена", "отмена")])
     title = option.get("group") or wizard.QUESTIONS["options"]
-    answer = link.ask(screen_text(draft, f"{title}?" if not title.endswith(".")
-                                  else title), ANSWER_WAIT, buttons=keys)
-    text = str(answer.get("text") or "").strip()
+    title = f"{title}?" if not title.endswith(".") else title
+    rows = list(enumerate(choices))
+    complaint = ""
 
-    if not text.startswith(PICK_OPTION):
-        link.screen("Отменил.", buttons=MENU)
-        return False
+    while True:
+        shown, more, pages = grouping.page(rows, page, MAX_CHOICES)
+        keys = [[(c["label"], PICK_OPTION + str(number))]
+                for number, c in shown]
+        nav = []
 
-    number = text[len(PICK_OPTION):]
+        if page > 0:
+            nav.append(("⬅️ Назад", PICK_OPTION + "p" + str(page - 1)))
 
-    if not number.isdigit() or int(number) >= len(choices):
-        link.screen("Не понял выбор.")
-        return True
+        if more:
+            nav.append(("Далее ➡️", PICK_OPTION + "p" + str(page + 1)))
 
-    picked = choices[int(number)]
-    option["value"] = picked["value"]
-    option["chosen"] = picked["label"]
+        if nav:
+            keys.append(nav)
 
-    return True
+        keys.append([("✖️ Отмена", "отмена")])
+        question = title
+
+        if pages > 1:
+            question += (f"\n\nСтраница {page + 1} из {pages} — "
+                         f"остальное под кнопкой «Далее ➡️». Можно просто "
+                         f"написать слово: «турция», «US».")
+
+        answer = link.ask(screen_text(draft, question, complaint),
+                          ANSWER_WAIT, buttons=keys)
+        text = str(answer.get("text") or "").strip()
+        complaint = ""
+
+        if wizard.cancelled(text):
+            link.screen("Отменил.", buttons=MENU)
+            return False
+
+        if text.startswith(PICK_OPTION):
+            what = text[len(PICK_OPTION):]
+
+            if what.startswith("p") and what[1:].isdigit():
+                page = int(what[1:])
+                continue
+
+            if not what.isdigit() or int(what) >= len(choices):
+                complaint = "Не понял выбор."
+                continue
+
+            picked = choices[int(what)]
+            option["value"] = picked["value"]
+            option["chosen"] = picked["label"]
+
+            return True
+
+        if not text:
+            link.screen("Отменил.", buttons=MENU)
+            return False
+
+        # Набрано словом. Одно совпадение — берём, несколько — показываем
+        # их, ни одного — говорим об этом и оставляем список открытым.
+        found = option_matches(choices, text)
+
+        if len(found) == 1:
+            picked = found[0][1]
+            option["value"] = picked["value"]
+            option["chosen"] = picked["label"]
+
+            return True
+
+        if not found:
+            complaint = f"«{text}» среди вариантов нет."
+            continue
+
+        rows = found
+        page = 0
+        complaint = f"По слову «{text}» нашлось {len(found)}:"
 
 
 def item_fields(account, category_id: str, obtaining_id: str) -> list:
@@ -1407,17 +1541,16 @@ def from_template_series(link, account) -> None:
         link.screen("Шаблонов пока нет.", buttons=MENU)
         return
 
-    keys = [[(t.label(), PICK_SERIES + t.id)] for t in saved[:MAX_CHOICES]]
-    keys.append([("✖️ Назад", "отмена")])
-    answer = link.ask("С какого шаблона делаем серию?", ANSWER_WAIT,
-                      buttons=keys)
-    text = str(answer.get("text") or "").strip()
+    # Через общий выбор: он листает и понимает набранное слово. Раньше
+    # тринадцатый шаблон было не достать.
+    chosen = choose(link, "С какого шаблона делаем серию?",
+                    [(t.id, t.label()) for t in saved], PICK_SERIES)
 
-    if not text.startswith(PICK_SERIES):
+    if chosen is None:
         link.screen("Отменил.", buttons=MENU)
         return
 
-    template = store.get(text[len(PICK_SERIES):])
+    template = store.get(chosen["id"])
 
     if template is None:
         link.screen("Такого шаблона больше нет.", buttons=MENU)
@@ -2277,30 +2410,21 @@ def ask_category(link, account, game):
         # Не беда: покажем всё по игре.
         return "все"
 
-    keys = [[(c.name, PICK_CAT + str(c.id))] for c in rows[:MAX_CHOICES]]
-    keys.append([("📄 Все категории", PICK_CAT + "все")])
-    keys.append([("✖️ Отмена", "отмена")])
+    # Через общий выбор: он листает и понимает набранное слово. Раньше
+    # тринадцатая категория игры просто не показывалась.
+    chosen = choose(link, f"{game['name']} — какая категория?",
+                    [(c.id, c.name) for c in rows] + [("все", "📄 Все "
+                                                       "категории")],
+                    PICK_CAT)
 
-    answer = link.ask(f"{game['name']} — какая категория?", ANSWER_WAIT,
-                      buttons=keys)
-    text = str(answer.get("text") or "").strip()
-
-    if not text.startswith(PICK_CAT):
+    if chosen is None:
         link.screen("Отменил.", buttons=MENU)
         return None
 
-    what = text[len(PICK_CAT):]
-
-    if what == "все":
+    if chosen["id"] == "все":
         return "все"
 
-    found = next((c for c in rows if str(c.id) == what), None)
-
-    if found is None:
-        link.screen("Такой категории нет.", buttons=MENU)
-        return None
-
-    return {"id": str(found.id), "name": str(found.name)}
+    return chosen
 
 
 def show_items(link, account, game=None, category=None):
@@ -3220,17 +3344,15 @@ def drafts_menu(link, account) -> None:
         link.screen("Черновиков нет.", buttons=MENU)
         return
 
-    keys = [[(f"{d.name} — {getattr(d, 'price', '?')} ₽",
-              PICK_DRAFT + str(d.id))] for d in drafts[:MAX_CHOICES]]
-    keys.append([("✖️ Назад", "отмена")])
-    answer = link.ask("Черновики:", ANSWER_WAIT, buttons=keys)
-    text = str(answer.get("text") or "").strip()
+    picked = choose(link, "Черновики:",
+                    [(str(d.id), f"{d.name} — {getattr(d, 'price', '?')} ₽")
+                     for d in drafts], PICK_DRAFT)
 
-    if not text.startswith(PICK_DRAFT):
+    if picked is None:
         link.screen("Отменил.", buttons=MENU)
         return
 
-    draft_id = text[len(PICK_DRAFT):]
+    draft_id = picked["id"]
     chosen = next((d for d in drafts if str(d.id) == draft_id), None)
 
     if chosen is None:

@@ -221,6 +221,211 @@ class OptionsTest(unittest.TestCase):
         self.assertEqual(account.created[0]["options"], {})
 
 
+class ManyOptionsTest(unittest.TestCase):
+    """Характеристика с тремя десятками вариантов.
+
+    «Валюта» у Xbox — это все страны магазина. Показывались первые
+    двенадцать, остальные обрезались молча: продавец искал Турцию и США, а
+    список кончался на Индии — по алфавиту. Выглядело как «бот не умеет
+    такие регионы», хотя он просто не дорисовал список.
+    """
+
+    # Как их отдаёт площадка: подпись со страной и валютой.
+    COUNTRIES = ["Аргентина (ARS)", "Австрия (EUR)", "Бразилия (BRL)",
+                 "Бельгия (EUR)", "Великобритания (GBP)", "Венгрия (HUF)",
+                 "Вьетнам (VND)", "Германия (EUR)", "Гонконг (HKD)",
+                 "Европа (EUR)", "Израиль (ILS)", "Индия (INR)",
+                 "Испания (EUR)", "Италия (EUR)", "Канада (CAD)",
+                 "Мексика (MXN)", "Норвегия (NOK)", "Польша (PLN)",
+                 "Саудовская Аравия (SAR)", "США (USD)", "Турция (TRY)",
+                 "Швеция (SEK)", "Япония (JPY)"]
+
+    def draft(self):
+        d = draft()
+        d.options = [{"field": "currency", "group": "Валюта", "value": None,
+                      "choices": [{"label": name, "value": name[-4:-1]}
+                                  for name in self.COUNTRIES]}]
+
+        return d
+
+    def labels(self, link, which=-1):
+        return [name for row in link.asked[which][1] for name, _ in row]
+
+    def test_the_first_page_is_not_the_whole_list(self):
+        """Обрезать молча — значит соврать про умения площадки."""
+        d = self.draft()
+        link = FakeLink(["отмена"])
+        item_bot.choose_option(link, None, d)
+        names = self.labels(link)
+
+        self.assertIn("Аргентина (ARS)", names)
+        self.assertNotIn("Турция (TRY)", names)
+        self.assertTrue(any("Далее" in n for n in names), names)
+
+    def test_the_pages_are_counted(self):
+        link = FakeLink(["отмена"])
+        item_bot.choose_option(link, None, self.draft())
+
+        self.assertIn("Страница 1 из", link.asked[0][0])
+
+    def test_turkey_is_reachable_by_paging(self):
+        d = self.draft()
+        link = FakeLink([item_bot.PICK_OPTION + "p1",
+                         item_bot.PICK_OPTION + "p2", "отмена"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertIn("Турция (TRY)", self.labels(link))
+
+    def test_every_choice_is_reachable(self):
+        seen = []
+        page = 0
+
+        while True:
+            link = FakeLink(["отмена"])
+            d = self.draft()
+            # Листаем до нужной страницы и смотрим, что на ней.
+            item_bot.choose_option(link, None, d, page)
+            names = self.labels(link)
+            seen += [n for n in names if n in self.COUNTRIES]
+
+            if not any("Далее" in n for n in names):
+                break
+
+            page += 1
+
+        self.assertEqual(sorted(set(seen)), sorted(self.COUNTRIES))
+
+    def test_a_typed_word_picks_the_country(self):
+        """«турция» набрать быстрее, чем долистать до буквы Т."""
+        d = self.draft()
+        link = FakeLink(["турция"])
+
+        self.assertTrue(item_bot.choose_option(link, None, d))
+        self.assertEqual(d.options[0]["chosen"], "Турция (TRY)")
+
+    def test_the_currency_code_works_too(self):
+        d = self.draft()
+        link = FakeLink(["usd"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertEqual(d.options[0]["chosen"], "США (USD)")
+
+    def test_several_matches_are_offered(self):
+        d = self.draft()
+        link = FakeLink(["eur", "отмена"])
+        item_bot.choose_option(link, None, d)
+        names = self.labels(link)
+
+        self.assertIn("Австрия (EUR)", names)
+        self.assertNotIn("Турция (TRY)", names)
+
+    def test_an_unknown_word_does_not_close_the_list(self):
+        """Раньше любой набранный текст означал «отменил»."""
+        d = self.draft()
+        link = FakeLink(["чепуха", "турция"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertIn("среди вариантов нет", link.asked[-1][0])
+        self.assertEqual(d.options[0]["chosen"], "Турция (TRY)")
+
+    def test_cancel_still_cancels(self):
+        d = self.draft()
+        link = FakeLink(["отмена"])
+
+        self.assertFalse(item_bot.choose_option(link, None, d))
+
+    def test_a_short_list_has_no_paging(self):
+        """Две кнопки листать незачем."""
+        d = draft()
+        d.options = [{"field": "platform", "group": "Платформа",
+                      "value": None,
+                      "choices": [{"label": "ПК", "value": "PC"},
+                                  {"label": "Телефон", "value": "MOBILE"}]}]
+        link = FakeLink(["отмена"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertNotIn("Страница", link.asked[0][0])
+
+
+class ChooseTest(unittest.TestCase):
+    """Общий выбор: игры, категории, способы получения.
+
+    Обрезался он молча по двенадцать, и тринадцатая категория для
+    продавца просто не существовала: он видел конец списка и решал, что
+    бот её не умеет.
+    """
+
+    ROWS = [(f"c{n}", f"Категория {n}") for n in range(25)]
+
+    def labels(self, link, which=-1):
+        return [name for row in link.asked[which][1] for name, _ in row]
+
+    def test_the_whole_list_is_reachable(self):
+        seen = []
+        link = FakeLink(["выб:стр1", "выб:стр2", "отмена"])
+        item_bot.choose(link, "Что?", self.ROWS, "выб:")
+
+        for number in range(3):
+            seen += [n for n in self.labels(link, number)
+                     if n.startswith("Категория")]
+
+        self.assertEqual(sorted(set(seen)), sorted(n for _, n in self.ROWS))
+
+    def test_the_pages_are_counted(self):
+        link = FakeLink(["отмена"])
+        item_bot.choose(link, "Что?", self.ROWS, "выб:")
+
+        self.assertIn("Страница 1 из 3", link.asked[0][0])
+
+    def test_a_short_list_is_not_paged(self):
+        link = FakeLink(["отмена"])
+        item_bot.choose(link, "Что?", self.ROWS[:3], "выб:")
+
+        self.assertNotIn("Страница", link.asked[0][0])
+
+    def test_a_button_still_picks(self):
+        link = FakeLink(["выб:c7"])
+        got = item_bot.choose(link, "Что?", self.ROWS, "выб:")
+
+        self.assertEqual(got, {"id": "c7", "name": "Категория 7"})
+
+    def test_a_typed_word_picks_when_it_is_the_only_one(self):
+        link = FakeLink(["категория 17"])
+        got = item_bot.choose(link, "Что?", self.ROWS, "выб:")
+
+        self.assertEqual(got["id"], "c17")
+
+    def test_several_matches_are_offered(self):
+        link = FakeLink(["категория 1", "выб:c13"])
+        got = item_bot.choose(link, "Что?", self.ROWS, "выб:")
+
+        self.assertEqual(got["id"], "c13")
+
+    def test_an_unknown_word_does_not_cancel(self):
+        link = FakeLink(["чепуха", "выб:c1"])
+        got = item_bot.choose(link, "Что?", self.ROWS, "выб:")
+
+        self.assertIn("в списке нет", link.asked[-1][0])
+        self.assertEqual(got["id"], "c1")
+
+    def test_cancel_cancels(self):
+        link = FakeLink(["отмена"])
+
+        self.assertIsNone(item_bot.choose(link, "Что?", self.ROWS, "выб:"))
+
+    def test_thirteen_templates_are_all_reachable(self):
+        """Тринадцатый шаблон было не достать вовсе."""
+        rows = [(f"t{n}", f"Шаблон {n}") for n in range(13)]
+        link = FakeLink(["выб:стр1", "отмена"])
+        item_bot.choose(link, "Что?", rows, "выб:")
+        names = [name for row in link.asked[-1][1] for name, _ in row]
+
+        self.assertIn("Шаблон 12", names)
+
+    def test_an_empty_list_is_none(self):
+        self.assertIsNone(item_bot.choose(FakeLink(), "Что?", [], "выб:"))
+
+
 class AccountsTest(unittest.TestCase):
     """Библиотека площадки держит аккаунт синглтоном, поэтому переключение
     заменяет единственный кабинет, а не заводит второй."""
