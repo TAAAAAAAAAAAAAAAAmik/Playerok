@@ -576,7 +576,9 @@ def choose(link, question, rows, prefix, wait=None):
             return {"id": str(found[0][0]), "name": found[0][1]}
 
         if not found:
-            complaint = f"«{text}» в списке нет."
+            sample = ", ".join(str(name) for _, name in rows[:3])
+            complaint = (f"«{text}» в списке нет. Выбирают из: {sample}… — "
+                         f"нажмите кнопку или напишите часть названия.")
             continue
 
         shown_rows = found
@@ -812,6 +814,19 @@ def choose_option(link, account, draft, page: int = 0) -> bool:
         option["value"] = ""
         return True
 
+    if len(choices) == 1:
+        # Один вариант — это не выбор, а формальность. Площадка так и
+        # отдаёт «Сумма пополнения» у Xbox: одна кнопка с названием самой
+        # характеристики. Спрашивать про неё значит требовать нажатия
+        # там, где ответ ровно один, — а продавец в это время набирает
+        # сумму и получает «„1" среди вариантов нет».
+        picked = choices[0]
+        option["value"] = ("" if picked.get("value") in (None, "")
+                           else picked["value"])
+        option["chosen"] = str(picked.get("label") or "")
+
+        return True
+
     title = option.get("group") or wizard.QUESTIONS["options"]
     title = f"{title}?" if not title.endswith(".") else title
     rows = list(enumerate(choices))
@@ -882,7 +897,13 @@ def choose_option(link, account, draft, page: int = 0) -> bool:
             return True
 
         if not found:
-            complaint = f"«{text}» среди вариантов нет."
+            # Показываем, ЧТО тут выбирают: продавец набирал «1», думая,
+            # что вписывает сумму, а список был про страны.
+            sample = ", ".join(str(c.get("label") or "")
+                               for c in choices[:3])
+            complaint = (f"«{text}» среди вариантов нет. Здесь выбирают из "
+                         f"списка: {sample}… — нажмите кнопку или напишите "
+                         f"часть названия.")
             continue
 
         rows = found

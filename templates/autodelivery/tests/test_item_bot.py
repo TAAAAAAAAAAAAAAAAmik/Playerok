@@ -295,6 +295,50 @@ class ManyOptionsTest(unittest.TestCase):
 
         self.assertEqual(sorted(set(seen)), sorted(self.COUNTRIES))
 
+    def test_a_single_choice_is_not_a_question(self):
+        """Площадка отдаёт «Сумма пополнения» одной кнопкой с тем же
+        названием. Спрашивать про неё — требовать нажатия там, где ответ
+        один, а продавец в это время набирает сумму и получает «„1" среди
+        вариантов нет»."""
+        d = draft()
+        d.options = [{"field": "amount", "group": "Сумма пополнения",
+                      "value": None,
+                      "choices": [{"label": "Сумма пополнения",
+                                   "value": "any"}]}]
+        link = FakeLink([])
+
+        self.assertTrue(item_bot.choose_option(link, None, d))
+        self.assertEqual(link.asked, [])
+        self.assertEqual(d.attributes(), {"amount": "any"})
+
+    def test_a_single_empty_choice_sends_nothing(self):
+        d = draft()
+        d.options = [{"field": "amount", "group": "Сумма", "value": None,
+                      "choices": [{"label": "Сумма", "value": None}]}]
+        item_bot.choose_option(FakeLink([]), None, d)
+
+        self.assertEqual(d.attributes(), {})
+        self.assertFalse(d.step.startswith(wizard.OPTION))
+
+    def test_two_choices_are_still_asked(self):
+        d = draft()
+        d.options = [{"field": "platform", "group": "Платформа",
+                      "value": None,
+                      "choices": [{"label": "ПК", "value": "PC"},
+                                  {"label": "Телефон", "value": "MOBILE"}]}]
+        link = FakeLink(["отмена"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertEqual(len(link.asked), 1)
+
+    def test_a_wrong_word_shows_what_is_chosen_here(self):
+        d = self.draft()
+        link = FakeLink(["1", "турция"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertIn("Здесь выбирают из списка", link.asked[-1][0])
+        self.assertIn("Аргентина", link.asked[-1][0])
+
     def test_a_typed_word_picks_the_country(self):
         """«турция» набрать быстрее, чем долистать до буквы Т."""
         d = self.draft()
