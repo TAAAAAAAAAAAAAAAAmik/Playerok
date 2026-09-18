@@ -199,6 +199,7 @@ class OptionsTest(unittest.TestCase):
 
     def test_choice_reaches_the_marketplace(self):
         d = draft()
+        d.nominal = 80
         d.options = [{"field": "platform", "group": "Платформа",
                       "value": None,
                       "choices": [{"label": "ПК", "value": "PC"},
@@ -242,6 +243,7 @@ class ManyOptionsTest(unittest.TestCase):
 
     def draft(self):
         d = draft()
+        d.nominal = 80
         d.options = [{"field": "currency", "group": "Валюта", "value": None,
                       "choices": [{"label": name, "value": name[-4:-1]}
                                   for name in self.COUNTRIES]}]
@@ -301,6 +303,7 @@ class ManyOptionsTest(unittest.TestCase):
         один, а продавец в это время набирает сумму и получает «„1" среди
         вариантов нет»."""
         d = draft()
+        d.nominal = 80
         d.options = [{"field": "amount", "group": "Сумма пополнения",
                       "value": None,
                       "choices": [{"label": "Сумма пополнения",
@@ -311,17 +314,21 @@ class ManyOptionsTest(unittest.TestCase):
         self.assertEqual(link.asked, [])
         self.assertEqual(d.attributes(), {"amount": "any"})
 
-    def test_a_single_empty_choice_sends_nothing(self):
+    def test_a_single_empty_choice_is_a_number_to_type(self):
+        """Площадка так отдаёт «Сумма пополнения»: одна строка без
+        значения. Отправить её кнопкой — получить «атрибуты имеют
+        некорректные значения»."""
         d = draft()
+        d.nominal = 80
         d.options = [{"field": "amount", "group": "Сумма", "value": None,
                       "choices": [{"label": "Сумма", "value": None}]}]
-        item_bot.choose_option(FakeLink([]), None, d)
+        item_bot.choose_option(FakeLink(["250"]), None, d)
 
-        self.assertEqual(d.attributes(), {})
-        self.assertFalse(d.step.startswith(wizard.OPTION))
+        self.assertEqual(d.attributes(), {"amount": 250})
 
     def test_two_choices_are_still_asked(self):
         d = draft()
+        d.nominal = 80
         d.options = [{"field": "platform", "group": "Платформа",
                       "value": None,
                       "choices": [{"label": "ПК", "value": "PC"},
@@ -381,6 +388,7 @@ class ManyOptionsTest(unittest.TestCase):
     def test_a_short_list_has_no_paging(self):
         """Две кнопки листать незачем."""
         d = draft()
+        d.nominal = 80
         d.options = [{"field": "platform", "group": "Платформа",
                       "value": None,
                       "choices": [{"label": "ПК", "value": "PC"},
@@ -1860,6 +1868,250 @@ class XboxGiftCardTest(unittest.TestCase):
             link, account, self.draft(name="Xbox 250 TRY", nominal=250)))
         self.assertEqual(account.created, [])
 
+
+
+class AmountOptionTest(unittest.TestCase):
+    """«Сумма пополнения»: характеристика, куда вписывают число.
+
+    Площадка отдаёт её одной строкой — подпись равна названию самой
+    характеристики, значения нет, зато есть разброс min/max. Бот показывал
+    её кнопкой и отправлял пустое значение, а площадка отвечала «один или
+    более атрибутов имеют некорректные значения» — не говоря какой.
+    """
+
+    def option(self, limit=None, group="Сумма пополнения", value=None,
+               label=None):
+        return {"field": "amount", "group": group, "value": None,
+                "kind": "", "limit": limit,
+                "choices": [{"label": label or group, "value": value}]}
+
+    def draft(self, nominal=100, options=None):
+        d = draft()
+        d.nominal = nominal
+        d.options = [dict(o) for o in (options or [self.option()])]
+
+        return d
+
+    # ---------- узнавание ----------
+
+    def test_a_limit_means_a_number(self):
+        self.assertTrue(item_bot.input_option(
+            self.option(limit={"min": 1, "max": 1000})))
+
+    def test_a_single_choice_without_a_value_means_a_number(self):
+        self.assertTrue(item_bot.input_option(self.option()))
+
+    def test_a_single_real_choice_is_still_a_choice(self):
+        self.assertFalse(item_bot.input_option(self.option(value="any")))
+
+    def test_a_list_is_never_a_number(self):
+        option = self.option()
+        option["choices"] = [{"label": "ПК", "value": "PC"},
+                             {"label": "Телефон", "value": "MOBILE"}]
+
+        self.assertFalse(item_bot.input_option(option))
+
+    # ---------- автоподстановка номинала ----------
+
+    def test_the_nominal_fills_it_without_asking(self):
+        """Сумма пополнения гифт-карты — это и есть её номинал."""
+        d = self.draft()
+        item_bot.fill_amount_options(d)
+
+        self.assertEqual(d.attributes(), {"amount": 100})
+        self.assertFalse(d.step.startswith(wizard.OPTION))
+
+    def test_it_is_sent_as_a_number_not_a_word(self):
+        d = self.draft()
+        item_bot.fill_amount_options(d)
+
+        self.assertIsInstance(d.attributes()["amount"], int)
+
+    def test_a_nominal_outside_the_limit_is_not_pushed_in(self):
+        """Молча подставить запрещённое — значит получить отказ на
+        создании и не понять, откуда он."""
+        d = self.draft(options=[self.option(limit={"min": 10, "max": 50})])
+        item_bot.fill_amount_options(d)
+
+        self.assertEqual(d.attributes(), {})
+
+    def test_an_option_that_is_not_about_amount_is_left_alone(self):
+        option = dict(self.option(group="Ключ активации"), field="key")
+        d = self.draft(options=[option])
+        item_bot.fill_amount_options(d)
+
+        self.assertEqual(d.attributes(), {})
+
+    def test_without_a_nominal_nothing_is_filled(self):
+        d = self.draft(nominal=None)
+        item_bot.fill_amount_options(d)
+
+        self.assertEqual(d.attributes(), {})
+
+    # ---------- когда всё же спрашиваем ----------
+
+    def test_a_typed_number_is_accepted(self):
+        d = self.draft(options=[self.option(group="Ключ")])
+        item_bot.choose_option(FakeLink(["250"]), None, d)
+
+        self.assertEqual(d.attributes(), {"amount": 250})
+
+    def test_the_limit_is_told_to_the_seller(self):
+        d = self.draft(options=[self.option(group="Ключ",
+                                            limit={"min": 5, "max": 50})])
+        link = FakeLink(["10"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertIn("от 5 до 50", link.asked[0][0])
+
+    def test_a_value_outside_the_limit_is_refused(self):
+        d = self.draft(options=[self.option(group="Ключ",
+                                            limit={"min": 5, "max": 50})])
+        link = FakeLink(["500", "10"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertEqual(d.attributes(), {"amount": 10})
+        self.assertIn("не подходит под разброс", link.asked[-1][0])
+
+    def test_a_word_instead_of_a_number_is_refused(self):
+        d = self.draft(options=[self.option(group="Ключ")])
+        link = FakeLink(["много", "7"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertEqual(d.attributes(), {"amount": 7})
+        self.assertIn("не число", link.asked[-1][0])
+
+    def test_the_nominal_is_offered_by_a_button(self):
+        d = self.draft(options=[self.option(group="Ключ")])
+        link = FakeLink([item_bot.PICK_OPTION + "ном"])
+        item_bot.choose_option(link, None, d)
+
+        self.assertEqual(d.attributes(), {"amount": 100})
+
+    def test_a_comma_is_a_dot(self):
+        d = self.draft(options=[self.option(group="Ключ")])
+        item_bot.choose_option(FakeLink(["9,99"]), None, d)
+
+        self.assertEqual(d.attributes(), {"amount": 9.99})
+
+    def test_cancel_cancels(self):
+        d = self.draft(options=[self.option(group="Ключ")])
+
+        self.assertFalse(item_bot.choose_option(FakeLink(["отмена"]), None, d))
+
+
+class AttributeRetryTest(unittest.TestCase):
+    """Отказ «атрибуты имеют некорректные значения» — не приговор.
+
+    Какого типа площадка ждёт число, из её ответа не видно. Создание
+    ничего не тратит, поэтому бот пробует вторую форму сам, а не
+    возвращает продавцу загадку, которую тот всё равно не починит.
+    """
+
+    class Picky:
+        """Площадка, принимающая числа только строками."""
+
+        def __init__(self, wants=str):
+            self.wants = wants
+            self.tries = []
+
+        def create_item(self, **kw):
+            self.tries.append(kw["options"])
+
+            for value in kw["options"].values():
+                if not isinstance(value, self.wants):
+                    raise RuntimeError("Один или более атрибутов товара "
+                                       "имеют некорректные значения")
+
+            return FakeItem()
+
+        def get_item_priority_statuses(self, item_id, price):
+            return []
+
+    def draft(self, value):
+        d = draft()
+        d.options = [{"field": "amount", "group": "Сумма", "value": value,
+                      "chosen": "100", "choices": []}]
+
+        return d
+
+    def test_a_number_is_retried_as_a_word(self):
+        market = self.Picky(wants=str)
+        item_id, why = item_bot.create_item(market, self.draft(100))
+
+        self.assertEqual(item_id, "item-1")
+        self.assertEqual(market.tries, [{"amount": 100}, {"amount": "100"}])
+
+    def test_a_word_is_retried_as_a_number(self):
+        market = self.Picky(wants=int)
+        item_id, why = item_bot.create_item(market, self.draft("100"))
+
+        self.assertEqual(item_id, "item-1")
+        self.assertEqual(market.tries[-1], {"amount": 100})
+
+    def test_the_first_reason_is_the_one_told(self):
+        """Вторая попытка была нашей догадкой — жаловаться на неё
+        продавцу незачем."""
+        class Never(self.Picky):
+            def create_item(self, **kw):
+                self.tries.append(kw["options"])
+
+                raise RuntimeError("Один или более атрибутов товара имеют "
+                                   "некорректные значения")
+
+        market = Never()
+        item_id, why = item_bot.create_item(market, self.draft(100))
+
+        self.assertEqual(item_id, "")
+        self.assertIn("некорректные значения", why)
+        self.assertEqual(len(market.tries), 2)
+
+    def test_other_refusals_are_not_retried(self):
+        """Повторять отказ во входе бессмысленно — он сам не пройдёт."""
+        class Closed:
+            def __init__(self):
+                self.tries = []
+
+            def create_item(self, **kw):
+                self.tries.append(kw["options"])
+
+                raise RuntimeError("Не удалось подключиться к аккаунту")
+
+        market = Closed()
+        item_bot.create_item(market, self.draft(100))
+
+        self.assertEqual(len(market.tries), 1)
+
+    def test_nothing_to_flip_is_not_retried(self):
+        class Closed:
+            def __init__(self):
+                self.tries = []
+
+            def create_item(self, **kw):
+                self.tries.append(kw["options"])
+
+                raise RuntimeError("атрибуты некорректны")
+
+        market = Closed()
+        d = draft()
+        d.options = [{"field": "region", "value": "Global", "chosen": "Global",
+                      "choices": []}]
+        item_bot.create_item(market, d)
+
+        self.assertEqual(len(market.tries), 1)
+
+    def test_the_seller_sees_what_was_sent(self):
+        """«Некорректные значения» без списка — загадка без ответа."""
+        said = item_bot.what_we_sent(
+            self.draft(100), "Один или более атрибутов имеют некорректные "
+                             "значения")
+
+        self.assertIn("Сумма", said)
+        self.assertIn("100", said)
+
+    def test_other_refusals_say_nothing_extra(self):
+        self.assertEqual(item_bot.what_we_sent(self.draft(100),
+                                               "куки истекли"), "")
 
 
 class SettingsMenuTest(unittest.TestCase):

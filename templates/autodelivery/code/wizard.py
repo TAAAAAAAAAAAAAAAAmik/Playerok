@@ -29,8 +29,13 @@ from catalog import (REGION_ALIASES, REGION_CODES,
 #
 # Зная регион заранее, бот подставляет характеристику сам и лишний вопрос
 # не задаёт.
-STEPS = ("game", "category", "obtaining", "region", "options", "name",
-         "price", "nominal", "description", "photos")
+#
+# Характеристики спрашиваются ПОСЛЕ номинала, и по той же причине: у
+# гифт-карт площадка спрашивает «Сумма пополнения» — это и есть номинал.
+# Зная его, бот отвечает сам; не зная, он задавал бы тот же вопрос
+# второй раз и получал бы два разных ответа.
+STEPS = ("game", "category", "obtaining", "region", "name", "price",
+         "nominal", "options", "description", "photos")
 
 # Приставка у шага, который спрашивает поле с данными. Полей у разных
 # категорий разное число, поэтому шаг не постоянный, а собирается из id.
@@ -171,16 +176,10 @@ class Draft:
         if not self.obtaining:
             return "obtaining"
 
-        # Регион раньше характеристик: по нему бот подставит страну или
+        # Регион раньше всего остального: по нему бот подставит страну или
         # валюту, которую площадка спрашивает своим вопросом.
         if not self.region:
             return "region"
-
-        # Характеристики спрашиваем сразу после категории: их состав от неё
-        # и зависит, а каждая — это одно нажатие.
-        for option in self.options:
-            if option.get("value") is None:
-                return OPTION + str(option.get("field"))
 
         if not self.name:
             return "name"
@@ -190,6 +189,12 @@ class Draft:
 
         if not self.nominal:
             return "nominal"
+
+        # Характеристики — после номинала: «Сумма пополнения» у гифт-карт
+        # это он и есть, и спрашивать его дважды незачем.
+        for option in self.options:
+            if option.get("value") is None:
+                return OPTION + str(option.get("field"))
 
         if self.description is None:
             return "description"

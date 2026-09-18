@@ -56,6 +56,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import sys
 import time
@@ -120,6 +121,7 @@ COMMANDS = [
     ("delivery", "Настройки автовыдачи"),
     ("check", "Проверить сессию"),
     ("health", "Проверка выдачи: почему не выдаёт"),
+    ("attrs", "Характеристики категории: что спрашивает площадка"),
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
@@ -150,6 +152,7 @@ COPY_WORDS = ("копировать", "копия", "копия с витрин�
 SERIES_WORDS = ("серия", "серия номиналов", "номиналы", "/series")
 HEALTH_WORDS = ("проверка", "проверка выдачи", "почему не работает",
                 "/health")
+ATTRS_WORDS = ("характеристики", "атрибуты", "/attrs")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -698,11 +701,22 @@ def category_options(account, category_id: str) -> list:
         if not field:
             continue
 
+        limit = getattr(row, "value_range_limit", None)
         group = groups.setdefault(field, {
             "field": field,
             "group": str(getattr(row, "group", "") or field),
             "choices": [],
             "value": None,
+            # Тип площадки как есть: SELECTOR, SWITCH или что-то, чего
+            # библиотека ещё не знает (тогда None). По нему видно, где
+            # выбирают из списка, а где вписывают число.
+            "kind": str(getattr(getattr(row, "type", None), "name", "")
+                        or ""),
+            # Разброс значений — верный признак числового поля: у выбора
+            # из списка его не бывает.
+            "limit": ({"min": getattr(limit, "min", None),
+                       "max": getattr(limit, "max", None)}
+                      if limit is not None else None),
         })
         group["choices"].append({
             "label": str(getattr(row, "label", "") or "—"),
@@ -710,6 +724,98 @@ def category_options(account, category_id: str) -> list:
         })
 
     return list(groups.values())
+
+
+# По этим словам числовая характеристика узнаётся как «про номинал».
+AMOUNT_WORDS = ("сумма", "amount", "номинал", "nominal", "количество",
+                "quantity", "объём", "объем", "value")
+
+
+def input_option(option) -> bool:
+    """Это характеристика, куда вписывают значение, а не выбирают из списка.
+
+    Площадка отдаёт такую одной строкой: подпись — название самой
+    характеристики («Сумма пополнения»), значения нет, зато есть разброс
+    min/max. Показывать её списком из одной кнопки бессмысленно, а
+    отправить эту кнопку значением — верный отказ «атрибуты имеют
+    некорректные значения».
+    """
+    if option.get("limit"):
+        return True
+
+    choices = option.get("choices") or []
+
+    if len(choices) > 1:
+        return False
+
+    # Список выбора из одного варианта — всё ещё выбор, если значение в
+    # нём настоящее.
+    return bool(choices) and choices[0].get("value") in (None, "")
+
+
+def about_amount(option) -> bool:
+    """Числовая характеристика — про номинал?"""
+    where = " ".join(str(option.get(key) or "")
+                     for key in ("group", "field")).lower()
+
+    return any(word in where for word in AMOUNT_WORDS)
+
+
+def within(option, value) -> bool:
+    """Значение в разрешённом площадкой разбросе?"""
+    limit = option.get("limit") or {}
+    low, high = limit.get("min"), limit.get("max")
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+
+    if low is not None and number < float(low):
+        return False
+
+    return not (high is not None and number > float(high))
+
+
+def fill_amount_options(draft) -> list:
+    """Вписать номинал в числовые характеристики площадки. → что заполнили.
+
+    «Сумма пополнения» у гифт-карты — это номинал, и он уже назван. Второй
+    вопрос про то же самое — не просто лишнее нажатие: ответы разойдутся,
+    и в объявлении будет одно, а в описании, откуда читает выдача, другое.
+    """
+    nominal = getattr(draft, "nominal", None)
+    done = []
+
+    if not nominal:
+        return done
+
+    for option in getattr(draft, "options", None) or []:
+        if option.get("value") is not None:
+            continue
+
+        if not input_option(option) or not about_amount(option):
+            continue
+
+        if option.get("limit") and not within(option, nominal):
+            # Номинал вне разброса площадки — молча подставлять нельзя.
+            continue
+
+        option["value"] = as_number(nominal)
+        option["chosen"] = shown_number(nominal)
+        done.append(option["group"])
+
+    return done
+
+
+def as_number(value):
+    """Число так, как его ждёт площадка: целое — целым."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+
+    return int(number) if number == int(number) else number
 
 
 # По этим словам характеристика площадки узнаётся как «про регион».
@@ -773,6 +879,68 @@ def fill_region_options(draft) -> list:
     return done
 
 
+def ask_option_value(link, option, draft=None) -> bool:
+    """Спросить значение характеристики, которую вписывают. → продолжать ли.
+
+    Площадка отдаёт такие одной строкой с разбросом min/max — «Сумма
+    пополнения» у гифт-карт. Список из одной кнопки тут не годится: её
+    значение пустое, и отправить его значит получить «атрибуты имеют
+    некорректные значения».
+    """
+    title = option.get("group") or "Значение"
+    limit = option.get("limit") or {}
+    low, high = limit.get("min"), limit.get("max")
+    hint = ""
+
+    if low is not None and high is not None:
+        hint = f"\n\nПлощадка ждёт число от {shown_number(low)} до " \
+               f"{shown_number(high)}."
+    elif low is not None:
+        hint = f"\n\nПлощадка ждёт число не меньше {shown_number(low)}."
+    elif high is not None:
+        hint = f"\n\nПлощадка ждёт число не больше {shown_number(high)}."
+
+    nominal = getattr(draft, "nominal", None)
+    keys = []
+
+    if nominal and (not limit or within(option, nominal)):
+        keys.append([(f"📌 {shown_number(nominal)} — как номинал",
+                      PICK_OPTION + "ном")])
+
+    keys.append([("✖️ Отмена", "отмена")])
+    complaint = ""
+
+    while True:
+        answer = link.ask(screen_text(draft, f"{title}?{hint}", complaint),
+                          ANSWER_WAIT, buttons=keys)
+        text = str(answer.get("text") or "").strip()
+
+        if wizard.cancelled(text) or not text:
+            link.screen("Отменил.", buttons=MENU)
+            return False
+
+        if text == PICK_OPTION + "ном":
+            text = shown_number(nominal)
+
+        value = text.replace(",", ".").replace(" ", "")
+
+        try:
+            float(value)
+        except ValueError:
+            complaint = (f"«{text}» — не число. Здесь вписывают число, "
+                         f"например {shown_number(nominal) if nominal else 10}.")
+            continue
+
+        if limit and not within(option, value):
+            complaint = f"{shown_number(value)} не подходит под разброс."
+            continue
+
+        option["value"] = as_number(value)
+        option["chosen"] = shown_number(value)
+
+        return True
+
+
 def option_matches(choices, word: str) -> list:
     """Варианты характеристики, подходящие под слово. → [(номер, вариант)].
 
@@ -808,6 +976,9 @@ def choose_option(link, account, draft, page: int = 0) -> bool:
         return True
 
     choices = option.get("choices") or []
+
+    if input_option(option):
+        return ask_option_value(link, option, draft)
 
     if not choices:
         # Спрашивать нечего — считаем незаполненной и идём дальше.
@@ -951,10 +1122,12 @@ def collect(link, account, draft: wizard.Draft) -> bool:
     page = 0
 
     while True:
-        # Ответы площадке про регион бот даёт сам: регион он уже спросил.
-        # Отдельным сообщением об этом не говорим — диалог живёт в одном
-        # переписываемом экране, и заполненное видно в нём строкой «✓».
+        # Ответы площадке про регион и сумму бот даёт сам: и то и другое
+        # он уже спросил. Отдельным сообщением об этом не говорим — диалог
+        # живёт в одном переписываемом экране, и заполненное видно в нём
+        # строкой «✓».
         fill_region_options(draft)
+        fill_amount_options(draft)
         step = draft.step
 
         if not step:
@@ -1373,6 +1546,7 @@ def make_blank(link, account) -> None:
     # Характеристики про регион здесь спрошены раньше, чем стал известен
     # регион, — сверяем их с ним внутри проверки.
     fill_region_options(draft)
+    fill_amount_options(draft)
 
     if confirm_and_create(link, account, draft):
         offer_template(link, draft)
@@ -1473,8 +1647,8 @@ def send_draft(link, account, draft: wizard.Draft) -> bool:
                         f"{COOKIES_ADVICE}", buttons=MENU)
         else:
             link.screen(f"Создать не вышло: {why}\n"
-                        "Ничего не потрачено. Попробуем ещё раз.",
-                        buttons=MENU)
+                        "Ничего не потрачено. Попробуем ещё раз."
+                        + what_we_sent(draft, why), buttons=MENU)
 
         return False
 
@@ -1485,6 +1659,50 @@ def send_draft(link, account, draft: wizard.Draft) -> bool:
     publish_step(link, account, item_id, draft.price, draft.nominal)
 
     return True
+
+
+# Слова из отказов площадки, после которых полезно показать отправленное.
+# Их немного нарочно: приписка на каждый отказ превратила бы понятное
+# «не приняла вход» в простыню.
+SHOW_SENT_WORDS = ("атрибут", "характеристик", "attribute", "поля",
+                   "некорректн", "invalid")
+
+
+def what_we_sent(draft, why: str) -> str:
+    """Что именно ушло на площадку — когда она ругается на это.
+
+    «Один или более атрибутов имеют некорректные значения» без списка
+    самих атрибутов — это загадка: продавец видит отказ, а чинить нечего.
+    Показываем ровно то, что отправили, его же словами: подпись, которую
+    он выбирал, и значение, которое ушло.
+    """
+    low = str(why or "").lower()
+
+    if not any(word in low for word in SHOW_SENT_WORDS):
+        return ""
+
+    lines = []
+
+    for option in getattr(draft, "options", None) or []:
+        value = option.get("value")
+
+        if value in (None, ""):
+            continue
+
+        lines.append(f"  • {option.get('group') or option.get('field')}: "
+                     f"«{option.get('chosen') or value}» → {value!r}")
+
+    for field in getattr(draft, "fields", None) or []:
+        if field.get("value"):
+            lines.append(f"  • поле «{field.get('label')}»: "
+                         f"{str(field.get('value'))[:40]!r}")
+
+    if not lines:
+        return "\n\nХарактеристик я не отправлял вовсе."
+
+    return ("\n\nЯ отправил вот это:\n" + "\n".join(lines)
+            + "\n\nПокажите этот список — разберём, что площадке не "
+              "понравилось.")
 
 
 def templates_of(account_id: str = "") -> TemplateStore:
@@ -2296,23 +2514,87 @@ def plural(count: int, one: str, few: str, many: str) -> str:
     return f"{count} {word}"
 
 
+def flip_numbers(attributes: dict) -> dict:
+    """Числа строками, строки-числа числами. → другой словарь или пустой.
+
+    Площадка принимает характеристики словарём «поле: значение», и какого
+    типа она ждёт число, из её ответа не видно: «один или более атрибутов
+    имеют некорректные значения» — вот и весь отказ.
+    
+    Догадка стоит одного запроса и ничего не тратит, поэтому на таком
+    отказе бот пробует вторую форму сам, вместо того чтобы возвращать
+    продавцу загадку.
+    """
+    out = {}
+    changed = False
+
+    for field, value in (attributes or {}).items():
+        if isinstance(value, bool):
+            out[field] = value
+            continue
+
+        if isinstance(value, (int, float)):
+            out[field] = shown_number(value)
+            changed = True
+            continue
+
+        if isinstance(value, str):
+            try:
+                out[field] = as_number(float(value.replace(",", ".")))
+                changed = True
+                continue
+            except ValueError:
+                pass
+
+        out[field] = value
+
+    return out if changed else {}
+
+
 def create_item(account, draft: wizard.Draft):
     """Создать черновик → (номер товара, причина отказа)."""
     fields = [Field(f["id"], f["value"]) for f in draft.filled_fields()]
+    attributes = draft.attributes()
 
-    try:
-        item = account.create_item(
+    def send(options):
+        return account.create_item(
             game_category_id=draft.category["id"],
             obtaining_type_id=draft.obtaining["id"],
             name=draft.name,
             price=draft.price,
             description=wizard.description_for(draft),
-            options=draft.attributes(),
+            options=options,
             data_fields=fields,
             attachments=list(draft.photos),
         )
+
+    try:
+        item = send(attributes)
     except Exception as e:                                    # noqa: BLE001
-        return "", str(e)
+        why = str(e)
+
+        # Ругань именно на характеристики — единственный случай, когда
+        # вторая попытка осмысленна. Создание ничего не тратит, а разница
+        # между «100» и 100 продавцу не видна и починить её он не может.
+        if not any(w in why.lower() for w in SHOW_SENT_WORDS):
+            return "", why
+
+        other = flip_numbers(attributes)
+
+        if not other:
+            return "", why
+
+        try:
+            item = send(other)
+        except Exception as second:                           # noqa: BLE001
+            # Говорим про ПЕРВЫЙ отказ: вторая попытка была нашей
+            # догадкой, и жаловаться на неё продавцу незачем.
+            logging.warning("вторая форма характеристик тоже не подошла: %s",
+                            second)
+
+            return "", why
+
+        logging.info("характеристики приняты во второй форме: %r", other)
 
     return str(item.id), ""
 
@@ -3671,6 +3953,111 @@ def drafts_menu(link, account) -> None:
     publish_step(link, account, draft_id, price)
 
 
+# Сколько строк показывать в разборе характеристик. Экран телефона.
+ATTRS_SHOWN = 14
+
+
+def describe_row(row) -> str:
+    """Одна строка характеристики так, как её отдала площадка.
+
+    Печатаем СЫРЫЕ поля, а не наше понимание: разбираемся мы как раз
+    тогда, когда наше понимание не сошлось с площадкой.
+    """
+    out = []
+
+    for name in ("id", "field", "group", "label", "value", "type",
+                 "sequence", "required"):
+        got = getattr(row, name, None)
+
+        if got is None or got == "":
+            continue
+
+        got = getattr(got, "name", got)
+        out.append(f"{name}={str(got)[:28]}")
+
+    return "  " + ", ".join(out) if out else "  (пусто)"
+
+
+def attrs_menu(link, account) -> None:
+    """🧩 Что площадка спрашивает у этой категории — как есть.
+
+    Нужен, когда площадка отвечает «один или более атрибутов имеют
+    некорректные значения»: в этом отказе не сказано ни какой атрибут, ни
+    чего он ждал. Гадать по нему — терять по дню на догадку, а здесь
+    видно сразу и характеристики, и поля.
+    """
+    if account is None:
+        link.screen("Сначала нужен рабочий кабинет: откройте «Аккаунт».",
+                    buttons=MENU)
+        return
+
+    game = ask_game(link, account)
+
+    if game is None or game == "все":
+        link.screen("Нужна игра — у неё и спрашиваются категории.",
+                    buttons=MENU)
+        return
+
+    category = ask_category(link, account, game)
+
+    if category is None or category == "все":
+        link.screen("Нужна одна категория.", buttons=MENU)
+        return
+
+    link.screen("Спрашиваю площадку…")
+    lines = [f"🧩 {game['name']} · {category['name']}", ""]
+
+    try:
+        found = account.get_game_category(id=category["id"])
+        rows = list(getattr(found, "options", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Характеристики прочитать не вышло: {e}", buttons=MENU)
+        return
+
+    lines.append(f"Характеристики ({len(rows)}):")
+
+    for row in rows[:ATTRS_SHOWN]:
+        lines.append(describe_row(row))
+
+    if len(rows) > ATTRS_SHOWN:
+        lines.append(f"  … и ещё {len(rows) - ATTRS_SHOWN}")
+
+    try:
+        page = account.get_game_category_obtaining_types(category["id"],
+                                                        count=MAX_CHOICES)
+        kinds = list(getattr(page, "obtaining_types", None) or [])
+    except Exception:                                         # noqa: BLE001
+        kinds = []
+
+    if kinds:
+        lines += ["", f"Способы получения ({len(kinds)}):"]
+
+        for kind in kinds[:6]:
+            lines.append(f"  {getattr(kind, 'id', '?')} — "
+                         f"{getattr(kind, 'name', '?')}")
+
+        first = kinds[0]
+
+        try:
+            page = account.get_game_category_data_fields(
+                category["id"], getattr(first, "id", ""), count=24)
+            fields = list(getattr(page, "data_fields", None) or [])
+        except Exception:                                     # noqa: BLE001
+            fields = []
+
+        if fields:
+            lines += ["", f"Поля у «{getattr(first, 'name', '?')}» "
+                          f"({len(fields)}):"]
+
+            for field in fields[:ATTRS_SHOWN]:
+                lines.append(describe_row(field))
+
+    lines += ["", "Это сырой ответ площадки. Пришлите его — по нему видно, "
+                  "чего она ждёт в каждой характеристике."]
+
+    link.screen("\n".join(lines), buttons=MENU)
+
+
 def health_menu(link, account) -> None:
     """🩺 Проверка выдачи: почему кода не будет — прямо в телеграме.
 
@@ -4220,6 +4607,8 @@ def handle_command(link, account, text: str):
         check_session(link, account)
     elif text in HEALTH_WORDS:
         health_menu(link, account)
+    elif text in ATTRS_WORDS:
+        attrs_menu(link, account)
     elif text in ACCOUNT_WORDS:
         account = accounts_menu(link, account)
     elif not wizard.cancelled(text):
