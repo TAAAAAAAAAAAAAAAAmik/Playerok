@@ -17,6 +17,7 @@ from catalog import (UNITS, Card, denominations_for,            # noqa: E402
                      nominal_by_unit, nominal_for,
                      nominal_from_description, numbers_by_unit,
                      numbers_in, region_in, stop_words, whose,
+                     Denomination,
                      nominal_from_title, render, shown_number,
                      region_of_service, services_for)
 
@@ -883,6 +884,43 @@ class RegionSpellingTest(unittest.TestCase):
     def test_the_name_still_works_without_a_field(self):
         self.assertEqual(region_of_service({"name": "Apple Gift Cards TR"}),
                          "TR")
+
+
+class NearbyNominalsTest(unittest.TestCase):
+    """Совет «есть такие-то» должен быть про ТОТ ЖЕ регион.
+
+    Список из чужих регионов хуже пустого: продавец поправит номинал на
+    тот, которого у него всё равно нет, и придёт сюда второй раз.
+    """
+
+    ROWS = [
+        Denomination(service_id="tr", item_id="a", value=100, title="100",
+                     price=3.1, in_stock=5, region="TR"),
+        Denomination(service_id="tr", item_id="b", value=500, title="500",
+                     price=15.0, in_stock=5, region="TR"),
+        Denomination(service_id="us", item_id="c", value=10, title="10",
+                     price=9.6, in_stock=5, region="US"),
+        Denomination(service_id="us", item_id="d", value=9.99, title="9.99",
+                     price=9.5, in_stock=5, region="US"),
+    ]
+
+    def test_only_this_regions_nominals_are_suggested(self):
+        _, why = match_denomination(self.ROWS, "TR", 250)
+
+        self.assertIn("100, 500", why)
+        self.assertNotIn("10,", why)
+
+    def test_a_region_without_any_says_so(self):
+        _, why = match_denomination(self.ROWS, "BR", 250)
+
+        self.assertIn("BR", why)
+        self.assertIn("в других есть", why)
+
+    def test_a_fractional_nominal_is_not_rounded(self):
+        """«9» вместо «9.99» — это совет купить то, чего не существует."""
+        _, why = match_denomination(self.ROWS, "US", 25)
+
+        self.assertIn("9.99", why)
 
 
 if __name__ == "__main__":

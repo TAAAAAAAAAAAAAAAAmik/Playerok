@@ -1483,6 +1483,341 @@ class HealthMenuTest(unittest.TestCase):
         self.assertIn("Проверка выдачи", link.said[-1])
 
 
+class XboxGiftCardTest(unittest.TestCase):
+    """Создание гифт-карты Xbox целиком — от вопроса до проверки выдачи.
+
+    У Xbox всё то, на чём спотыкались по очереди: площадка спрашивает
+    страну своим вопросом, номинал считается в валюте региона, а рядом в
+    каталоге поставщика лежит Game Pass — другой товар с тем же словом.
+    """
+
+    CATALOG = {"services": [
+        {"id": "xbox-tr", "name": "Xbox Gift Cards Turkey",
+         "subcategoryName": "Xbox Gift Cards",
+         "items": [{"id": "d-100", "value": 100, "inStock": 7, "price": 3.1},
+                   {"id": "d-500", "value": 500, "inStock": 2, "price": 15.0}]},
+        {"id": "xbox-us", "name": "Xbox Gift Cards US",
+         "subcategoryName": "Xbox Gift Cards",
+         "items": [{"id": "d-10", "value": 10, "inStock": 5, "price": 9.6}]},
+        {"id": "pass-tr", "name": "Xbox Game Pass Ultimate Turkey",
+         "subcategoryName": "Xbox Game Pass",
+         "items": [{"id": "p-1", "value": 1, "inStock": 9, "price": 5.0}]},
+    ]}
+
+    # Так площадка спрашивает страну у Xbox: «Валюта?» с тремя десятками
+    # стран, каждая со своей валютой в скобках.
+    CURRENCY = {"field": "currency", "group": "Валюта", "value": None,
+                "choices": [{"label": "Аргентина (ARS)", "value": "ARS"},
+                            {"label": "США (USD)", "value": "USD"},
+                            {"label": "Турция (TRY)", "value": "TRY"},
+                            {"label": "Европа (EUR)", "value": "EUR"}]}
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        self.key = os.environ.get("APPROUTE_KEY")
+        os.environ["APPROUTE_KEY"] = "ключ"
+        self.saved = item_bot._CATALOG.copy()
+        item_bot._CATALOG.update({"raw": self.CATALOG, "at": time.time()})
+
+    def tearDown(self):
+        item_bot._CATALOG.update(self.saved)
+
+        if self.key is None:
+            os.environ.pop("APPROUTE_KEY", None)
+        else:
+            os.environ["APPROUTE_KEY"] = self.key
+
+    def draft(self, name="Xbox Gift Card 100 TRY", region="TR", nominal=100,
+              options=None):
+        d = wizard.Draft()
+        d.game = {"id": "g", "name": "Xbox"}
+        d.category = {"id": "c", "name": "Пополнение"}
+        d.obtaining = {"id": "o", "name": "Без входа в аккаунт"}
+        d.name, d.price, d.region, d.nominal = name, 900, region, nominal
+        d.description = ""
+        d.options = [dict(o) for o in (options or [])]
+
+        return d
+
+    def on(self, keyword=""):
+        conf = item_bot.settings_of()
+        conf.set_enabled("xbox", True)
+
+        if keyword:
+            conf.set_keyword("xbox", keyword)
+
+        return conf
+
+    # ---------- характеристика площадки ----------
+
+    def test_the_country_is_filled_from_the_region(self):
+        """Продавец уже назвал регион — спрашивать то же во второй раз
+        значит однажды получить два разных ответа."""
+        d = self.draft(options=[self.CURRENCY])
+        item_bot.fill_region_options(d)
+
+        self.assertEqual(d.options[0]["value"], "TRY")
+        self.assertEqual(d.options[0]["chosen"], "Турция (TRY)")
+
+    def test_filling_it_removes_the_question(self):
+        d = self.draft(options=[self.CURRENCY])
+        item_bot.fill_region_options(d)
+
+        self.assertFalse(d.step.startswith(wizard.OPTION))
+
+    def test_another_region_gets_another_country(self):
+        d = self.draft(region="US", options=[self.CURRENCY])
+        item_bot.fill_region_options(d)
+
+        self.assertEqual(d.options[0]["chosen"], "США (USD)")
+
+    def test_an_unknown_region_is_still_asked(self):
+        """Выдумывать за продавца нельзя: это его товар."""
+        d = self.draft(region="KZ", options=[self.CURRENCY])
+        item_bot.fill_region_options(d)
+
+        self.assertIsNone(d.options[0]["value"])
+        self.assertTrue(d.step.startswith(wizard.OPTION))
+
+    def test_a_server_option_is_left_alone(self):
+        """У аккаунтов «сервер» — не страна, и регион кода туда не годится."""
+        d = self.draft(options=[{"field": "server", "group": "Сервер",
+                                 "value": None,
+                                 "choices": [{"label": "Турция",
+                                              "value": "TR"}]}])
+        item_bot.fill_region_options(d)
+
+        self.assertIsNone(d.options[0]["value"])
+
+    def test_an_answered_option_is_not_touched(self):
+        option = dict(self.CURRENCY, value="ARS", chosen="Аргентина (ARS)")
+        d = self.draft(options=[option])
+        item_bot.fill_region_options(d)
+
+        self.assertEqual(d.options[0]["value"], "ARS")
+
+    # ---------- номинал в валюте региона ----------
+
+    def test_the_nominal_is_counted_in_the_region_currency(self):
+        """Xbox в Турции продаётся в лирах. Продавец, думающий в долларах,
+        выставит номинал впятеро крупнее, чем собирался."""
+        note = item_bot.nominal_note(self.draft())
+
+        self.assertIn("TR", note)
+        self.assertIn("₺", note)
+        self.assertIn("не в рублях", note.lower())
+
+    def test_robux_are_counted_in_robux(self):
+        d = self.draft(name="Roblox 1000 Robux", region="GL")
+
+        self.assertIn("Robux", item_bot.nominal_note(d))
+
+    # ---------- проверка выдачи до публикации ----------
+
+    def test_a_deliverable_card_is_confirmed(self):
+        self.on()
+        lines, trouble = item_bot.delivery_preview(self.draft())
+
+        self.assertFalse(trouble)
+        self.assertIn("Выдача сможет", lines[0])
+        self.assertIn("7 шт", lines[0])
+
+    def test_a_nominal_the_supplier_does_not_have_is_named(self):
+        self.on()
+        lines, trouble = item_bot.delivery_preview(
+            self.draft(name="Xbox Gift Card 250 TRY", nominal=250))
+
+        self.assertTrue(trouble)
+        self.assertIn("нет", " ".join(lines))
+
+    def test_a_region_the_supplier_does_not_have_is_named(self):
+        self.on()
+        lines, trouble = item_bot.delivery_preview(
+            self.draft(name="Xbox Gift Card 100", region="BR", nominal=100))
+
+        self.assertTrue(trouble)
+
+    def test_a_disabled_card_is_named(self):
+        lines, trouble = item_bot.delivery_preview(self.draft())
+
+        self.assertIn("выключена", " ".join(lines))
+
+    def test_a_keyword_that_misses_the_name_is_named(self):
+        """Самая тихая беда: товар создан, выдача проходит мимо."""
+        self.on(keyword="промокод")
+        lines, trouble = item_bot.delivery_preview(self.draft())
+
+        self.assertIn("пройдёт мимо", " ".join(lines))
+
+    def test_an_unknown_card_is_named(self):
+        lines, trouble = item_bot.delivery_preview(
+            self.draft(name="Просто товар без слов"))
+
+        self.assertTrue(trouble)
+        self.assertIn("не узнаю карту", " ".join(lines))
+
+    def test_a_missing_nominal_is_named(self):
+        lines, trouble = item_bot.delivery_preview(self.draft(nominal=None))
+
+        self.assertTrue(trouble)
+        self.assertIn("Номинала нет", " ".join(lines))
+
+    # ---------- Game Pass рядом в каталоге ----------
+
+    def test_game_pass_is_not_taken_for_a_gift_card(self):
+        """Он лежит в соседней подкатегории и стоит дешевле — перепутать
+        значит продать подписку вместо карты."""
+        self.on()
+        lines, trouble = item_bot.delivery_preview(
+            self.draft(name="Xbox Gift Card 1 TRY", nominal=1))
+
+        self.assertTrue(trouble)
+
+    def test_a_game_pass_listing_is_not_ours(self):
+        from catalog import is_card_order
+
+        card = item_bot.card_by_slug("xbox")
+
+        self.assertFalse(is_card_order(card, "Xbox Game Pass Ultimate 1 мес"))
+        self.assertTrue(is_card_order(card, "Xbox Gift Card 100 TRY"))
+
+    # ---------- описание ----------
+
+    def test_the_description_says_the_region_and_the_nominal(self):
+        """Их читает выдача — без них она встанет на оплаченном заказе."""
+        d = self.draft()
+        item_bot.apply_card_template(d)
+        text = wizard.description_for(d)
+
+        self.assertIn("Регион кода: TR", text)
+        self.assertIn("Номинал: 100", text)
+
+    def test_the_description_warns_about_the_account_region(self):
+        """Код TR на аккаунте US не активируется — это возврат."""
+        d = self.draft()
+        item_bot.apply_card_template(d)
+        text = wizard.description_for(d)
+
+        self.assertIn("xbox.com/redeem", text)
+        self.assertIn("регион", text.lower())
+
+    def test_the_description_is_not_about_roblox(self):
+        d = self.draft()
+        item_bot.apply_card_template(d)
+
+        self.assertNotIn("roblox", wizard.description_for(d).lower())
+
+    def test_what_we_wrote_the_delivery_reads_back(self):
+        """Круг замыкается: что написали — то выдача и купит."""
+        from catalog import nominal_for, region_from_description
+
+        d = self.draft()
+        item_bot.apply_card_template(d)
+        text = wizard.description_for(d)
+        value, why = nominal_for(d.name, text, d.price,
+                                 item_bot.card_by_slug("xbox"))
+
+        self.assertEqual(region_from_description(text), "TR")
+        self.assertEqual(value, 100)
+        self.assertEqual(why, "")
+
+
+    def test_the_activation_comes_from_the_game_when_the_name_is_odd(self):
+        """«🎮ПОПОЛНЕНИЕ КОШЕЛЬКА 100₺» — карта та же, активация та же."""
+        d = self.draft(name="🎮ПОПОЛНЕНИЕ КОШЕЛЬКА 100₺")
+        item_bot.apply_card_template(d)
+
+        self.assertIn("xbox.com/redeem", wizard.description_for(d))
+
+    def test_but_the_delivery_will_not_recognise_it(self):
+        """И об этом продавцу говорят до создания, а не после продажи."""
+        self.on()
+        lines, trouble = item_bot.delivery_preview(
+            self.draft(name="🎮ПОПОЛНЕНИЕ КОШЕЛЬКА 100₺"))
+
+        self.assertTrue(trouble)
+        self.assertIn("не узнаю карту", " ".join(lines))
+
+    def test_the_name_hint_shows_an_example_in_the_region_currency(self):
+        note = item_bot.name_note(self.draft(name=""))
+
+        self.assertIn("Xbox Gift Card", note)
+        self.assertIn("₺", note)
+        self.assertIn("не цена в рублях", note)
+
+    def test_the_robux_hint_is_not_about_currency(self):
+        d = self.draft(name="", region="GL")
+        d.game = {"id": "g", "name": "Roblox"}
+
+        self.assertIn("номинал", item_bot.name_note(d).lower())
+
+    # ---------- спор характеристики с регионом ----------
+
+    def test_a_country_that_argues_with_the_region_is_named(self):
+        """В объявлении «США», в описании «Регион кода: TR» — покупатель
+        поверит объявлению, а бот купит по описанию."""
+        option = dict(self.CURRENCY, value="USD", chosen="США (USD)")
+        lines = item_bot.region_conflicts(self.draft(options=[option]))
+
+        self.assertTrue(lines)
+        self.assertIn("спорит с регионом", lines[0])
+
+    def test_a_matching_country_is_not_a_conflict(self):
+        option = dict(self.CURRENCY, value="TRY", chosen="Турция (TRY)")
+
+        self.assertEqual(
+            item_bot.region_conflicts(self.draft(options=[option])), [])
+
+    def test_the_conflict_stops_the_quiet_creation(self):
+        self.on()
+        option = dict(self.CURRENCY, value="USD", chosen="США (USD)")
+        _, trouble = item_bot.delivery_preview(self.draft(options=[option]))
+
+        self.assertTrue(trouble)
+
+    def test_an_option_that_is_not_about_region_never_argues(self):
+        option = {"field": "server", "group": "Сервер", "value": "TR",
+                  "chosen": "Турция", "choices": []}
+
+        self.assertEqual(
+            item_bot.region_conflicts(self.draft(options=[option])), [])
+
+    # ---------- подтверждение перед созданием ----------
+
+    def test_a_good_card_is_created_without_extra_questions(self):
+        self.on()
+        link = FakeLink([])
+        account = FakeAccount()
+
+        self.assertTrue(item_bot.confirm_and_create(link, account,
+                                                    self.draft()))
+        self.assertEqual(link.asked, [])
+        self.assertEqual(len(account.created), 1)
+
+    def test_a_bad_one_is_asked_about_first(self):
+        self.on()
+        link = FakeLink(["да"])
+        account = FakeAccount()
+        item_bot.confirm_and_create(link, account,
+                                    self.draft(name="Xbox 250 TRY",
+                                               nominal=250))
+
+        self.assertIn("Создавать такой товар?", link.asked[0][0])
+        self.assertEqual(len(account.created), 1)
+
+    def test_a_refusal_creates_nothing(self):
+        self.on()
+        link = FakeLink(["отмена"])
+        account = FakeAccount()
+
+        self.assertFalse(item_bot.confirm_and_create(
+            link, account, self.draft(name="Xbox 250 TRY", nominal=250)))
+        self.assertEqual(account.created, [])
+
+
+
 class SettingsMenuTest(unittest.TestCase):
     """«Автовыдача» — кнопка, за которой продавец включает выдачу кодов.
 
@@ -2898,7 +3233,9 @@ class NotOnlyRobuxTest(unittest.TestCase):
         draft.game = draft.category = draft.obtaining = {"id": "1",
                                                          "name": "x"}
 
-        for answer in (name, str(price), region, description):
+        # Порядок ответов — как их спрашивает мастер: регион раньше
+        # названия, чтобы бот успел подставить характеристику площадки.
+        for answer in (region, name, str(price), description):
             wizard.apply(draft, answer)
 
         item_bot.apply_card_template(draft)

@@ -218,6 +218,158 @@ def catalog_of(card, region):
                          region=region or "GL")]
 
 
+class XboxEndToEndTest(unittest.IsolatedAsyncioTestCase):
+    """Круг замыкается: товар, созданный ботом, им же и выдаётся.
+
+    Описание пишет мастер создания, читает его выдача. Между ними нет
+    человека, и разойтись они могут только молча — поэтому проверяем их
+    вместе, на одном и том же тексте.
+    """
+
+    XBOX = Card(slug="xbox", title="Xbox", emoji="🟩",
+                keywords=("xbox", "иксбокс"), measure="$",
+                subcategory="Xbox Gift Cards",
+                name_must_not_have=("game pass", "gamepass", "ultimate"),
+                activation="Активируйте код на xbox.com/redeem.")
+
+    class Shop(Approute):
+        """Каталог, где рядом с картой лежит Game Pass — другой товар."""
+
+        def _services(self):
+            return self._wrap(0, {"services": [
+                {"id": "svc-tr", "name": "Xbox Gift Cards Turkey",
+                 "subcategoryName": "Xbox Gift Cards",
+                 "items": [{"id": "den-100", "value": 100,
+                            "inStock": self.in_stock, "price": self.price}]},
+                {"id": "svc-us", "name": "Xbox Gift Cards US",
+                 "subcategoryName": "Xbox Gift Cards",
+                 "items": [{"id": "den-us-100", "value": 100,
+                            "inStock": 9, "price": 99.0}]},
+                {"id": "svc-pass", "name": "Xbox Game Pass Ultimate Turkey",
+                 "subcategoryName": "Xbox Game Pass",
+                 "items": [{"id": "pass-1", "value": 100,
+                            "inStock": 9, "price": 0.5}]},
+            ]})
+
+    # Ровно то, что пишет в описание мастер создания товара.
+    DESCRIPTION = ("Регион кода: TR\n"
+                   "Номинал: 100\n"
+                   "\n"
+                   "Пополнение кошелька Microsoft на 100₺.\n"
+                   "Регион: TR.\n"
+                   "\n"
+                   "Активация: xbox.com/redeem.\n"
+                   "Это НЕ Game Pass: подписка — отдельный товар.")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = JsonStore(os.path.join(self.tmp, "state.json"))
+        self.store.conf("xbox")["enabled"] = True
+        self.notes = []
+        self._steps = delivery.POLL_STEPS
+        delivery.POLL_STEPS = (0, 0, 0)
+
+    def tearDown(self):
+        delivery.POLL_STEPS = self._steps
+
+    async def notify(self, text):
+        self.notes.append(text)
+
+    def order(self, title="Xbox Gift Card 100 TRY — моментально",
+              description=None):
+        return Order(id="x-1", title=title, status="paid", chat_id="chat-1",
+                     description=self.DESCRIPTION if description is None
+                     else description, amount=900)
+
+    def build(self, shop=None, order=None):
+        client = sup.ApprouteSupplier(api_key="ключ")
+        client.session = shop or self.Shop()
+        market = Market([order or self.order()])
+
+        def catalog_of(card, region):
+            from catalog import denominations_for
+
+            return denominations_for(card, client.services())
+
+        engine = DeliveryEngine(market, client, self.store, [self.XBOX],
+                                self.notify, catalog_of,
+                                reference_prefix="pk")
+        self.market = market
+
+        return engine, market
+
+    async def pass_once(self, engine):
+        for order in await self.market.paid_orders():
+            await engine.on_paid_order(order)
+
+    async def test_the_buyer_gets_the_code(self):
+        engine, market = self.build()
+        await self.pass_once(engine)
+
+        self.assertEqual(len(market.sent), 1)
+        self.assertIn(REAL_CODE, market.sent[0][1])
+
+    async def test_the_message_tells_how_to_activate(self):
+        engine, market = self.build()
+        await self.pass_once(engine)
+
+        self.assertIn("xbox.com/redeem", market.sent[0][1])
+        self.assertNotIn("roblox", market.sent[0][1].lower())
+
+    async def test_the_region_is_named_in_the_message(self):
+        """Код TR на аккаунте US не сработает — покупатель должен знать."""
+        engine, market = self.build()
+        await self.pass_once(engine)
+
+        self.assertIn("TR", market.sent[0][1])
+
+    async def test_the_turkish_service_is_bought_not_the_american(self):
+        """Тот же номинал есть в США и стоит вдесятеро дороже, а активируется
+        только на американском аккаунте."""
+        shop = self.Shop()
+        engine, _ = self.build(shop)
+        await self.pass_once(engine)
+        bodies = [body for m, _, _, body in shop.calls if m == "POST"]
+
+        self.assertTrue(bodies)
+        self.assertIn("den-100", str(bodies))
+        self.assertNotIn("den-us-100", str(bodies))
+
+    async def test_game_pass_is_not_bought_instead(self):
+        """Он лежит рядом, стоит копейки и подошёл бы по номиналу."""
+        shop = self.Shop()
+        engine, _ = self.build(shop)
+        await self.pass_once(engine)
+
+        bodies = [body for m, _, _, body in shop.calls if m == "POST"]
+
+        self.assertNotIn("pass-1", str(bodies))
+
+    async def test_a_game_pass_order_is_not_ours(self):
+        engine, market = self.build(
+            order=self.order(title="Xbox Game Pass Ultimate 1 месяц"))
+        await self.pass_once(engine)
+
+        self.assertEqual(market.sent, [])
+
+    async def test_a_description_without_the_region_stops_the_delivery(self):
+        """Лучше отказ, чем код чужого региона."""
+        engine, market = self.build(
+            order=self.order(description="Просто текст без региона"))
+        await self.pass_once(engine)
+
+        self.assertEqual(market.sent, [])
+        self.assertTrue(self.notes)
+
+    async def test_money_is_spent_exactly_once(self):
+        shop = self.Shop()
+        engine, _ = self.build(shop)
+        await self.pass_once(engine)
+        await self.pass_once(engine)
+
+        self.assertEqual(len(shop.purchases), 1)
+
+
 class OnePassTest(unittest.IsolatedAsyncioTestCase):
     """Проход боевого цикла целиком: кого выдали, о ком сказали."""
 

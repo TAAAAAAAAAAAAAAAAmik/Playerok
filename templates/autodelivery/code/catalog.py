@@ -646,6 +646,30 @@ REGION_NAMES = {
     "PHILIPPINES": "PH", "VIETNAM": "VN", "VIET NAM": "VN",
     "ISRAEL": "IL", "QATAR": "QA", "KUWAIT": "KW",
     "SOUTH AFRICA": "ZA", "NIGERIA": "NG", "EGYPT": "EG",
+    # По-русски их пишет площадка в своих характеристиках: «Валюта?» у
+    # Xbox — это список стран, и выбирает из него продавец, а подставляет
+    # бот по названному региону. Не узнал страну — задаёт лишний вопрос
+    # про то, что уже знает.
+    "СОЕДИНЁННЫЕ ШТАТЫ": "US", "СОЕДИНЕННЫЕ ШТАТЫ": "US", "АМЕРИКА": "US",
+    "ТУРЕЦКАЯ": "TR", "ТУРЦИИ": "TR",
+    "САУДОВСКАЯ АРАВИЯ": "SA", "САУДИТ": "SA",
+    "ОБЪЕДИНЁННЫЕ АРАБСКИЕ ЭМИРАТЫ": "AE",
+    "ОБЪЕДИНЕННЫЕ АРАБСКИЕ ЭМИРАТЫ": "AE", "ЭМИРАТЫ": "AE",
+    "ЮЖНАЯ КОРЕЯ": "KR", "КОРЕЯ": "KR",
+    "НОВАЯ ЗЕЛАНДИЯ": "NZ", "АВСТРАЛИЯ": "AU",
+    "ГОНКОНГ": "HK", "ТАЙВАНЬ": "TW", "СИНГАПУР": "SG", "КИТАЙ": "CN",
+    "ЯПОНИЯ": "JP", "ИНДОНЕЗИЯ": "ID", "МАЛАЙЗИЯ": "MY",
+    "ТАИЛАНД": "TH", "ФИЛИППИНЫ": "PH", "ВЬЕТНАМ": "VN",
+    "ИЗРАИЛЬ": "IL", "КАТАР": "QA", "КУВЕЙТ": "KW",
+    "ЮЖНАЯ АФРИКА": "ZA", "НИГЕРИЯ": "NG", "ЕГИПЕТ": "EG",
+    "МЕКСИКА": "MX", "ЧИЛИ": "CL", "КОЛУМБИЯ": "CO", "ПЕРУ": "PE",
+    "ФРАНЦИЯ": "FR", "ИТАЛИЯ": "IT", "ИСПАНИЯ": "ES",
+    "ПОРТУГАЛИЯ": "PT", "НИДЕРЛАНДЫ": "NL", "ГОЛЛАНДИЯ": "NL",
+    "БЕЛЬГИЯ": "BE", "АВСТРИЯ": "AT", "ШВЕЙЦАРИЯ": "CH",
+    "ИРЛАНДИЯ": "IE", "ШВЕЦИЯ": "SE", "НОРВЕГИЯ": "NO",
+    "ДАНИЯ": "DK", "ФИНЛЯНДИЯ": "FI", "ЧЕХИЯ": "CZ", "ВЕНГРИЯ": "HU",
+    "РУМЫНИЯ": "RO", "ГРЕЦИЯ": "GR", "БЕЛАРУСЬ": "BY", "БЕЛОРУССИЯ": "BY",
+    "АРМЕНИЯ": "AM", "ГРУЗИЯ": "GE", "АЗЕРБАЙДЖАН": "AZ",
 }
 
 # Поля, в которых поставщик может назвать регион прямо. Сказанное полем
@@ -731,11 +755,29 @@ def match_denomination(rows: list[Denomination], region: str,
 
     if not same_region:
         if not exact:
-            near = ", ".join(str(int(r.value)) for r in sorted(
-                rows, key=lambda r: r.value)[:8])
+            # Подсказываем номиналы ЭТОГО региона. Список из чужих
+            # регионов хуже пустого: продавец поправит номинал на тот,
+            # которого у него всё равно нет, и придёт сюда второй раз.
+            #
+            # И через shown_number, а не int: у денежных карт номинал
+            # бывает дробным, и «9» вместо «9.99» — это совет купить то,
+            # чего не существует.
+            mine = [r for r in rows
+                    if not r.region or r.region.upper() == want_region]
+            near = ", ".join(shown_number(v) for v in
+                             sorted({r.value for r in (mine or rows)})[:8])
+
+            if mine:
+                where = f". В регионе {want_region} есть: {near}" if near \
+                    else ""
+            elif near:
+                where = (f". В регионе {want_region or '—'} нет ни одного, в "
+                         f"других есть: {near}")
+            else:
+                where = ""
+
             return None, (
-                f"номинала {shown_number(want)} у поставщика нет"
-                + (f". Есть: {near}" if near else "")
+                f"номинала {shown_number(want)} у поставщика нет" + where
                 + ". Подбирать похожий бот не станет — это чужие деньги")
 
         got = ", ".join(sorted({r.region for r in exact if r.region}))
@@ -891,9 +933,19 @@ REGION_CODES = frozenset((
 
 _WORD = re.compile(r"[A-Za-zА-Яа-яЁё]{2,12}")
 
-# Названия регионов, длинные первыми: «SOUTH KOREA» должна сработать
-# раньше, чем «KOREA», иначе двухсловные названия не прочитаются никогда.
-_REGION_PHRASES = tuple(sorted(REGION_NAMES, key=len, reverse=True))
+# Названия регионов словом — и английские, и русские в одном месте.
+#
+# Длинные первыми: «SOUTH KOREA» должна сработать раньше, чем «KOREA»,
+# иначе двухсловные названия не прочитаются никогда.
+#
+# Двухбуквенных здесь нет нарочно: они разбираются отдельно и только
+# заглавными. Иначе «Apple Gift Card in Turkey» читалось бы как Индия —
+# «in» это IN.
+_PHRASE_CODE = dict(REGION_ALIASES)
+_PHRASE_CODE.update(REGION_NAMES)
+
+_REGION_PHRASES = tuple(sorted((w for w in _PHRASE_CODE if len(w) > 2),
+                               key=len, reverse=True))
 
 
 def _spellings(value) -> tuple:
@@ -957,7 +1009,7 @@ def region_in(text: str) -> str:
     # Длинные названия раньше коротких: «SOUTH KOREA» сильнее, чем «KOREA».
     for phrase in _REGION_PHRASES:
         if f" {phrase} " in upper:
-            return REGION_NAMES[phrase]
+            return _PHRASE_CODE[phrase]
 
     for word in _WORD.findall(name):
         code = word.upper()

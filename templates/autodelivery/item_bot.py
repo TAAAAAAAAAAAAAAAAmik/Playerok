@@ -79,9 +79,10 @@ import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
 from auth import open_account, sign_in                        # noqa: E402
 from cards import CARDS, card_by_slug                         # noqa: E402
-from catalog import (card_for_title, denominations_for,       # noqa: E402
-                     nominal_from_title, nominal_shown, render,
-                     shown_number, whose)
+from catalog import (UNITS, card_for_title, denominations_for,  # noqa: E402
+                     is_card_order, match_denomination, measure_of,
+                     nominal_from_title, nominal_shown, region_in,
+                     render, shown_number, whose)
 import emailauth                                              # noqa: E402
 from alarm import COOKIES_ADVICE                              # noqa: E402
 from owner import normalize_cookies                           # noqa: E402
@@ -281,7 +282,7 @@ def region_choices(draft=None) -> list:
     шестьдесят — просто у поставщика их сейчас нет или их название не
     разобралось. Спрятать регион молча — значит соврать про умения.
     """
-    card = card_for_title(CARDS, str(getattr(draft, "name", "") or ""))
+    card = card_of_draft(draft)
     found = supplier_regions(card) if card is not None else []
     # Ходовые сразу за ними: без каталога список иначе начинается с «AE,
     # AM, AR» по алфавиту, а GL и RU уезжают на вторую страницу — то есть
@@ -345,6 +346,84 @@ def region_buttons(draft=None, page: int = 0):
     keys.append(CANCEL)
 
     return keys
+
+
+def card_of_draft(draft=None):
+    """Какая карта у этого черновика: по названию, иначе по игре.
+
+    Название бывает ещё не спрошено — регион теперь спрашивается раньше, —
+    а игру продавец выбрал первым делом, и «Xbox» узнаётся по ней не хуже.
+    """
+    for where in (str(getattr(draft, "name", "") or ""),
+                  str((getattr(draft, "game", None) or {}).get("name") or ""),
+                  str((getattr(draft, "category", None) or {}).get("name")
+                      or "")):
+        card = card_for_title(CARDS, where) if where else None
+
+        if card is not None:
+            return card
+
+    return None
+
+
+def name_note(draft=None) -> str:
+    """Подсказка к названию: пример на карте и регионе продавца.
+
+    Номинал бот читает из названия числом, и «Xbox Gift Card TRY 100» —
+    это уже не то же самое, что «Xbox 100 TRY за 900 рублей». Показать
+    пример дешевле, чем объяснять разбор.
+    """
+    card = card_of_draft(draft)
+
+    if card is None:
+        return ""
+
+    region = str(getattr(draft, "region", "") or "")
+    measure = measure_of(card, region)
+    example = render(card.ad_title, card, "100", region, "") if card.ad_title \
+        else ""
+
+    lines = []
+
+    if example:
+        lines.append(f"Пример: «{example}»")
+
+    if getattr(card, "unit", UNITS) != UNITS and measure:
+        lines.append(f"Число в названии — номинал в {measure} (валюта "
+                     f"региона {region}), а не цена в рублях.")
+    else:
+        lines.append("Число в названии бот прочитает как номинал.")
+
+    return "\n\n" + "\n".join(lines)
+
+
+def nominal_note(draft=None) -> str:
+    """В чём считать номинал. Для денежных карт это не мелочь.
+
+    Xbox в Турции продаётся в ЛИРАХ, а не в долларах и не в рублях. «10»
+    для турецкой карты — это десять лир, и у поставщика бот будет искать
+    именно их. Продавец, думающий в долларах, выставит номинал впятеро
+    крупнее, чем собирался, и отдаст его за свою же рублёвую цену.
+    """
+    card = card_of_draft(draft)
+
+    if card is None:
+        return ""
+
+    region = str(getattr(draft, "region", "") or "")
+
+    if getattr(card, "unit", UNITS) == UNITS:
+        return (f"\n\nСчитаем в {card.measure}: сколько их получит "
+                f"покупатель.")
+
+    measure = measure_of(card, region)
+
+    if not measure:
+        return "\n\nНоминал — в валюте региона кода, не в рублях."
+
+    return (f"\n\nНоминал — в валюте региона {region}: {measure}. Не в "
+            f"рублях: карта {region} у поставщика продаётся именно в "
+            f"{measure}, и номинал бот будет искать в них.")
 
 
 def region_note(draft=None, page: int = 0) -> str:
@@ -631,6 +710,67 @@ def category_options(account, category_id: str) -> list:
     return list(groups.values())
 
 
+# По этим словам характеристика площадки узнаётся как «про регион».
+# «Сервер» сюда не входит: у аккаунтов это не страна, а сервер игры, и
+# подставлять туда регион кода значит испортить чужой товар.
+REGION_OPTION_WORDS = ("регион", "region", "страна", "country", "валюта",
+                       "currency", "магазин", "store")
+
+
+def about_region(option) -> bool:
+    """Эта характеристика площадки — про регион?"""
+    where = " ".join(str(option.get(key) or "")
+                     for key in ("group", "label", "field")).lower()
+
+    return any(word in where for word in REGION_OPTION_WORDS)
+
+
+def region_choice(option, region: str):
+    """Вариант характеристики, отвечающий этому региону. → вариант или None.
+
+    Подходит ровно один — берём его. Несколько («Европа (EUR)» и
+    «Германия (EUR)» для EU) — не выбираем за продавца: он один знает, что
+    у него за карта.
+    """
+    region = str(region or "").upper()
+
+    if not region:
+        return None
+
+    found = [c for c in option.get("choices") or []
+             if region_in(str(c.get("label") or "")) == region]
+
+    return found[0] if len(found) == 1 else None
+
+
+def fill_region_options(draft) -> list:
+    """Ответить за продавца на вопросы площадки про регион. → что заполнили.
+
+    Площадка спрашивает страну своим вопросом — у Xbox это «Валюта?» с
+    тремя десятками стран. Продавец уже назвал регион боту, и спрашивать
+    то же самое второй раз — не просто лишнее нажатие: два ответа про одно
+    однажды расходятся, и тогда в объявлении «Турция», в описании «Регион
+    кода: US», а выдача покупает третье.
+    """
+    done = []
+
+    for option in getattr(draft, "options", None) or []:
+        if option.get("value") is not None or not about_region(option):
+            continue
+
+        picked = region_choice(option, getattr(draft, "region", ""))
+
+        if picked is None:
+            continue
+
+        option["value"] = picked["value"]
+        option["chosen"] = picked["label"]
+        done.append(f"{option.get('group') or 'Характеристика'}: "
+                    f"{picked['label']}")
+
+    return done
+
+
 def option_matches(choices, word: str) -> list:
     """Варианты характеристики, подходящие под слово. → [(номер, вариант)].
 
@@ -790,6 +930,10 @@ def collect(link, account, draft: wizard.Draft) -> bool:
     page = 0
 
     while True:
+        # Ответы площадке про регион бот даёт сам: регион он уже спросил.
+        # Отдельным сообщением об этом не говорим — диалог живёт в одном
+        # переписываемом экране, и заполненное видно в нём строкой «✓».
+        fill_region_options(draft)
         step = draft.step
 
         if not step:
@@ -814,6 +958,10 @@ def collect(link, account, draft: wizard.Draft) -> bool:
 
         if step == "region":
             question += region_note(draft, page)
+        elif step == "name":
+            question += name_note(draft)
+        elif step == "nominal":
+            question += nominal_note(draft)
 
         message = link.ask(screen_text(draft, question, complaint),
                            ANSWER_WAIT, buttons=buttons_for(step, draft, page))
@@ -980,16 +1128,152 @@ def make_item(link, account) -> None:
     if not collect(link, account, draft):
         return
 
-    apply_card_template(draft)
-
-    link.screen("Проверьте:\n\n" + draft.summary()
-             + "\n\n— описание —\n" + wizard.description_for(draft)
-             + "\n\nСоздаю черновик…")
-
-    if not send_draft(link, account, draft):
+    if not confirm_and_create(link, account, draft):
         return
 
     offer_template(link, draft)
+
+
+def confirm_and_create(link, account, draft) -> bool:
+    """Показать собранное вместе с проверкой выдачи и создать. → создали ли.
+
+    Проверка ДО создания, и лишний вопрос задаётся только когда есть о чём
+    спрашивать: в обычном случае продавец нажимает столько же раз, сколько
+    и раньше.
+    """
+    apply_card_template(draft)
+    check, trouble = delivery_preview(draft)
+    said = ("Проверьте:\n\n" + draft.summary()
+            + "\n\n— описание —\n" + wizard.description_for(draft)
+            + ("\n\n" + "\n".join(check) if check else ""))
+
+    if trouble:
+        # Товар на витрине, который выдача не потянет, — это оплаченный
+        # заказ без кода. Спросить сейчас дешевле, чем возвращать деньги
+        # потом.
+        answer = link.ask(said + "\n\nСоздавать такой товар?", ANSWER_WAIT,
+                          buttons=[[("✅ Да, создать", "да")],
+                                   [("✖️ Нет", "отмена")]])
+
+        if str(answer.get("text") or "").strip().lower() != "да":
+            link.screen("Не создал. Поправьте, что помечено, и начните "
+                        "заново.", buttons=MENU)
+            return False
+
+        link.screen("Создаю черновик…")
+    else:
+        link.screen(said + "\n\nСоздаю черновик…")
+
+    return bool(send_draft(link, account, draft))
+
+
+def region_conflicts(draft) -> list:
+    """Характеристики площадки, спорящие с регионом. → строки предупреждений.
+
+    Продавец мог ответить на «Валюта?» сам — в мастере «одним сообщением»
+    характеристики спрашиваются раньше, чем становится известен регион. И
+    тогда в объявлении «США (USD)», а в описании «Регион кода: TR».
+    Покупатель платит за турецкий код, площадка обещает американский, и
+    прав будет он.
+    """
+    region = str(getattr(draft, "region", "") or "").upper()
+    out = []
+
+    if not region:
+        return out
+
+    for option in getattr(draft, "options", None) or []:
+        if not about_region(option) or option.get("value") in (None, ""):
+            continue
+
+        said = region_in(str(option.get("chosen") or option.get("value")))
+
+        if said and said != region:
+            out.append(f"⚠️ «{option.get('group') or 'Характеристика'}: "
+                       f"{option.get('chosen')}» спорит с регионом кода "
+                       f"{region}. Покупатель поверит объявлению, а бот "
+                       f"купит по описанию — исправьте одно из двух.")
+
+    return out
+
+
+def delivery_preview(draft) -> tuple:
+    """Сможет ли выдача купить этот номинал. → (строки, есть ли беда).
+
+    Проверка ДО публикации, и в этом вся её ценность. Иначе товар уходит
+    на витрину, покупатель платит, и только тогда выясняется, что номинала
+    у поставщика нет, слово-опознаватель не совпало или карта выключена.
+    Узнать это за минуту до — бесплатно, узнать после — это возврат,
+    испорченный отзыв и час переписки.
+
+    Проверяем ровно тот путь, которым потом пойдёт выдача, и теми же
+    функциями: свой отдельный «почти такой же» разбор однажды разошёлся бы
+    с настоящим и успокаивал бы там, где беда.
+    """
+    lines = region_conflicts(draft)
+    name = str(getattr(draft, "name", "") or "")
+    region = str(getattr(draft, "region", "") or "")
+    nominal = getattr(draft, "nominal", None)
+    card = card_for_title(CARDS, name)
+
+    if card is None:
+        return (lines + ["⚠️ По названию я не узнаю карту — автовыдача такой товар "
+                 "не возьмёт. Допишите в название слово карты (Xbox, Apple, "
+                 "Robux) или задайте «🔤 Слово-опознаватель»."], True)
+
+    trouble = bool(lines)
+
+    conf = settings_of()
+    saved = conf.card(card.slug)
+
+    if not saved["enabled"]:
+        lines.append(f"⚠️ Выдача по «{card.title}» выключена — код бот не "
+                     f"купит. Включить: «⚙️ Автовыдача» → {card.title}.")
+
+    if not is_card_order(card, name, saved["keyword"], saved.get("stop", "")):
+        word = saved["keyword"] or "—"
+        lines.append(f"⚠️ Название не подходит под ваши настройки этой "
+                     f"карты (слово «{word}»"
+                     + (f", исключение «{saved['stop']}»"
+                        if saved.get("stop") else "")
+                     + "): выдача пройдёт мимо этого товара.")
+
+    if not nominal:
+        lines.append("⚠️ Номинала нет — выдача остановится на «номинал не "
+                     "найден».")
+
+        return lines, True
+
+    catalog, why = supplier_catalog()
+
+    if catalog is None:
+        lines.append(f"⚠️ Каталог поставщика не прочитался ({shorten(why, 50)})"
+                     f" — сможет ли выдача купить, сейчас не скажу.")
+
+        return lines, True
+
+    try:
+        rows = denominations_for(card, catalog)
+    except Exception as e:                                    # noqa: BLE001
+        lines.append(f"⚠️ Каталог разобрать не вышло: {e}")
+
+        return lines, True
+
+    row, refusal = match_denomination(rows, region, nominal)
+    measure = measure_of(card, region)
+    shown = f"{shown_number(nominal)}{(' ' + measure) if measure else ''}"
+
+    if row is None:
+        lines.append(f"⚠️ У поставщика нет {card.title} {region} на {shown}: "
+                     f"{refusal}")
+
+        return lines, True
+
+    price = f", закупка {row.price} $" if row.price else ""
+    lines.append(f"✅ Выдача сможет: {card.title} {region} · {shown} — у "
+                 f"поставщика {row.in_stock} шт{price}.")
+
+    return lines, trouble
 
 
 def apply_card_template(draft: wizard.Draft) -> None:
@@ -1001,7 +1285,11 @@ def apply_card_template(draft: wizard.Draft) -> None:
 
     Заготовка продавца сильнее нашей: он её для того и задавал.
     """
-    card = card_for_title(CARDS, draft.name)
+    # Карту узнаём и по игре: продавец мог назвать товар без слова «Xbox»
+    # («🎮ПОПОЛНЕНИЕ КОШЕЛЬКА 100₺»), а активация у карты всё равно своя, и
+    # писать в такое объявление roblox.com/redeem нельзя. Про то, что
+    # выдача такое название не узнает, скажет проверка перед созданием.
+    card = card_of_draft(draft)
 
     if card is None:
         return
@@ -1061,12 +1349,11 @@ def make_blank(link, account) -> None:
     if not ask_photos(link, draft):
         return
 
-    apply_card_template(draft)
-    link.screen("Проверьте:\n\n" + draft.summary()
-                + "\n\n— описание —\n" + wizard.description_for(draft)
-                + "\n\nСоздаю черновик…")
+    # Характеристики про регион здесь спрошены раньше, чем стал известен
+    # регион, — сверяем их с ним внутри проверки.
+    fill_region_options(draft)
 
-    if send_draft(link, account, draft):
+    if confirm_and_create(link, account, draft):
         offer_template(link, draft)
 
 

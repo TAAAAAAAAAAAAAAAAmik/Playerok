@@ -29,6 +29,14 @@ def started() -> wizard.Draft:
     return draft
 
 
+def named() -> wizard.Draft:
+    """То же, но регион уже назван: следующий вопрос — про название."""
+    draft = started()
+    draft.region = "GL"
+
+    return draft
+
+
 class StepsTest(unittest.TestCase):
     def test_marketplace_choices_come_first(self):
         """От категории зависят и способ получения, и поля. Спрашивать её
@@ -41,11 +49,20 @@ class StepsTest(unittest.TestCase):
         draft.category = CATEGORY
         self.assertEqual(draft.step, "obtaining")
         draft.obtaining = OBTAINING
-        self.assertEqual(draft.step, "name")
+        self.assertEqual(draft.step, "region")
+
+    def test_the_region_is_asked_before_the_marketplace_options(self):
+        """Площадка спрашивает страну своим вопросом («Валюта?» у Xbox), и
+        зная регион заранее, бот отвечает на него сам. Иначе продавец
+        отвечает дважды — а два ответа про одно однажды разойдутся."""
+        draft = started()
+
+        self.assertEqual(draft.step, "region")
 
     def test_order_puts_cheap_to_redo_first(self):
         """Передумал на названии — не потратил время на картинки."""
         draft = started()
+        draft.region = "GL"
 
         self.assertEqual(draft.step, "name")
         draft.name = "80 Robux"
@@ -53,8 +70,6 @@ class StepsTest(unittest.TestCase):
         draft.price = 100
         self.assertEqual(draft.step, "nominal")
         draft.nominal = 80
-        self.assertEqual(draft.step, "region")
-        draft.region = "GL"
         self.assertEqual(draft.step, "description")
         draft.description = "Мои коды лучшие."
         self.assertEqual(draft.step, "photos")
@@ -190,7 +205,7 @@ class RegionTest(unittest.TestCase):
 
 class ApplyTest(unittest.TestCase):
     def test_answer_moves_the_draft_forward(self):
-        draft = started()
+        draft = named()
 
         self.assertEqual(wizard.apply(draft, "80 Robux"), "")
         self.assertEqual(draft.name, "80 Robux")
@@ -199,17 +214,17 @@ class ApplyTest(unittest.TestCase):
     def test_the_nominal_is_taken_from_the_name_without_asking(self):
         """Спрашивать то, что уже знаешь, — лишнее нажатие на каждом
         товаре."""
-        draft = started()
+        draft = named()
         wizard.apply(draft, "Roblox 1000 Robux")
         wizard.apply(draft, "700")
 
         self.assertEqual(draft.nominal, 1000)
-        self.assertEqual(draft.step, "region")
+        self.assertEqual(draft.step, "description")
 
     def test_a_name_without_a_number_is_asked_about(self):
         """Иначе такое объявление молча нельзя было бы выдать: движок
         остановится на «в названии нет числа», когда уже заплачено."""
-        draft = started()
+        draft = named()
         wizard.apply(draft, "Робуксы дёшево")
         wizard.apply(draft, "700")
 
@@ -218,10 +233,10 @@ class ApplyTest(unittest.TestCase):
         self.assertTrue(wizard.apply(draft, "сколько-то"))
         self.assertEqual(wizard.apply(draft, "1000"), "")
         self.assertEqual(draft.nominal, 1000)
-        self.assertEqual(draft.step, "region")
+        self.assertEqual(draft.step, "description")
 
     def test_bad_answer_keeps_the_step(self):
-        draft = started()
+        draft = named()
         draft.name = "x"
 
         self.assertTrue(wizard.apply(draft, "дорого"))
