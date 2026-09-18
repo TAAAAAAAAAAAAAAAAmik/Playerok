@@ -1158,6 +1158,126 @@ class RegionInTheWizardTest(unittest.TestCase):
         self.assertIn("Страница 2 из", link.asked[1][0])
 
 
+class HealthMenuTest(unittest.TestCase):
+    """🩺 Проверка выдачи прямо в телеграме.
+
+    Всё то же умеет doctor.py, но он в терминале, а продавец работает с
+    телефона. Диагностика, до которой не дотянуться, — не диагностика:
+    покупка висела без кода сутками ровно поэтому.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        self.key = os.environ.pop("APPROUTE_KEY", None)
+        self.saved = item_bot._CATALOG.copy()
+        item_bot._CATALOG.update({"raw": None, "at": 0})
+        self.live = item_bot.alive.delivery_running
+        item_bot.alive.delivery_running = lambda: True
+
+    def tearDown(self):
+        item_bot.alive.delivery_running = self.live
+        item_bot._CATALOG.update(self.saved)
+
+        if self.key is not None:
+            os.environ["APPROUTE_KEY"] = self.key
+
+    def report(self):
+        link = FakeLink([])
+        item_bot.health_menu(link, None)
+
+        return link.said[-1]
+
+    def test_a_dead_delivery_is_the_first_thing_said(self):
+        """При мёртвом процессе остальное неважно: кода не будет."""
+        item_bot.alive.delivery_running = lambda: False
+        said = self.report()
+
+        self.assertIn("НЕ запущена", said)
+        self.assertIn("run_bot.sh", said)
+
+    def test_a_live_delivery_is_said_too(self):
+        self.assertIn("✅ Автовыдача запущена", self.report())
+
+    def test_an_uncheckable_process_is_not_called_dead(self):
+        """На урезанной системе pgrep может не быть вовсе."""
+        item_bot.alive.delivery_running = lambda: None
+        said = self.report()
+
+        self.assertIn("проверить не вышло", said)
+        self.assertNotIn("НЕ запущена", said)
+
+    def test_the_mute_is_named(self):
+        item_bot.settings_of().set_paused(True)
+
+        self.assertIn("Глушка включена", self.report())
+
+    def test_held_orders_are_named(self):
+        conf = item_bot.settings_of()
+        conf.store.shared().setdefault("held", {})["o1"] = {"title": "т",
+                                                            "at": 0}
+        conf.store.save()
+
+        self.assertIn("На паузе заказов: 1", self.report())
+
+    def test_a_missing_supplier_key_is_named(self):
+        self.assertIn("Ключа поставщика нет", self.report())
+
+    def test_no_enabled_card_is_named(self):
+        self.assertIn("Не включена ни одна карта", self.report())
+
+    def test_the_keyword_is_shown(self):
+        """По нему бот и решает, его ли это заказ, — а ошибка в нём
+        выглядит как «выдача не работает»."""
+        conf = item_bot.settings_of()
+        conf.set_enabled("robux", True)
+        conf.set_keyword("robux", "промокод")
+        said = self.report()
+
+        self.assertIn("промокод", said)
+
+    def test_the_stop_word_is_shown_too(self):
+        conf = item_bot.settings_of()
+        conf.set_enabled("robux", True)
+        conf.set_stop("robux", "геймпасс")
+
+        self.assertIn("геймпасс", self.report())
+
+    def test_an_empty_journal_points_at_the_keyword(self):
+        self.assertIn("не признал их своими", self.report())
+
+    def test_the_last_deliveries_are_listed(self):
+        conf = item_bot.settings_of()
+        conf.store.conf("robux").setdefault("log", []).append(
+            {"order": "1f1b2ad0-5c99", "state": "выдан", "at": 100})
+        conf.store.save()
+        said = self.report()
+
+        self.assertIn("1f1b2ad0", said)
+        self.assertIn("выдан", said)
+
+    def test_a_refusal_shows_its_reason(self):
+        conf = item_bot.settings_of()
+        conf.store.conf("robux").setdefault("log", []).append(
+            {"order": "77", "state": "отказ", "at": 100,
+             "why": "номинал не найден"})
+        conf.store.save()
+
+        self.assertIn("номинал не найден", self.report())
+
+    def test_the_cure_is_collected_at_the_end(self):
+        item_bot.alive.delivery_running = lambda: False
+
+        self.assertIn("Что сделать:", self.report())
+
+    def test_it_is_reachable_by_the_button(self):
+        link = FakeLink(["проверка"])
+        item_bot.handle_command(link, None, "проверка")
+
+        self.assertIn("Проверка выдачи", link.said[-1])
+
+
 class SettingsMenuTest(unittest.TestCase):
     """«Автовыдача» — кнопка, за которой продавец включает выдачу кодов.
 

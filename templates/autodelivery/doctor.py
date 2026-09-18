@@ -72,19 +72,10 @@ def env_check() -> None:
 
 
 def running() -> dict:
-    """Что из ботов сейчас живо."""
-    alive = {}
+    """Что из ботов сейчас живо. Проверка общая с ботом и уведомлениями."""
+    import alive
 
-    for name in BOTS:
-        try:
-            found = subprocess.run(
-                ["pgrep", "-f", f"python3 -u {name}.py"],
-                capture_output=True, text=True, timeout=10)
-            alive[name] = bool(found.stdout.strip())
-        except (OSError, subprocess.SubprocessError):
-            alive[name] = None
-
-    return alive
+    return {name: alive.running(name) for name in BOTS}
 
 
 def bots_check() -> None:

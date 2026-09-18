@@ -32,6 +32,7 @@ from auth import sign_in                                      # noqa: E402
 from playerok import is_auth_error                            # noqa: E402
 from envfile import load_env_file                             # noqa: E402
 import statepath                                  # noqa: E402
+import alive                                      # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -105,6 +106,40 @@ def main() -> None:
          system_id=str(getattr(account, "system_chat_id", "") or ""))
 
 
+# Про мёртвую выдачу говорим не чаще, чем раз в это время: покупок может
+# прийти десяток подряд, и десять одинаковых предупреждений — это уже не
+# помощь, а шум, в котором потеряется сама покупка.
+WARN_EVERY = 600.0
+
+_warned = {"at": 0.0}
+
+
+def delivery_warning(text: str, now=None) -> str:
+    """Приписка к уведомлению о покупке, если выдача не запущена.
+
+    Самый дорогой случай: уведомления живы, выдача мертва. Продавцу
+    приходит «💰 Покупка», покупатель пишет «а где промокод», а кода нет и
+    не будет — и никто об этом не скажет, потому что сказать должен был бы
+    тот, кто не запущен.
+    """
+    if not text.startswith("💰"):
+        return ""
+
+    if alive.delivery_running() is not False:
+        # Работает или проверить не вышло. Пугать догадкой не будем.
+        return ""
+
+    now = time.time() if now is None else now
+
+    if now - _warned["at"] < WARN_EVERY:
+        return ""
+
+    _warned["at"] = now
+
+    return ("\n\n⚠️ Автовыдача не запущена — кода покупатель не получит. "
+            "Выдайте вручную и поднимите её:\n" + alive.start_hint())
+
+
 def pump(listener, link, seen, me: str, show, alarm=None,
          sleeper=time.sleep, support_id: str = "",
          system_id: str = "") -> None:
@@ -137,6 +172,7 @@ def pump(listener, link, seen, me: str, show, alarm=None,
                     seen.remember(event)
                     continue
 
+                text += delivery_warning(text)
                 log.info("%s", text.splitlines()[0])
 
                 if link.say(text):

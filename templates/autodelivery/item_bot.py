@@ -68,6 +68,7 @@ import listing                                                # noqa: E402
 import copyitem                                               # noqa: E402
 import grouping                                               # noqa: E402
 import statepath                                              # noqa: E402
+import alive                                                  # noqa: E402
 import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
@@ -101,7 +102,8 @@ MENU = [[("➕ Новый товар", "новый товар"),
         [("🏷 Правила копий", "копии"),
          ("⚙️ Автовыдача", "настройки")],
         [("🔑 Проверить сессию", "проверить"),
-         ("👤 Аккаунт", "аккаунт")]]
+         ("👤 Аккаунт", "аккаунт")],
+        [("🩺 Проверка выдачи", "проверка")]]
 
 # Команды в меню Telegram — та кнопка слева от поля ввода. Без неё их
 # надо помнить и набирать вслепую.
@@ -116,6 +118,7 @@ COMMANDS = [
     ("copies", "Правила копий: предел одинаковых"),
     ("delivery", "Настройки автовыдачи"),
     ("check", "Проверить сессию"),
+    ("health", "Проверка выдачи: почему не выдаёт"),
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
@@ -144,6 +147,8 @@ BLANK_WORDS = ("бланк", "одним сообщением", "одно соо
 COPIES_WORDS = ("копии", "правила копий", "копии и цены", "/copies")
 COPY_WORDS = ("копировать", "копия", "копия с витрины", "/copy")
 SERIES_WORDS = ("серия", "серия номиналов", "номиналы", "/series")
+HEALTH_WORDS = ("проверка", "проверка выдачи", "почему не работает",
+                "/health")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -3236,6 +3241,113 @@ def drafts_menu(link, account) -> None:
     publish_step(link, account, draft_id, price)
 
 
+def health_menu(link, account) -> None:
+    """🩺 Проверка выдачи: почему кода не будет — прямо в телеграме.
+
+    Всё то же самое умеет doctor.py, но он живёт в терминале, а продавец
+    работает с телефона. Диагностика, до которой не дотянуться, не
+    диагностика: беда стояла сутками ровно потому, что «зайдите на сервер
+    и наберите» — это не ответ человеку с телефоном в руке.
+
+    Проверяем по порядку то, из-за чего кода не бывает чаще всего:
+    запущена ли выдача, не заглушена ли, что с ключом поставщика, узнаёт
+    ли бот свои объявления и чем кончились последние выдачи.
+    """
+    link.screen("Проверяю…")
+    lines = ["🩺 Проверка выдачи", ""]
+    bad = []
+
+    # 1. Запущена ли выдача. Первое, потому что при мёртвом процессе
+    #    остальное неважно: кода не будет, как ни настраивай.
+    live = alive.delivery_running()
+
+    if live is False:
+        lines.append("⛔ Автовыдача НЕ запущена — коды не выдаются вовсе.")
+        bad.append("поднимите её на сервере:\n" + alive.start_hint())
+    elif live is None:
+        lines.append("⚠️ Запущена ли автовыдача, проверить не вышло.")
+    else:
+        lines.append("✅ Автовыдача запущена.")
+
+    # 2. Глушка.
+    conf = settings_of()
+
+    if conf.paused():
+        lines.append("⛔ Глушка включена — бот ничего не купит.")
+        bad.append("снимите её: «⚙️ Автовыдача» → «⛔ Глушка»")
+    else:
+        lines.append("✅ Глушка снята.")
+
+    held = conf.held()
+
+    if held:
+        lines.append(f"⚠️ На паузе заказов: {len(held)} — они ждут вашего "
+                     f"решения.")
+        bad.append("разберите их: «⚙️ Автовыдача» → «⛔ Глушка»")
+
+    # 3. Ключ поставщика: без него покупать нечем.
+    if not os.environ.get("APPROUTE_KEY", "").strip():
+        lines.append("⛔ Ключа поставщика нет — покупать коды нечем.")
+        bad.append("допишите в .env строку APPROUTE_KEY=…")
+    else:
+        catalog, why = supplier_catalog()
+
+        if catalog is None:
+            lines.append(f"⛔ Каталог поставщика не читается: {shorten(why, 60)}")
+            bad.append("проверьте ключ и APPROUTE_PROXY в .env")
+        else:
+            lines.append("✅ Каталог поставщика читается.")
+
+    # 4. Включённые карты и слова-опознаватели.
+    on = [c for c in CARDS if conf.card(c.slug)["enabled"]]
+
+    if not on:
+        lines.append("⛔ Не включена ни одна карта.")
+        bad.append("«⚙️ Автовыдача» → товар → «▶️ Включить»")
+    else:
+        lines.append("")
+        lines.append("Включено:")
+
+        for card in on:
+            saved = conf.card(card.slug)
+            word = saved["keyword"] or "— любое название карты"
+            stop = saved.get("stop") or ""
+            lines.append(f"  {card.emoji} {card.title}: слово «{word}»"
+                         + (f", кроме «{stop}»" if stop else ""))
+
+    # 5. Чем кончились последние выдачи. Самое полезное место: тут видно,
+    #    дошло ли до покупки и на чём встало.
+    lines += ["", "Последние выдачи:"]
+    rows = []
+
+    for card in CARDS:
+        for entry in conf.store.conf(card.slug).get("log") or []:
+            if isinstance(entry, dict) and entry.get("order"):
+                rows.append((float(entry.get("at") or 0), card, entry))
+
+    rows.sort(key=lambda row: -row[0])
+
+    if not rows:
+        lines.append("  — ни одной. Бот ещё не брался ни за один заказ.")
+        lines.append("  Если покупки были, значит он не признал их своими: "
+                     "проверьте слово-опознаватель выше.")
+    else:
+        for at, card, entry in rows[:5]:
+            state = str(entry.get("state") or "?")
+            why = str(entry.get("why") or "")
+            lines.append(f"  {card.emoji} заказ {str(entry.get('order'))[:8]}…"
+                         f" — {state}" + (f": {shorten(why, 60)}" if why else ""))
+
+    if bad:
+        lines += ["", "Что сделать:"]
+        lines += [f"  • {what}" for what in bad]
+    elif live is not False:
+        lines += ["", "Всё на месте. Если код не пришёл — покажите это "
+                  "сообщение вместе с последней покупкой."]
+
+    link.screen("\n".join(lines), buttons=MENU)
+
+
 def check_session(link, account) -> None:
     """Проверить, жива ли сессия кабинета.
 
@@ -3676,6 +3788,8 @@ def handle_command(link, account, text: str):
         settings_menu(link)
     elif text in CHECK_WORDS:
         check_session(link, account)
+    elif text in HEALTH_WORDS:
+        health_menu(link, account)
     elif text in ACCOUNT_WORDS:
         account = accounts_menu(link, account)
     elif not wizard.cancelled(text):

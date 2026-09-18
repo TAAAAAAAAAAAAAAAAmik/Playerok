@@ -362,6 +362,70 @@ class DeliveryTest(unittest.TestCase):
         self.assertFalse(seen.is_new(event))
 
 
+class DeliveryWarningTest(unittest.TestCase):
+    """Уведомления живы, выдача мертва — самый дорогой случай.
+
+    Продавцу приходит «💰 Покупка», покупатель пишет «а где промокод», а
+    кода нет и не будет: сказать об этом должен был бы тот, кто не
+    запущен.
+    """
+
+    def setUp(self):
+        import notify_bot
+
+        self.bot = notify_bot
+        self.live = notify_bot.alive.delivery_running
+        notify_bot._warned["at"] = 0.0
+
+    def tearDown(self):
+        self.bot.alive.delivery_running = self.live
+        self.bot._warned["at"] = 0.0
+
+    def dead(self):
+        self.bot.alive.delivery_running = lambda: False
+
+    def test_a_purchase_warns_when_delivery_is_dead(self):
+        self.dead()
+        got = self.bot.delivery_warning("💰 Покупка: «товар»", now=1000)
+
+        self.assertIn("не запущена", got)
+        self.assertIn("run_bot.sh", got)
+
+    def test_a_live_delivery_says_nothing(self):
+        self.bot.alive.delivery_running = lambda: True
+
+        self.assertEqual(self.bot.delivery_warning("💰 Покупка", now=1000), "")
+
+    def test_an_uncheckable_process_says_nothing(self):
+        """Пугать догадкой не будем: pgrep может отсутствовать вовсе."""
+        self.bot.alive.delivery_running = lambda: None
+
+        self.assertEqual(self.bot.delivery_warning("💰 Покупка", now=1000), "")
+
+    def test_only_purchases_are_warned_about(self):
+        """Сообщение в чате выдачи не ждёт."""
+        self.dead()
+
+        self.assertEqual(self.bot.delivery_warning("💬 vasya: привет",
+                                                   now=1000), "")
+
+    def test_it_is_not_repeated_on_every_purchase(self):
+        """Десять одинаковых предупреждений — шум, в котором потеряется
+        сама покупка."""
+        self.dead()
+        self.bot.delivery_warning("💰 Покупка", now=1000)
+
+        self.assertEqual(self.bot.delivery_warning("💰 Покупка", now=1100), "")
+
+    def test_it_comes_back_later(self):
+        self.dead()
+        self.bot.delivery_warning("💰 Покупка", now=1000)
+        later = self.bot.delivery_warning("💰 Покупка",
+                                          now=1000 + self.bot.WARN_EVERY + 1)
+
+        self.assertIn("не запущена", later)
+
+
 class ReconnectTest(unittest.TestCase):
     """Обрыв — обычное дело, и он не должен останавливать бота."""
 
