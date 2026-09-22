@@ -2414,7 +2414,8 @@ class StatsMenuTest(unittest.TestCase):
         link = self.screen(["отмена"])
         names = self.buttons(link, 0)
 
-        for want in ("💰 Деньги", "🧾 Продажи", "💹 Профит", "⭐ Отзывы"):
+        for want in ("💸 Что вывести", "💰 Деньги", "🧾 Продажи по категориям",
+                     "💹 Профит", "⭐ Отзывы"):
             self.assertIn(want, names)
 
     def test_a_missing_balance_is_said_plainly(self):
@@ -2530,6 +2531,51 @@ class StatsMenuTest(unittest.TestCase):
 
         self.assertIn("Сделки прочитать не вышло", said)
         self.assertIn("Можно вывести", said)
+
+    # ---------- что можно вывести ----------
+
+    def test_the_withdrawable_is_split_by_category(self):
+        said = self.asked([item_bot.PICK_STAT + "withdraw", "отмена"])
+
+        self.assertIn("Всего можно вывести: 12 300 ₽", said)
+        self.assertIn("Xbox", said)
+        self.assertIn("≈", said)
+
+    def test_the_split_is_called_an_estimate(self):
+        """Площадка держит деньги общей кучей и по товарам их не делит."""
+        said = self.asked([item_bot.PICK_STAT + "withdraw", "отмена"])
+
+        self.assertIn("прикидка", said)
+        self.assertIn("общей кучей", said)
+
+    def test_the_waiting_money_is_split_too(self):
+        said = self.asked([item_bot.PICK_STAT + "withdraw", "отмена"])
+
+        self.assertIn("Ждёт подтверждения покупателями", said)
+        self.assertIn("3 000 ₽", said)
+
+    def test_the_confirmed_sum_is_shown_beside_the_share(self):
+        said = self.asked([item_bot.PICK_STAT + "withdraw", "отмена"])
+
+        self.assertIn("подтверждено 900 ₽", said)
+
+    def test_the_category_list_shows_what_can_be_taken(self):
+        said = self.asked([item_bot.PICK_STAT + "sales", "отмена"])
+
+        self.assertIn("можно забрать 900 ₽", said)
+        self.assertIn("ждёт 3 000 ₽", said)
+
+    def test_without_a_balance_it_says_so(self):
+        said = self.asked([item_bot.PICK_STAT + "withdraw", "отмена"],
+                          account=self.account(balance=False))
+
+        self.assertIn("не сказала", said)
+
+    def test_the_money_screen_leads_here(self):
+        said = self.asked([item_bot.PICK_STAT + "money",
+                           item_bot.PICK_STAT + "withdraw", "отмена"])
+
+        self.assertIn("Что можно вывести", said)
 
     # ---------- профит ----------
 

@@ -4439,8 +4439,9 @@ def stats_menu(link, account, fresh: bool = False) -> None:
                      f"{told.average:.2f} · всего {told.total}"
                      + (f" · ниже четвёрки {told.bad}" if told.bad else ""))
 
-    keys = [[("💰 Деньги", PICK_STAT + "money"),
-             ("🧾 Продажи", PICK_STAT + "sales")],
+    keys = [[("💸 Что вывести", PICK_STAT + "withdraw"),
+             ("💰 Деньги", PICK_STAT + "money")],
+            [("🧾 Продажи по категориям", PICK_STAT + "sales")],
             [("💹 Профит", PICK_STAT + "profit"),
              ("⭐ Отзывы", PICK_STAT + "reviews")],
             [("💱 Курс доллара", PICK_STAT + "rate"),
@@ -4458,6 +4459,8 @@ def stats_menu(link, account, fresh: bool = False) -> None:
     if what == "fresh":
         forget_deals()
         stats_menu(link, account, fresh=True)
+    elif what == "withdraw":
+        stats_withdraw(link, account)
     elif what == "money":
         stats_money(link, account)
     elif what == "sales":
@@ -4560,10 +4563,92 @@ def stats_money(link, account) -> None:
         lines.append("«Ждёт подтверждения» — ещё не ваши деньги: сделку "
                      "могут откатить.")
 
-    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=back_keys())
+    answer = link.ask("\n".join(lines), ANSWER_WAIT,
+                      buttons=back_keys([[("💸 Что вывести по категориям",
+                                           PICK_STAT + "withdraw")]]))
+    text = str(answer.get("text") or "").strip()
 
-    if not stats_back(link, account, answer.get("text")):
-        link.screen("Готово.", buttons=MENU)
+    if stats_back(link, account, text):
+        return
+
+    if text == PICK_STAT + "withdraw":
+        stats_withdraw(link, account)
+        return
+
+    link.screen("Готово.", buttons=MENU)
+
+
+def stats_withdraw(link, account) -> None:
+    """💸 Что можно вывести — целиком и по категориям.
+
+    Точное число одно: то, что говорит площадка. По товарам она деньги не
+    делит — держит общей кучей, — поэтому разбивка считается по доле
+    подтверждённых продаж и называется прикидкой. Назвать её фактом
+    значило бы обещать деньги, которых на этой категории может и не быть.
+    """
+    money = balance_of(account)
+    can = float(getattr(money, "withdrawable", 0) or 0) if money else 0.0
+    soon = float(getattr(money, "pending_income", 0) or 0) if money else 0.0
+    found, whole, why = groups_of(account)
+    lines = ["💸 Что можно вывести", ""]
+
+    if money is None:
+        lines.append("Площадку спросить не вышло — сколько можно вывести, "
+                     "она не сказала.")
+    else:
+        lines.append(f"Всего можно вывести: {stats.money(can)}")
+        lines.append(f"Ждёт подтверждения: {stats.money(soon)}")
+
+    if why:
+        lines += ["", f"Сделки прочитать не вышло: {shorten(why, 50)}"]
+        link.screen("\n".join(lines), buttons=MENU)
+
+        return
+
+    rows = sales.shares(found, can, "released")
+
+    if rows and can:
+        lines += ["", "По категориям — прикидка по доле подтверждённых "
+                      "продаж. Площадка держит деньги общей кучей и по "
+                      "товарам их не делит:", ""]
+
+        for _, one, share, got in rows[:MAX_CHOICES]:
+            lines.append(f"{one.label}: ≈ {stats.money(got)} "
+                         f"({share:.0%}, подтверждено "
+                         f"{stats.money(one.released)})")
+    elif can:
+        lines += ["", "Подтверждённых продаж в прочитанных сделках нет — "
+                      "делить по категориям нечего."]
+
+    waiting = sales.shares(found, soon, "waiting")
+
+    if waiting:
+        lines += ["", "⏳ Ждёт подтверждения покупателями:", ""]
+
+        for _, one, share, _got in waiting[:MAX_CHOICES]:
+            lines.append(f"{one.label}: {stats.money(one.waiting)} "
+                         f"({share:.0%})")
+
+        lines += ["", "Эти деньги станут доступны, когда покупатели "
+                      "подтвердят заказы."]
+
+    if not whole:
+        lines += ["", "⚠️ Список сделок неполный — площадка просила сбавить "
+                      "темп. Доли посчитаны по прочитанному."]
+
+    answer = link.ask("\n".join(lines), ANSWER_WAIT,
+                      buttons=back_keys([[("🧾 Продажи по категориям",
+                                           PICK_STAT + "sales")]]))
+    text = str(answer.get("text") or "").strip()
+
+    if stats_back(link, account, text):
+        return
+
+    if text == PICK_STAT + "sales":
+        stats_sales(link, account)
+        return
+
+    link.screen("Готово.", buttons=MENU)
 
 
 def stats_sales(link, account, fresh: bool = False) -> None:
@@ -4591,6 +4676,9 @@ def stats_sales(link, account, fresh: bool = False) -> None:
         share = one.sold / total.sold * 100 if total.sold else 0
         lines.append(f"{one.label}: {stats.money(one.sold)} "
                      f"({one.count}) · {share:.0f}%")
+        lines.append(f"    можно забрать {stats.money(one.released)}"
+                     + (f" · ждёт {stats.money(one.waiting)}"
+                        if one.waiting else ""))
         keys.append([(f"{shorten(one.label, 24)} — "
                       f"{stats.money(one.sold)}", PICK_STAT + "g:" + key)])
 

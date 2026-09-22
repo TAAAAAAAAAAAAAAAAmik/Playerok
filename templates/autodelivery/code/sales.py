@@ -149,3 +149,39 @@ def total_of(found: dict) -> Money:
         whole.unknown += one.unknown
 
     return whole
+
+
+def shares(found: dict, money: float, field: str = "released") -> list:
+    """Разложить сумму по категориям в долях их продаж.
+
+    → [(ключ, Money, доля 0..1, сколько приходится)], крупные первыми.
+
+    Зачем это нужно и почему это ПРИКИДКА. Площадка держит деньги общей
+    кучей: сколько из доступного к выводу пришло с Xbox, а сколько с
+    аккаунтов, она не говорит — у неё просто одна сумма. Разложить её
+    можно только по доле подтверждённых продаж, и это честная оценка, а
+    не факт. Поэтому доля считается тут, а называется прикидкой там, где
+    показывается.
+
+    Если продаж нет вовсе, делить нечего: возвращается пустой список, а
+    не деление на ноль и не «поровну».
+    """
+    rows = [(key, one, float(getattr(one, field, 0.0) or 0.0))
+            for key, one in found.items()]
+    whole = sum(value for _, _, value in rows)
+
+    if whole <= 0:
+        return []
+
+    out = []
+
+    for key, one, value in rows:
+        if value <= 0:
+            continue
+
+        share = value / whole
+        out.append((key, one, share, share * float(money or 0.0)))
+
+    out.sort(key=lambda row: -row[3])
+
+    return out

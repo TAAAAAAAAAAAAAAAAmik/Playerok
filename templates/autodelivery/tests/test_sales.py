@@ -126,5 +126,59 @@ class ByCardTest(unittest.TestCase):
         self.assertEqual(sales.by_card([], card_of), {})
 
 
+class SharesTest(unittest.TestCase):
+    """Разложить сумму по категориям — прикидка, и она так и называется.
+
+    Площадка держит деньги общей кучей: сколько из доступного к выводу
+    пришло с Xbox, а сколько с аккаунтов, она не говорит.
+    """
+
+    def found(self):
+        rows = [("Xbox 100", "CONFIRMED", 3000),
+                ("Xbox 500", "PAID", 5000),
+                ("🏆 ПАКЕТ", "CONFIRMED", 1000)]
+
+        return sales.by_card(rows, card_of)
+
+    def test_the_sum_is_split_by_confirmed_sales(self):
+        got = sales.shares(self.found(), 12000)
+        shares = dict((key, round(money)) for key, _, _, money in got)
+
+        self.assertEqual(shares["xbox"], 9000)
+        self.assertEqual(shares[""], 3000)
+
+    def test_the_shares_add_up_to_the_whole(self):
+        got = sales.shares(self.found(), 12000)
+
+        self.assertAlmostEqual(sum(money for _, _, _, money in got), 12000)
+
+    def test_the_biggest_goes_first(self):
+        got = sales.shares(self.found(), 12000)
+
+        self.assertEqual(got[0][0], "xbox")
+
+    def test_waiting_can_be_split_too(self):
+        got = sales.shares(self.found(), 5000, "waiting")
+
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0][0], "xbox")
+
+    def test_nothing_confirmed_gives_nothing(self):
+        """Делить нечего — не делим. Ни на ноль, ни поровну."""
+        rows = [("Xbox 100", "PAID", 1000)]
+
+        self.assertEqual(sales.shares(sales.by_card(rows, card_of), 500), [])
+
+    def test_no_sales_at_all(self):
+        self.assertEqual(sales.shares({}, 1000), [])
+
+    def test_zero_to_split_still_shows_the_shares(self):
+        """Доли нужны и сами по себе: по ним видно, чем торгуешь."""
+        got = sales.shares(self.found(), 0)
+
+        self.assertEqual(len(got), 2)
+        self.assertAlmostEqual(got[0][2], 0.75)
+
+
 if __name__ == "__main__":
     unittest.main()
