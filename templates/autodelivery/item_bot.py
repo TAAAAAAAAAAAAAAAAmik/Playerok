@@ -2976,7 +2976,8 @@ def read_deals(account, pages: int = DEALS_PAGES) -> tuple:
                         _status_name(getattr(deal, "status", None)),
                         _amount(deal),
                         _game_label(deal),
-                        str(getattr(item, "id", "") or "")))
+                        str(getattr(item, "id", "") or ""),
+                        str(getattr(deal, "id", "") or "")))
 
         if not getattr(page, "has_next_page", False):
             break
@@ -4347,12 +4348,19 @@ PICK_STAT = "ст:"
 # площадки за минуту. «🔄 Обновить» перечитывает нарочно.
 DEALS_TTL = 180.0
 
-_DEALS: dict = {"at": 0.0, "rows": None, "whole": True}
+_DEALS: dict = {"at": 0.0, "rows": None, "whole": True, "games_left": 0,
+                "learned": False}
 
 
 def forget_deals() -> None:
     """Забыть прочитанные сделки. Для «Обновить» и для тестов."""
-    _DEALS.update({"at": 0.0, "rows": None, "whole": True})
+    _DEALS.update({"at": 0.0, "rows": None, "whole": True,
+                   "games_left": 0, "learned": False})
+
+
+def games_left() -> int:
+    """Сколько товаров осталось без игры после последнего чтения."""
+    return int(_DEALS.get("games_left") or 0)
 
 
 def deals_now(account, fresh: bool = False) -> tuple:
@@ -4366,7 +4374,8 @@ def deals_now(account, fresh: bool = False) -> tuple:
     except Exception as e:                                    # noqa: BLE001
         return [], True, str(e)
 
-    _DEALS.update({"at": time.time(), "rows": list(rows), "whole": whole})
+    _DEALS.update({"at": time.time(), "rows": list(rows), "whole": whole,
+                   "learned": False})
 
     return rows, whole, ""
 
@@ -4388,46 +4397,97 @@ def known_games(conf) -> dict:
     return found
 
 
+def _deal_of(account, deal_id: str):
+    """Сделка площадки или None. Спрашиваем осторожно: её могли убрать."""
+    get = getattr(account, "get_deal", None)
+
+    if not callable(get) or not deal_id:
+        return None
+
+    try:
+        return get(deal_id)
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def _item_of(account, item_id: str):
+    """Товар площадки или None."""
+    get = getattr(account, "get_item", None)
+
+    if not callable(get) or not item_id:
+        return None
+
+    try:
+        return get(id=item_id)
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def game_of_item(account, item_id: str, deal_id: str = "") -> str:
+    """Игра и раздел товара: «Roblox · Промокоды». Пусто — не узнали.
+
+    Два источника, и первый — СДЕЛКА, а не товар. В списке продаж и в
+    ответе на «дай товар» площадка отдаёт укороченный профиль: там нет ни
+    игры, ни раздела, потому что проданный товар она показывает как
+    витринную карточку. А вот одиночная сделка отдаёт товар целиком —
+    тот же запрос, которым выдача дочитывает описание.
+
+    Товар спрашиваем вторым: вдруг он ещё на витрине и отдастся полным.
+    """
+    for ask, key in ((_deal_of, deal_id), (_item_of, item_id)):
+        got = ask(account, key)
+
+        # Спрашиваем по очереди, а не оба сразу: если сделка ответила,
+        # второй запрос — лишний расход лимита площадки.
+        if got is None:
+            continue
+
+        # У сделки товар лежит внутри, у товара — он сам.
+        node = getattr(got, "item", None) or got
+        game = str(getattr(getattr(node, "game", None), "name", "") or "")
+        category = str(getattr(getattr(node, "category", None), "name", "")
+                       or "")
+        label = " · ".join(part for part in (game, category) if part)
+
+        if label:
+            return label
+
+    return ""
+
+
 def learn_games(account, conf, rows) -> int:
-    """Дочитать игру у предметов, про которые ещё не знаем. → сколько узнали.
+    """Дочитать игру у товаров, про которые ещё не знаем. → сколько узнали.
 
-    Площадка отдаёт предмет сделки в двух видах, и у короткого игры нет
-    вовсе. Тогда её можно узнать только у самого предмета — по одному
-    запросу на предмет, а не на сделку: один и тот же товар продаётся
-    десятки раз.
-
-    Узнанное кладётся в состояние навсегда: игра у товара не меняется.
+    Спрашиваем по одному запросу НА ТОВАР, а не на сделку: один и тот же
+    товар продаётся десятки раз. Узнанное кладётся в состояние навсегда —
+    игра у товара не меняется, — и со второго раза экран открывается без
+    единого лишнего вызова.
     """
     games = known_games(conf)
-    unknown = []
+    unknown: dict = {}
 
     for row in rows:
         item_id = str(row[4]) if len(row) > 4 else ""
+        deal_id = str(row[5]) if len(row) > 5 else ""
 
         if not item_id or row[3] or item_id in games:
             continue
 
-        if item_id not in unknown:
-            unknown.append(item_id)
+        unknown.setdefault(item_id, deal_id)
+
+    _DEALS["games_left"] = max(0, len(unknown) - GAMES_AT_ONCE)
 
     if not unknown:
         return 0
 
     learned = 0
 
-    for number, item_id in enumerate(unknown[:GAMES_AT_ONCE]):
+    for number, (item_id, deal_id) in enumerate(
+            list(unknown.items())[:GAMES_AT_ONCE]):
         if number:
             time.sleep(PAGE_PAUSE)
 
-        try:
-            item = account.get_item(id=item_id)
-        except Exception:                                     # noqa: BLE001
-            continue
-
-        game = str(getattr(getattr(item, "game", None), "name", "") or "")
-        category = str(getattr(getattr(item, "category", None), "name", "")
-                       or "")
-        label = " · ".join(part for part in (game, category) if part)
+        label = game_of_item(account, item_id, deal_id)
 
         if label:
             games[item_id] = label
@@ -4439,7 +4499,7 @@ def learn_games(account, conf, rows) -> int:
     return learned
 
 
-def groups_of(account, fresh: bool = False) -> tuple:
+def groups_of(account, fresh: bool = False, more: bool = False) -> tuple:
     """Продажи по категориям → (список, всё ли прочитано, причина отказа).
 
     Список, а не словарь, и порядок в нём один и тот же — от крупной
@@ -4457,7 +4517,14 @@ def groups_of(account, fresh: bool = False) -> tuple:
         return [], whole, why
 
     conf = settings_of()
-    learn_games(account, conf, rows)
+
+    # Дюжину игр спрашиваем один раз на прочитанные сделки. Иначе продавец,
+    # ходя «статистика → продажи → категория → назад», на каждом шаге
+    # тратит дюжину запросов к площадке и упирается в её лимит.
+    if more or not _DEALS.get("learned"):
+        learn_games(account, conf, rows)
+        _DEALS["learned"] = True
+
     games = known_games(conf)
     found = sales.by_group(
         rows, lambda name: card_for_title(CARDS, name), grouping.head,
@@ -4536,6 +4603,9 @@ def stats_menu(link, account, fresh: bool = False) -> None:
     text = str(answer.get("text") or "").strip()
 
     if not text.startswith(PICK_STAT):
+        # Пусто, «в меню» или чужое нажатие — уходим. А вот свой, но
+        # непонятный токен разбирается ниже: закрывать из-за него экран
+        # нельзя, продавец его не нажимал осознанно.
         link.screen("Готово.", buttons=MENU)
         return
 
@@ -4660,6 +4730,12 @@ def stats_money(link, account) -> None:
         stats_withdraw(link, account)
         return
 
+    if text.startswith(PICK_STAT):
+        # Нажатие с уже закрытого экрана: перерисуем этот, а не выбросим
+        # продавца в меню.
+        stats_money(link, account)
+        return
+
     link.screen("Готово.", buttons=MENU)
 
 
@@ -4733,12 +4809,17 @@ def stats_withdraw(link, account) -> None:
         stats_sales(link, account)
         return
 
+    if text.startswith(PICK_STAT):
+        stats_withdraw(link, account)
+        return
+
     link.screen("Готово.", buttons=MENU)
 
 
-def stats_sales(link, account, fresh: bool = False) -> None:
+def stats_sales(link, account, fresh: bool = False,
+                more: bool = False) -> None:
     """🧾 Продажи по категориям: список кнопками."""
-    found, whole, why = groups_of(account, fresh)
+    found, whole, why = groups_of(account, fresh, more)
 
     if why:
         link.screen(f"Сделки прочитать не вышло: {why}\n\nПопробуйте через "
@@ -4774,14 +4855,34 @@ def stats_sales(link, account, fresh: bool = False) -> None:
     if len(rows) > MAX_CHOICES:
         lines.append(f"… и ещё {len(rows) - MAX_CHOICES}")
 
+    left = games_left()
+
+    if left:
+        # Молчать нельзя: продавец видит кучки по названиям и решает, что
+        # бот так и не научился делить по играм.
+        lines += ["", f"⏳ Ещё у {plural(left, 'товара', 'товаров', 'товаров')}"
+                      f" игру не спросил — они пока показаны по названию. "
+                      f"Нажмите «🔄 Дочитать игры»."]
+        keys.append([("🔄 Дочитать игры", PICK_STAT + "more")])
+
     answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=back_keys(keys))
     text = str(answer.get("text") or "").strip()
 
     if stats_back(link, account, text):
         return
 
+    if text == PICK_STAT + "more":
+        # Сделки уже прочитаны — перечитывать их не надо, надо спросить
+        # игры у следующей дюжины товаров.
+        stats_sales(link, account, more=True)
+        return
+
     if text.startswith(PICK_STAT + "g"):
         stats_group(link, account, text[len(PICK_STAT) + 1:])
+        return
+
+    if text.startswith(PICK_STAT):
+        stats_sales(link, account)
         return
 
     link.screen("Готово.", buttons=MENU)
@@ -4853,6 +4954,10 @@ def stats_group(link, account, number: str) -> None:
 
     if text == PICK_STAT + "sales":
         stats_sales(link, account)
+        return
+
+    if text.startswith(PICK_STAT):
+        stats_group(link, account, number)
         return
 
     link.screen("Готово.", buttons=MENU)
@@ -4929,6 +5034,10 @@ def stats_profit(link, account) -> None:
 
     if text == PICK_STAT + "fill":
         fill_sums(link, account, conf)
+        return
+
+    if text.startswith(PICK_STAT):
+        stats_profit(link, account)
         return
 
     link.screen("Готово.", buttons=MENU)
@@ -5049,9 +5158,16 @@ def stats_reviews(link, account) -> None:
         lines.append(f"    {shorten(text, 60) or '— без текста'}")
 
     answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=back_keys())
+    text = str(answer.get("text") or "").strip()
 
-    if not stats_back(link, account, answer.get("text")):
-        link.screen("Готово.", buttons=MENU)
+    if stats_back(link, account, text):
+        return
+
+    if text.startswith(PICK_STAT):
+        stats_reviews(link, account)
+        return
+
+    link.screen("Готово.", buttons=MENU)
 
 
 def ask_rate(link, conf) -> None:
@@ -5649,6 +5765,12 @@ def handle_command(link, account, text: str):
         stats_menu(link, account)
     elif text in ACCOUNT_WORDS:
         account = accounts_menu(link, account)
+    elif stale_press(text):
+        # Нажатие с экрана, который уже закрылся: продавец нажал дважды
+        # или вернулся к старому сообщению. Экран не трогаем — иначе
+        # только что открытый раздел мгновенно сменится меню, и выглядит
+        # это как «кнопка открывается и сразу закрывается».
+        logging.info("нажатие мимо экрана: %s", text)
     elif not wizard.cancelled(text):
         # Молчать нельзя: продавец решит, что бот умер.
         link.screen("Что делаем?", buttons=MENU)
@@ -5656,8 +5778,27 @@ def handle_command(link, account, text: str):
     return account
 
 
+def stale_press(text: str) -> bool:
+    """Это значение кнопки, а не команда?
+
+    Значения кнопок узнаются по приставкам — тем самым, что бот сам в них
+    и кладёт. Команду продавец пишет словами, и с двоеточием она не
+    совпадёт.
+    """
+    value = str(text or "").strip()
+
+    return any(value.startswith(prefix) for prefix in PICK_PREFIXES)
+
+
 CHOOSE.update({"game": choose_game, "category": choose_category,
                "obtaining": choose_obtaining})
+
+# Все приставки кнопок разом. Собираются из самого модуля, чтобы новая
+# кнопка не забылась: забытая приставка означает «нажал — экран закрылся».
+PICK_PREFIXES = tuple(sorted(
+    (value for name, value in list(globals().items())
+     if name.startswith("PICK") and isinstance(value, str) and value),
+    key=len, reverse=True))
 
 
 if __name__ == "__main__":

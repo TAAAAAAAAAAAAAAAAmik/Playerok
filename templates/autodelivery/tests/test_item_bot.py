@@ -2319,6 +2319,8 @@ class SalesByGameTest(unittest.TestCase):
              ("ChatGPT Plus 1 месяц", "PAID", "i5", 1490, "ChatGPT",
               "Подписки")]
 
+    # Игра лежит в ОДИНОЧНОЙ сделке: проданный товар площадка отдаёт
+    # укороченной карточкой, без игры и раздела.
     ITEMS = {"i2": ("Roblox", "Промокоды"), "i4": ("Roblox", "Геймпассы")}
 
     class Account:
@@ -2341,6 +2343,7 @@ class SalesByGameTest(unittest.TestCase):
                     "category": (type("C", (), {"name": category})()
                                  if category else None)})()
                 rows.append(type("D", (), {
+                    "id": str(item_id).replace("i", "d"),
                     "item": item, "transaction": None,
                     "status": type("S", (), {"name": status})()})())
 
@@ -2348,15 +2351,23 @@ class SalesByGameTest(unittest.TestCase):
                                   "end_cursor": None})()
 
         def get_item(self, id=None):
-            self.asked.append(id)
-            game, category = self.items.get(id, (None, None))
+            """Как площадка: проданный товар — без игры и раздела."""
+            self.asked.append(("item", id))
+
+            return type("I", (), {"name": "товар", "price": 100})()
+
+        def get_deal(self, deal_id):
+            """А вот сделка отдаёт товар целиком."""
+            self.asked.append(("deal", deal_id))
+            item_id = str(deal_id).replace("d", "i")
+            game, category = self.items.get(item_id, (None, None))
 
             if game is None:
-                raise RuntimeError("предмет не отдали")
+                raise RuntimeError("сделку не отдали")
 
-            return type("I", (), {
+            return type("D", (), {"item": type("I", (), {
                 "game": type("G", (), {"name": game})(),
-                "category": type("C", (), {"name": category})()})()
+                "category": type("C", (), {"name": category})()})()})()
 
         def get_my_reviews(self, count=24, **kw):
             return type("P", (), {"reviews": [], "total_count": 0})()
@@ -2406,13 +2417,23 @@ class SalesByGameTest(unittest.TestCase):
 
         self.assertIn("Roblox · Промокоды: 248 ₽ (2)", said)
 
+    def test_the_game_comes_from_the_deal_not_the_item(self):
+        """Проданный товар площадка отдаёт укороченной карточкой — игры в
+        ней нет вовсе."""
+        account = self.account()
+        said = self.sales_screen(account)
+
+        self.assertIn(("deal", "d2"), account.asked)
+        self.assertIn("Roblox · Промокоды", said)
+
     def test_the_game_is_asked_only_for_unknown_items(self):
         """Один и тот же товар продаётся десятки раз — спрашивать про
         каждую сделку значит выбрать лимит площадки."""
         account = self.account()
         self.sales_screen(account)
+        deals = sorted(key for kind, key in account.asked if kind == "deal")
 
-        self.assertEqual(sorted(account.asked), ["i2", "i4"])
+        self.assertEqual(deals, ["d2", "d4"])
 
     def test_what_was_learned_is_remembered(self):
         account = self.account()
@@ -2422,6 +2443,54 @@ class SalesByGameTest(unittest.TestCase):
         self.sales_screen(account)
 
         self.assertEqual(account.asked, [])
+
+    def test_what_is_left_unlearned_is_named(self):
+        """Иначе продавец видит кучки по названиям и решает, что бот так и
+        не научился делить по играм."""
+        saved = item_bot.GAMES_AT_ONCE
+        item_bot.GAMES_AT_ONCE = 1
+
+        try:
+            said = self.sales_screen()
+        finally:
+            item_bot.GAMES_AT_ONCE = saved
+
+        self.assertIn("Дочитать игры", said)
+
+    def test_walking_the_menus_does_not_ask_the_same_dozen_twice(self):
+        """Экранов по дороге к категории три, и каждый зовёт тот же
+        разбор. Спрашивать игры на каждом — значит выбрать лимит площадки
+        просто за хождение «назад-вперёд»."""
+        saved = item_bot.GAMES_AT_ONCE
+        item_bot.GAMES_AT_ONCE = 1
+        account = self.account()
+
+        try:
+            self.sales_screen(account)
+        finally:
+            item_bot.GAMES_AT_ONCE = saved
+
+        deals = [key for kind, key in account.asked if kind == "deal"]
+
+        self.assertEqual(len(deals), 1)
+
+    def test_the_button_asks_the_next_dozen(self):
+        """«🔄 Дочитать игры» — единственное, ради чего спрашиваем ещё."""
+        saved = item_bot.GAMES_AT_ONCE
+        item_bot.GAMES_AT_ONCE = 1
+        account = self.account()
+        link = FakeLink([item_bot.PICK_STAT + "sales",
+                         item_bot.PICK_STAT + "more", "отмена"])
+
+        try:
+            item_bot.stats_menu(link, account)
+        finally:
+            item_bot.GAMES_AT_ONCE = saved
+
+        deals = sorted(key for kind, key in account.asked if kind == "deal")
+
+        self.assertEqual(deals, ["d2", "d4"])
+        self.assertNotIn("Дочитать игры", link.asked[-1][0])
 
     def test_an_item_the_platform_will_not_tell_about(self):
         """Тогда в дело идут прежние правила: сначала наша карта…"""
