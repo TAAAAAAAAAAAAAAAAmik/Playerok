@@ -2304,10 +2304,11 @@ class TuneCardTest(unittest.TestCase):
 
 
 class StatsMenuTest(unittest.TestCase):
-    """📊 Статистика: деньги на площадке, продажи, профит, отзывы.
+    """📊 Статистика: сводка и разделы за кнопками.
 
     Отчёт о деньгах врать не имеет права: по нему продавец решает, что
-    закупать и по какой цене продавать.
+    закупать и почём продавать. А всё сразу на одном экране не читается —
+    поэтому сводка короткая, а подробности за кнопками.
     """
 
     class Balance:
@@ -2317,7 +2318,7 @@ class StatsMenuTest(unittest.TestCase):
     class Account:
         DEALS = [("Xbox Gift Card 100 TR", "CONFIRMED", 900),
                  ("Xbox Gift Card 500 TR", "PAID", 3000),
-                 ("🏆 ПОПУЛЯРНЫЙ ПАКЕТ 3 LVL", "CONFIRMED", 2500),
+                 ("🏆 ПОПУЛЯРНЫЙ ПАКЕТ • 3 LVL", "CONFIRMED", 2500),
                  ("Xbox Gift Card 100 TR", "ROLLED_BACK", 900)]
 
         def __init__(self, balance=None, reviews=None, deals=None):
@@ -2354,11 +2355,17 @@ class StatsMenuTest(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
         item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.forget_deals()
         self._pause = item_bot.PAGE_PAUSE
         item_bot.PAGE_PAUSE = 0
 
     def tearDown(self):
         item_bot.PAGE_PAUSE = self._pause
+        item_bot.forget_deals()
+
+    def account(self, reviews=None, deals=None, balance=True):
+        return self.Account(self.Balance() if balance else None, reviews,
+                            deals)
 
     def sold(self, rate=95, rows=((900, 3.1), (1200, 4.0))):
         conf = item_bot.settings_of()
@@ -2375,148 +2382,262 @@ class StatsMenuTest(unittest.TestCase):
 
         return conf
 
-    def report(self, account=None, reviews=None, deals=None):
-        link = FakeLink(["отмена"])
-        item_bot.stats_menu(link, account or self.Account(self.Balance(),
-                                                          reviews, deals))
+    def screen(self, answers, account=None, start="stats_menu"):
+        link = FakeLink(list(answers))
+        getattr(item_bot, start)(link, account or self.account())
 
-        return link.asked[0][0]
+        return link
 
-    # ---------- деньги на площадке ----------
+    def asked(self, answers, **kw):
+        """Текст ПОСЛЕДНЕГО показанного экрана."""
+        link = self.screen(answers, **kw)
+
+        return link.asked[-1][0]
+
+    def buttons(self, link, which=-1):
+        return [name for row in link.asked[which][1] for name, _ in row]
+
+    # ---------- сводка ----------
+
+    def test_the_summary_is_short(self):
+        """Всё сразу не читается: на первом экране — ответы одной строкой."""
+        said = self.asked(["отмена"])
+
+        self.assertLess(len(said.splitlines()), 12, said)
 
     def test_what_can_be_withdrawn_is_first(self):
-        """Ради этого экран и открывают."""
-        said = self.report()
+        said = self.asked(["отмена"])
 
-        self.assertIn("Можно вывести сейчас: 12 300 ₽", said)
+        self.assertIn("Можно вывести: 12 300 ₽", said)
 
-    def test_pending_income_is_not_called_earned(self):
-        """Покупатель не подтвердил — сделку могут откатить."""
-        said = self.report()
+    def test_the_sections_are_buttons(self):
+        link = self.screen(["отмена"])
+        names = self.buttons(link, 0)
 
-        self.assertIn("Ждёт подтверждения покупателями: 6 100 ₽", said)
+        for want in ("💰 Деньги", "🧾 Продажи", "💹 Профит", "⭐ Отзывы"):
+            self.assertIn(want, names)
 
     def test_a_missing_balance_is_said_plainly(self):
-        said = self.report(self.Account(None))
+        said = self.asked(["отмена"], account=self.account(balance=False))
 
         self.assertIn("Баланс площадка не отдала", said)
 
-    # ---------- продажи ----------
+    def test_refreshing_re_reads_the_deals(self):
+        """Иначе кнопки листались бы по вчерашним числам."""
+        account = self.account()
+        link = FakeLink([item_bot.PICK_STAT + "fresh", "отмена"])
+        item_bot.stats_menu(link, account)
 
-    def test_sales_are_split_by_card(self):
-        said = self.report()
+        self.assertIn("📊 Статистика", link.asked[-1][0])
+
+    # ---------- деньги ----------
+
+    def test_money_screen_explains_every_number(self):
+        said = self.asked([item_bot.PICK_STAT + "money", "отмена"])
+
+        self.assertIn("Можно вывести сейчас", said)
+        self.assertIn("эти деньги уже ваши", said)
+        self.assertIn("покупатели ещё не подтвердили", said)
+
+    def test_money_screen_splits_released_and_waiting(self):
+        said = self.asked([item_bot.PICK_STAT + "money", "отмена"])
+
+        self.assertIn("подтверждено: 3 400 ₽", said)
+        self.assertIn("ждёт подтверждения: 3 000 ₽", said)
+
+    def test_money_screen_warns_that_waiting_is_not_yours(self):
+        said = self.asked([item_bot.PICK_STAT + "money", "отмена"])
+
+        self.assertIn("ещё не ваши деньги", said)
+
+    # ---------- продажи по категориям ----------
+
+    def test_sales_are_split_by_category(self):
+        said = self.asked([item_bot.PICK_STAT + "sales", "отмена"])
 
         self.assertIn("Xbox", said)
         self.assertIn("3 900 ₽", said)
 
-    def test_what_can_be_taken_is_apart_from_what_waits(self):
-        said = self.report()
+    def test_other_goods_are_a_category_too(self):
+        """Это тоже деньги продавца, просто не наши карты."""
+        said = self.asked([item_bot.PICK_STAT + "sales", "отмена"])
 
-        self.assertIn("Из них подтверждено: 3 400 ₽", said)
+        self.assertIn("ПОПУЛЯРНЫЙ ПАКЕТ", said)
+        self.assertIn("2 500 ₽", said)
+
+    def test_every_category_is_a_button(self):
+        link = self.screen([item_bot.PICK_STAT + "sales", "отмена"])
+        values = [value for row in link.asked[-1][1] for _, value in row]
+
+        self.assertTrue(any(v.startswith(item_bot.PICK_STAT + "g:")
+                            for v in values), values)
+
+    def test_the_share_of_each_category_is_shown(self):
+        said = self.asked([item_bot.PICK_STAT + "sales", "отмена"])
+
+        self.assertIn("%", said)
+
+    def test_a_category_opens_its_own_screen(self):
+        said = self.asked([item_bot.PICK_STAT + "sales",
+                           item_bot.PICK_STAT + "g:к:xbox", "отмена"])
+
+        self.assertIn("Можно забрать: 900 ₽", said)
         self.assertIn("Ждёт подтверждения: 3 000 ₽", said)
 
-    def test_refunds_are_named(self):
-        said = self.report()
+    def test_a_category_shows_what_was_selling(self):
+        said = self.asked([item_bot.PICK_STAT + "sales",
+                           item_bot.PICK_STAT + "g:к:xbox", "отмена"])
+
+        self.assertIn("Что продавалось", said)
+        self.assertIn("Xbox Gift Card 100 TR", said)
+
+    def test_a_category_shows_refunds(self):
+        said = self.asked([item_bot.PICK_STAT + "sales",
+                           item_bot.PICK_STAT + "g:к:xbox", "отмена"])
 
         self.assertIn("Возвраты: 900 ₽", said)
 
-    def test_other_goods_are_counted_too(self):
-        """Это тоже деньги продавца, просто не наши карты."""
-        said = self.report()
+    def test_a_card_category_shows_the_profit(self):
+        self.sold()
+        said = self.asked([item_bot.PICK_STAT + "sales",
+                           item_bot.PICK_STAT + "g:к:xbox", "отмена"])
 
-        self.assertIn("Прочие товары: 2 500 ₽", said)
+        self.assertIn("Закупка: 7.1 $", said)
+        self.assertIn("Профит: 1 426 ₽", said)
+
+    def test_a_foreign_category_promises_no_profit(self):
+        """Закупку чужого товара бот не знает и выдумывать не станет."""
+        link = self.screen([item_bot.PICK_STAT + "sales", "отмена"])
+        values = [v for row in link.asked[-1][1] for _, v in row
+                  if v.startswith(item_bot.PICK_STAT + "g:н:")]
+        said = self.asked([item_bot.PICK_STAT + "sales", values[0],
+                           "отмена"])
+
+        self.assertNotIn("Профит", said)
+
+    def test_a_vanished_category_is_said_plainly(self):
+        said = self.screen([item_bot.PICK_STAT + "sales",
+                            item_bot.PICK_STAT + "g:к:нет-такой"]).said[-1]
+
+        self.assertIn("нет", said)
 
     def test_unreadable_deals_do_not_break_the_report(self):
         class Broken(self.Account):
             def get_deals(self, **kw):
                 raise RuntimeError("слишком много попыток")
 
-        said = self.report(Broken(self.Balance()))
+        said = self.asked(["отмена"], account=Broken(self.Balance()))
 
         self.assertIn("Сделки прочитать не вышло", said)
         self.assertIn("Можно вывести", said)
 
     # ---------- профит ----------
 
-    def test_the_profit_is_counted_from_the_journal(self):
+    def test_profit_is_counted_by_periods(self):
         self.sold()
-        said = self.report()
+        said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
 
-        self.assertIn("профит", said)
-        self.assertIn("2 100 ₽", said)
+        self.assertIn("сегодня:", said)
+        self.assertIn("всего:", said)
+        self.assertIn("профит 1 426 ₽", said)
+
+    def test_profit_is_counted_by_card(self):
+        self.sold()
+        said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
+
+        self.assertIn("Xbox", said)
+        self.assertIn("чек", said)
 
     def test_without_a_rate_the_profit_is_not_invented(self):
         """Сложить рубли с долларами без курса нельзя."""
         self.sold(rate=0)
-        said = self.report()
+        said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
 
         self.assertIn("Курс доллара не задан", said)
         self.assertNotIn("· профит", said)
 
     def test_the_cost_is_always_shown(self):
         self.sold()
-        said = self.report()
+        said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
 
         self.assertIn("закупка 7.1 $", said)
 
     def test_nothing_delivered_is_said_plainly(self):
-        said = self.report()
+        said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
 
         self.assertIn("не выдал ни одного кода", said)
 
-    def test_the_periods_are_counted(self):
-        self.sold()
-        said = self.report()
+    def test_entries_without_a_sum_are_named(self):
+        """Ноль в отчёте о деньгах читается как факт."""
+        conf = self.sold()
+        conf.store.conf("xbox")["log"].append(
+            {"order": "old", "state": "выдан", "price": 3.0,
+             "currency": "USD", "at": time.time()})
+        conf.store.save()
+        said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
 
-        self.assertIn("сегодня:", said)
-        self.assertIn("всего:", said)
-
-    def test_the_average_check_is_shown(self):
-        self.sold()
-        said = self.report()
-
-        self.assertIn("средний чек", said)
+        self.assertIn("сумма сделки не записана", said)
 
     # ---------- отзывы ----------
 
     def test_reviews_are_summed_up(self):
-        said = self.report(reviews=[self.Review(5, "Спасибо"),
-                                    self.Review(4)])
+        said = self.asked([item_bot.PICK_STAT + "reviews", "отмена"],
+                          account=self.account([self.Review(5, "Спасибо"),
+                                                self.Review(4)]))
 
         self.assertIn("4.50 из 5", said)
 
+    def test_the_spread_of_marks_is_shown(self):
+        said = self.asked([item_bot.PICK_STAT + "reviews", "отмена"],
+                          account=self.account([self.Review(5),
+                                                self.Review(3)]))
+
+        self.assertIn("★★★★★ 1", said)
+        self.assertIn("★★★☆☆ 1", said)
+
     def test_bad_reviews_are_called_out(self):
-        said = self.report(reviews=[self.Review(5), self.Review(2, "Долго")])
+        said = self.asked([item_bot.PICK_STAT + "reviews", "отмена"],
+                          account=self.account([self.Review(5),
+                                                self.Review(2, "Долго")]))
 
         self.assertIn("Ниже четвёрки: 1", said)
 
     def test_the_last_reviews_are_quoted(self):
-        said = self.report(reviews=[self.Review(5, "Всё быстро", "vasya")])
+        said = self.asked([item_bot.PICK_STAT + "reviews", "отмена"],
+                          account=self.account([self.Review(5, "Всё быстро",
+                                                            "vasya")]))
 
         self.assertIn("Всё быстро", said)
         self.assertIn("vasya", said)
 
     def test_no_reviews_is_not_an_error(self):
-        said = self.report(reviews=[])
+        said = self.screen([item_bot.PICK_STAT + "reviews"],
+                           account=self.account([])).said[-1]
 
         self.assertIn("Отзывов пока нет", said)
 
-    def test_unreadable_reviews_do_not_break_the_report(self):
-        said = self.report()
+    def test_unreadable_reviews_do_not_break_the_summary(self):
+        said = self.asked(["отмена"])
 
-        self.assertIn("прочитать не вышло", said)
+        self.assertIn("📊 Статистика", said)
 
-    # ---------- курс ----------
+    # ---------- возврат и курс ----------
+
+    def test_every_screen_can_go_back(self):
+        for where in ("money", "sales", "profit", "reviews"):
+            link = self.screen([item_bot.PICK_STAT + where,
+                                item_bot.PICK_STAT + "back", "отмена"],
+                               account=self.account([self.Review(5)]))
+
+            self.assertIn("📊 Статистика", link.asked[-1][0], where)
 
     def test_the_rate_can_be_set(self):
-        link = FakeLink(["стат:курс", "95"])
-        item_bot.stats_menu(link, self.Account(self.Balance()))
+        self.screen([item_bot.PICK_STAT + "rate", "95"])
 
         self.assertEqual(item_bot.settings_of().rate(), 95)
 
     def test_a_word_instead_of_a_rate_is_refused(self):
-        link = FakeLink(["стат:курс", "много"])
-        item_bot.stats_menu(link, self.Account(self.Balance()))
+        link = self.screen([item_bot.PICK_STAT + "rate", "много"])
 
         self.assertEqual(item_bot.settings_of().rate(), 0)
         self.assertIn("не число", link.said[-1])
@@ -2529,8 +2650,7 @@ class StatsMenuTest(unittest.TestCase):
 
     def test_it_is_reachable_by_the_button(self):
         link = FakeLink(["отмена"])
-        item_bot.handle_command(link, self.Account(self.Balance()),
-                                "статистика")
+        item_bot.handle_command(link, self.account(), "статистика")
 
         self.assertTrue(any("📊 Статистика" in said for said in link.said),
                         link.said)

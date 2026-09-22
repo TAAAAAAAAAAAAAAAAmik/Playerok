@@ -33,7 +33,12 @@ def status_of(value) -> str:
 class Money:
     """Итог по одному товару: сколько продано и в каком состоянии."""
 
-    def __init__(self):
+    # Сколько сделок помнить поимённо. Экран телефона, а не отчётность:
+    # продавцу нужно узнать свои продажи, а не перечитать их все.
+    KEEP = 8
+
+    def __init__(self, label: str = ""):
+        self.label = label      # как называется эта кучка на экране
         self.count = 0          # сделок, принёсших деньги
         self.sold = 0.0         # продано всего, ₽
         self.released = 0.0     # подтверждено — можно забирать
@@ -41,9 +46,14 @@ class Money:
         self.refunded = 0.0     # возвращено покупателю
         self.refunds = 0        # сколько таких сделок
         self.unknown = 0        # сделок без суммы
+        self.last: list = []    # свежие сделки: (название, статус, сумма)
+        self.names: dict = {}   # название → сколько раз продано
 
-    def add(self, status: str, amount) -> None:
+    def add(self, status: str, amount, title: str = "") -> None:
         state = status_of(status)
+
+        if len(self.last) < self.KEEP:
+            self.last.append((str(title or ""), state, amount))
 
         try:
             money = float(amount)
@@ -64,6 +74,10 @@ class Money:
             return
 
         self.count += 1
+        name = " ".join(str(title or "").split())
+
+        if name:
+            self.names[name] = self.names.get(name, 0) + 1
 
         if money is None:
             self.unknown += 1
@@ -88,7 +102,35 @@ def by_card(rows, card_of) -> dict:
     for title, status, amount in rows:
         card = card_of(str(title or ""))
         key = getattr(card, "slug", "") or ""
-        out.setdefault(key, Money()).add(status, amount)
+        out.setdefault(key, Money()).add(status, amount, title)
+
+    return out
+
+
+def by_group(rows, card_of, head_of) -> dict:
+    """Сделки → {ключ: Money} по категориям, а не только по нашим картам.
+
+    Наши карты — своей кучкой: про них бот знает и закупку, и выдачу.
+    Остальное группируется по началу названия: продавец торгует не только
+    кодами, и «сколько принесли аккаунты» — такой же законный вопрос, как
+    «сколько принёс Xbox». Разбор названий тот же, что в списках товаров:
+    два разных однажды разошлись бы, и одна и та же продажа попадала бы в
+    разные кучки на разных экранах.
+    """
+    out: dict = {}
+
+    for title, status, amount in rows:
+        card = card_of(str(title or ""))
+
+        if card is not None:
+            key = "к:" + str(getattr(card, "slug", ""))
+            label = f"{getattr(card, 'emoji', '')} " \
+                    f"{getattr(card, 'title', '')}".strip()
+        else:
+            label = head_of(str(title or "")) or "Прочее"
+            key = "н:" + label.lower()
+
+        out.setdefault(key, Money(label)).add(status, amount, title)
 
     return out
 

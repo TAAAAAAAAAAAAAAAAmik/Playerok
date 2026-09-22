@@ -4335,13 +4335,58 @@ def balance_lines(account) -> list:
     return lines or ["Баланс площадка не отдала."]
 
 
-def stats_menu(link, account) -> None:
-    """📊 Статистика: продажи, профит, деньги на площадке и отзывы.
+# Приставка у кнопок статистики.
+PICK_STAT = "ст:"
 
-    Профит считается по журналу выдач — там записана и сумма сделки, и
-    цена закупки у поставщика в тот самый час, когда покупали. Продажи
-    целиком — по сделкам площадки: продавец спрашивает про все свои
-    деньги, включая заработанные до бота и выданные руками.
+# Сколько держать прочитанные сделки. Продавец ходит по разделам, и
+# перечитывать двести сделок на каждое нажатие — значит выбрать лимит
+# площадки за минуту. «🔄 Обновить» перечитывает нарочно.
+DEALS_TTL = 180.0
+
+_DEALS: dict = {"at": 0.0, "rows": None, "whole": True}
+
+
+def forget_deals() -> None:
+    """Забыть прочитанные сделки. Для «Обновить» и для тестов."""
+    _DEALS.update({"at": 0.0, "rows": None, "whole": True})
+
+
+def deals_now(account, fresh: bool = False) -> tuple:
+    """Сделки площадки → (строки, всё ли прочитано, причина отказа)."""
+    if not fresh and _DEALS["rows"] is not None \
+            and time.time() - _DEALS["at"] < DEALS_TTL:
+        return list(_DEALS["rows"]), _DEALS["whole"], ""
+
+    try:
+        rows, whole = read_deals(account)
+    except Exception as e:                                    # noqa: BLE001
+        return [], True, str(e)
+
+    _DEALS.update({"at": time.time(), "rows": list(rows), "whole": whole})
+
+    return rows, whole, ""
+
+
+def groups_of(account, fresh: bool = False) -> tuple:
+    """Продажи по категориям → (словарь, всё ли прочитано, причина отказа)."""
+    rows, whole, why = deals_now(account, fresh)
+
+    if why:
+        return {}, whole, why
+
+    found = sales.by_group(rows, lambda name: card_for_title(CARDS, name),
+                           grouping.head)
+
+    return found, whole, ""
+
+
+def stats_menu(link, account, fresh: bool = False) -> None:
+    """📊 Статистика: короткая сводка и кнопки в подробности.
+
+    Всё сразу на одном экране не помещается и не читается: продавцу нужен
+    ответ на ОДИН вопрос за раз — сколько можно вывести, что продаётся,
+    сколько заработано, что пишут. Поэтому здесь итог в несколько строк, а
+    подробности за кнопками.
     """
     if account is None:
         link.screen("Сначала нужен рабочий кабинет: откройте «Аккаунт».",
@@ -4352,154 +4397,400 @@ def stats_menu(link, account) -> None:
     conf = settings_of()
     rate = conf.rate()
     lines = ["📊 Статистика", ""]
+    money = balance_of(account)
 
-    # 1. Деньги на площадке. Первым: это то, ради чего экран и открывают.
+    if money is not None:
+        lines.append(f"💸 Можно вывести: "
+                     f"{stats.money(getattr(money, 'withdrawable', 0))}")
+        lines.append(f"⏳ Ждёт подтверждения: "
+                     f"{stats.money(getattr(money, 'pending_income', 0))}")
+    else:
+        lines.append("💸 Баланс площадка не отдала.")
+
+    found, whole, why = groups_of(account, fresh)
+
+    if why:
+        lines.append(f"🧾 Сделки прочитать не вышло: {shorten(why, 40)}")
+    elif found:
+        total = sales.total_of(found)
+        lines.append(f"🧾 Продано: {stats.money(total.sold)} за "
+                     + plural(total.count, "сделку", "сделки", "сделок")
+                     + ("" if whole else " (список неполный)"))
+
+    # Профит за всё время — по журналу выдач бота.
+    rows = stats.by_card(conf.store, CARDS)
+    whole_sum = stats.total_of(rows)
+
+    if whole_sum.count:
+        profit = whole_sum.profit(rate)
+        lines.append(f"💹 Профит бота: "
+                     + (stats.money(profit) if profit is not None
+                        else f"закупка {stats.cost_line(whole_sum.cost)}, "
+                             f"курс не задан")
+                     + f" · выдано {plural(whole_sum.count, 'код', 'кода', 'кодов')}")
+    else:
+        lines.append("💹 Бот пока не выдал ни одного кода.")
+
+    told = reviews_of(account)
+
+    if told is not None and told.count:
+        lines.append(f"⭐ Отзывы: {stats.stars(told.average)} "
+                     f"{told.average:.2f} · всего {told.total}"
+                     + (f" · ниже четвёрки {told.bad}" if told.bad else ""))
+
+    keys = [[("💰 Деньги", PICK_STAT + "money"),
+             ("🧾 Продажи", PICK_STAT + "sales")],
+            [("💹 Профит", PICK_STAT + "profit"),
+             ("⭐ Отзывы", PICK_STAT + "reviews")],
+            [("💱 Курс доллара", PICK_STAT + "rate"),
+             ("🔄 Обновить", PICK_STAT + "fresh")],
+            [("✖️ Назад", "отмена")]]
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if not text.startswith(PICK_STAT):
+        link.screen("Готово.", buttons=MENU)
+        return
+
+    what = text[len(PICK_STAT):]
+
+    if what == "fresh":
+        forget_deals()
+        stats_menu(link, account, fresh=True)
+    elif what == "money":
+        stats_money(link, account)
+    elif what == "sales":
+        stats_sales(link, account)
+    elif what == "profit":
+        stats_profit(link, account)
+    elif what == "reviews":
+        stats_reviews(link, account)
+    elif what == "rate":
+        ask_rate(link, conf)
+    else:
+        stats_menu(link, account)
+
+
+def balance_of(account):
+    """Баланс кабинета или None. Профиль дочитываем, если его ещё нет."""
+    profile = getattr(account, "profile", None)
+
+    if getattr(profile, "balance", None) is None:
+        try:
+            account.get()
+            profile = getattr(account, "profile", None)
+        except Exception:                                     # noqa: BLE001
+            return None
+
+    return getattr(profile, "balance", None)
+
+
+def reviews_of(account, count: int = 24, shown: int = 3):
+    """Отзывы кабинета одним итогом. None — площадка не отдала."""
     try:
-        account.get()
+        page = account.get_my_reviews(count=count)
     except Exception:                                         # noqa: BLE001
-        pass
+        return None
 
-    lines += balance_lines(account)
+    return stats.reviews_of(getattr(page, "reviews", None) or [],
+                            getattr(page, "total_count", 0), shown)
 
-    # 2. Продажи по сделкам площадки — по каждому товару.
-    try:
-        rows, whole = read_deals(account)
-    except Exception as e:                                    # noqa: BLE001
-        rows, whole = [], True
-        lines += ["", f"⚠️ Сделки прочитать не вышло: {shorten(str(e), 60)}"]
 
-    if rows:
-        found = sales.by_card(rows, lambda name: card_for_title(CARDS, name))
-        whole_money = sales.total_of(found)
-        seen = plural(len(rows), "сделка", "сделки", "сделок")
-        lines += ["", f"🧾 Продажи (последние {seen}"
-                      + ("" if whole else ", список неполный") + "):",
-                  f"  Продано: {stats.money(whole_money.sold)} "
-                  f"за {plural(whole_money.count, 'сделку', 'сделки', 'сделок')}",
-                  f"  Из них подтверждено: "
-                  f"{stats.money(whole_money.released)}",
-                  f"  Ждёт подтверждения: {stats.money(whole_money.waiting)}"]
+def back_keys(extra=None) -> list:
+    """Кнопки «назад в статистику» и «в меню»."""
+    keys = list(extra or [])
+    keys.append([("⬅️ К статистике", PICK_STAT + "back"),
+                 ("✖️ В меню", "отмена")])
 
-        if whole_money.refunds:
-            lines.append(f"  Возвраты: {stats.money(whole_money.refunded)} "
-                         f"({whole_money.refunds})")
+    return keys
 
-        by_name = []
 
-        for card in CARDS:
-            one = found.get(card.slug)
+def stats_back(link, account, text: str) -> bool:
+    """Обработать «назад». → вернулись ли в статистику."""
+    if str(text or "").strip() == PICK_STAT + "back":
+        stats_menu(link, account)
 
-            if one is None or not one.count:
+        return True
+
+    return False
+
+
+def stats_money(link, account) -> None:
+    """💰 Деньги площадки: что уже ваше, а что ещё нет."""
+    money = balance_of(account)
+    lines = ["💰 Деньги на площадке", ""]
+
+    if money is None:
+        lines.append("Площадка баланс не отдала. Проверьте сессию: "
+                     "«🔑 Проверить сессию».")
+    else:
+        pairs = [("withdrawable", "💸 Можно вывести сейчас",
+                  "эти деньги уже ваши"),
+                 ("available", "💳 Доступно на счету",
+                  "ими можно платить на площадке"),
+                 ("pending_income", "⏳ Ждёт подтверждения",
+                  "покупатели ещё не подтвердили заказы"),
+                 ("frozen", "🧊 Заморожено", "площадка держит по спорам"),
+                 ("value", "Σ Всего", "вместе с неподтверждённым")]
+
+        for field, label, why in pairs:
+            got = getattr(money, field, None)
+
+            if got is None:
                 continue
 
-            by_name.append((one.sold, card, one))
+            lines.append(f"{label}: {stats.money(got)}")
+            lines.append(f"    {why}")
 
-        stranger = found.get("")
+    found, whole, why = groups_of(account)
 
-        if by_name:
-            lines.append("")
+    if found:
+        total = sales.total_of(found)
+        lines += ["", "По сделкам площадки:",
+                  f"  подтверждено: {stats.money(total.released)}",
+                  f"  ждёт подтверждения: {stats.money(total.waiting)}"]
 
-            for _, card, one in sorted(by_name, key=lambda r: -r[0]):
-                lines.append(f"  {card.emoji} {card.title}: "
-                             f"{stats.money(one.sold)} "
-                             f"({one.count}) · можно забрать "
-                             f"{stats.money(one.released)}")
+        if total.refunds:
+            lines.append(f"  возвращено покупателям: "
+                         f"{stats.money(total.refunded)} "
+                         f"({total.refunds})")
 
-        if stranger is not None and stranger.count:
-            lines.append(f"  📦 Прочие товары: {stats.money(stranger.sold)} "
-                         f"({stranger.count}) · можно забрать "
-                         f"{stats.money(stranger.released)}")
+        lines.append("")
+        lines.append("«Ждёт подтверждения» — ещё не ваши деньги: сделку "
+                     "могут откатить.")
 
-    # 3. Профит — только по выдачам бота: закупку знает он один.
-    lines += ["", "💰 Профит (по выдачам бота):"]
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=back_keys())
+
+    if not stats_back(link, account, answer.get("text")):
+        link.screen("Готово.", buttons=MENU)
+
+
+def stats_sales(link, account, fresh: bool = False) -> None:
+    """🧾 Продажи по категориям: список кнопками."""
+    found, whole, why = groups_of(account, fresh)
+
+    if why:
+        link.screen(f"Сделки прочитать не вышло: {why}\n\nПопробуйте через "
+                    f"минуту.", buttons=MENU)
+        return
+
+    if not found:
+        link.screen("Продаж пока нет.", buttons=MENU)
+        return
+
+    rows = sorted(found.items(), key=lambda pair: -pair[1].sold)
+    total = sales.total_of(found)
+    lines = [f"🧾 Продажи по категориям"
+             + ("" if whole else " (список неполный)"), "",
+             f"Всего: {stats.money(total.sold)} за "
+             + plural(total.count, "сделку", "сделки", "сделок"), ""]
+    keys = []
+
+    for key, one in rows[:MAX_CHOICES]:
+        share = one.sold / total.sold * 100 if total.sold else 0
+        lines.append(f"{one.label}: {stats.money(one.sold)} "
+                     f"({one.count}) · {share:.0f}%")
+        keys.append([(f"{shorten(one.label, 24)} — "
+                      f"{stats.money(one.sold)}", PICK_STAT + "g:" + key)])
+
+    if len(rows) > MAX_CHOICES:
+        lines.append(f"… и ещё {len(rows) - MAX_CHOICES}")
+
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=back_keys(keys))
+    text = str(answer.get("text") or "").strip()
+
+    if stats_back(link, account, text):
+        return
+
+    if text.startswith(PICK_STAT + "g:"):
+        stats_group(link, account, text[len(PICK_STAT) + 2:])
+        return
+
+    link.screen("Готово.", buttons=MENU)
+
+
+def stats_group(link, account, key: str) -> None:
+    """Одна категория: продажи, что можно забрать, профит, последние сделки."""
+    found, _, why = groups_of(account)
+    one = found.get(key)
+
+    if one is None:
+        link.screen("Этой категории в продажах нет.", buttons=MENU)
+        return
+
+    conf = settings_of()
+    rate = conf.rate()
+    lines = [f"🧾 {one.label}", "",
+             f"Продано: {stats.money(one.sold)} за "
+             + plural(one.count, "сделку", "сделки", "сделок"),
+             f"Можно забрать: {stats.money(one.released)}",
+             f"Ждёт подтверждения: {stats.money(one.waiting)}"]
+
+    if one.count:
+        lines.append(f"Средний чек: "
+                     f"{stats.money(one.sold / max(1, one.count))}")
+
+    if one.refunds:
+        lines.append(f"Возвраты: {stats.money(one.refunded)} "
+                     f"({one.refunds})")
+
+    # Профит — только там, где закупку знает бот, то есть по своим картам.
+    card = card_by_slug(key[2:]) if key.startswith("к:") else None
+
+    if card is not None:
+        mine = dict((c.slug, s) for c, s in stats.by_card(conf.store, CARDS))
+        got = mine.get(card.slug)
+
+        if got is not None and got.count:
+            profit = got.profit(rate)
+            lines += ["", f"Выдано ботом: "
+                          + plural(got.count, "код", "кода", "кодов"),
+                      f"Закупка: {stats.cost_line(got.cost) or '—'}"]
+
+            if profit is not None:
+                share = stats.margin(got, rate)
+                lines.append(f"Профит: {stats.money(profit)}"
+                             + (f" ({share:.0f}%)" if share is not None
+                                else ""))
+            else:
+                lines.append("Профит: курс доллара не задан")
+        else:
+            lines += ["", "Бот по этой карте ещё ничего не выдавал — "
+                          "закупку взять неоткуда."]
+
+    if one.names:
+        lines += ["", "Что продавалось:"]
+
+        for name, count in sorted(one.names.items(),
+                                  key=lambda pair: -pair[1])[:5]:
+            lines.append(f"  {shorten(name, 34)} — {count}")
+
+    answer = link.ask("\n".join(lines), ANSWER_WAIT,
+                      buttons=back_keys([[("🧾 Все категории",
+                                           PICK_STAT + "sales")]]))
+    text = str(answer.get("text") or "").strip()
+
+    if stats_back(link, account, text):
+        return
+
+    if text == PICK_STAT + "sales":
+        stats_sales(link, account)
+        return
+
+    link.screen("Готово.", buttons=MENU)
+
+
+def stats_profit(link, account) -> None:
+    """💹 Профит по периодам и по картам — по журналу выдач бота."""
+    conf = settings_of()
+    rate = conf.rate()
+    lines = ["💹 Профит", "",
+             "Считается по выдачам бота: только он знает, почём куплен "
+             "каждый код.", ""]
     any_sold = False
 
     for label, since in stats.periods().items():
-        got = stats.by_card(conf.store, CARDS, since)
-        whole_sum = stats.total_of(got)
+        rows = stats.by_card(conf.store, CARDS, since)
+        total = stats.total_of(rows)
 
-        if not whole_sum.count:
+        if not total.count:
             continue
 
         any_sold = True
-        profit = whole_sum.profit(rate)
-        share = stats.margin(whole_sum, rate)
-        line = (f"  {label}: {stats.money(whole_sum.revenue)} "
-                f"за {plural(whole_sum.count, 'код', 'кода', 'кодов')}"
-                f" · закупка {stats.cost_line(whole_sum.cost) or '—'}")
+        profit = total.profit(rate)
+        line = (f"{label}: {stats.money(total.revenue)} за "
+                + plural(total.count, "код", "кода", "кодов")
+                + f" · закупка {stats.cost_line(total.cost) or '—'}")
 
         if profit is not None:
+            share = stats.margin(total, rate)
             line += (f" · профит {stats.money(profit)}"
                      + (f" ({share:.0f}%)" if share is not None else ""))
 
         lines.append(line)
 
     if not any_sold:
-        lines.append("  Бот пока не выдал ни одного кода.")
+        lines.append("Бот пока не выдал ни одного кода.")
     else:
-        got = stats.by_card(conf.store, CARDS)
+        rows = stats.by_card(conf.store, CARDS)
         lines.append("")
 
-        for card, one in got:
+        for card, one in rows:
             profit = one.profit(rate)
-            line = (f"  {card.emoji} {card.title}: "
-                    f"{stats.money(one.revenue)} за "
-                    f"{plural(one.count, 'код', 'кода', 'кодов')} · "
-                    f"средний чек {stats.money(one.average)}")
+            lines.append(f"{card.emoji} {card.title}")
+            lines.append(f"    продано {stats.money(one.revenue)} за "
+                         + plural(one.count, "код", "кода", "кодов")
+                         + f" · чек {stats.money(one.average)}")
+            lines.append(f"    закупка {stats.cost_line(one.cost) or '—'}"
+                         + (f" · профит {stats.money(profit)}"
+                            if profit is not None else ""))
 
-            if profit is not None:
-                line += f" · профит {stats.money(profit)}"
+        total = stats.total_of(rows)
 
-            lines.append(line)
+        if total.unknown_price:
+            lines += ["", f"⚠️ У {total.unknown_price} выдач сумма сделки не "
+                          f"записана — они не в счёте. Так бывает у выдач, "
+                          f"сделанных до того, как бот стал её запоминать."]
 
-        whole_sum = stats.total_of(got)
+        if not rate and total.cost:
+            lines += ["", "💱 Курс доллара не задан — профит в рублях "
+                          "посчитать не из чего."]
 
-        if whole_sum.unknown_price:
-            lines.append(f"  ⚠️ У {whole_sum.unknown_price} выдач сумма "
-                         f"сделки не записана — они не в счёте.")
+    answer = link.ask("\n".join(lines), ANSWER_WAIT,
+                      buttons=back_keys([[("💱 Курс доллара",
+                                           PICK_STAT + "rate")]]))
+    text = str(answer.get("text") or "").strip()
 
-        if not rate and whole_sum.cost:
-            lines.append("  💱 Курс доллара не задан — профит в рублях "
-                         "посчитать не из чего. Кнопка ниже.")
-
-    # 4. Отзывы.
-    lines += ["", "⭐ Отзывы:"]
-
-    try:
-        page = account.get_my_reviews(count=24)
-        told = stats.reviews_of(getattr(page, "reviews", None) or [],
-                                getattr(page, "total_count", 0))
-    except Exception as e:                                    # noqa: BLE001
-        told = None
-        lines.append(f"  прочитать не вышло: {shorten(str(e), 50)}")
-
-    if told is not None and told.count:
-        lines.append(f"  {stats.stars(told.average)} {told.average:.2f} "
-                     f"из 5 · всего {told.total}")
-
-        if told.bad:
-            lines.append(f"  ⚠️ Ниже четвёрки: {told.bad}")
-
-        for mark, text, who in told.last:
-            lines.append(f"  {stats.stars(mark)} {who}: "
-                         f"{shorten(text, 40) or '— без текста'}")
-    elif told is not None:
-        lines.append("  Отзывов пока нет.")
-
-    keys = [[("💱 Курс доллара", "стат:курс")],
-            [("🔄 Обновить", "стат:ещё"), ("✖️ Назад", "отмена")]]
-    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
-    text = str(answer.get("text") or "").strip().lower()
-
-    if text == "стат:ещё":
-        stats_menu(link, account)
+    if stats_back(link, account, text):
         return
 
-    if text == "стат:курс":
+    if text == PICK_STAT + "rate":
         ask_rate(link, conf)
         return
 
     link.screen("Готово.", buttons=MENU)
+
+
+def stats_reviews(link, account) -> None:
+    """⭐ Отзывы: оценка, разброс и что пишут."""
+    told = reviews_of(account, count=48, shown=6)
+
+    if told is None:
+        link.screen("Отзывы прочитать не вышло. Проверьте сессию.",
+                    buttons=MENU)
+        return
+
+    if not told.count:
+        link.screen("Отзывов пока нет.", buttons=MENU)
+        return
+
+    lines = ["⭐ Отзывы", "",
+             f"{stats.stars(told.average)} {told.average:.2f} из 5",
+             f"Всего: {told.total}", ""]
+
+    for mark in (5, 4, 3, 2, 1):
+        count = told.spread.get(mark, 0)
+
+        if not count:
+            continue
+
+        share = count / told.count * 100
+        lines.append(f"{stats.stars(mark)} {count} ({share:.0f}%)")
+
+    if told.bad:
+        lines += ["", f"⚠️ Ниже четвёрки: {told.bad}. Их стоит прочитать: "
+                      f"они стоят дороже всех остальных."]
+
+    lines += ["", "Последние:"]
+
+    for mark, text, who in told.last:
+        lines.append(f"{stats.stars(mark)} {who or 'покупатель'}")
+        lines.append(f"    {shorten(text, 60) or '— без текста'}")
+
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=back_keys())
+
+    if not stats_back(link, account, answer.get("text")):
+        link.screen("Готово.", buttons=MENU)
 
 
 def ask_rate(link, conf) -> None:
