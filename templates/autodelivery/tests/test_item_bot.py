@@ -2470,8 +2470,20 @@ class StatsMenuTest(unittest.TestCase):
         link = self.screen([item_bot.PICK_STAT + "sales", "отмена"])
         values = [value for row in link.asked[-1][1] for _, value in row]
 
-        self.assertTrue(any(v.startswith(item_bot.PICK_STAT + "g:")
+        self.assertTrue(any(v.startswith(item_bot.PICK_STAT + "g")
                             for v in values), values)
+
+    def test_the_button_values_fit_the_telegram_limit(self):
+        """У Telegram на значение кнопки 64 БАЙТА, а не знака. Длинное
+        значение отвергает всю клавиатуру — со стороны это выглядит как
+        «кнопки не нажимаются»."""
+        link = self.screen([item_bot.PICK_STAT + "sales", "отмена"])
+
+        for question, keys in link.asked:
+            for row in keys or []:
+                for _, value in row:
+                    self.assertLessEqual(len(str(value).encode()), 64,
+                                         value)
 
     def test_the_share_of_each_category_is_shown(self):
         said = self.asked([item_bot.PICK_STAT + "sales", "отмена"])
@@ -2480,45 +2492,43 @@ class StatsMenuTest(unittest.TestCase):
 
     def test_a_category_opens_its_own_screen(self):
         said = self.asked([item_bot.PICK_STAT + "sales",
-                           item_bot.PICK_STAT + "g:к:xbox", "отмена"])
+                           item_bot.PICK_STAT + "g0", "отмена"])
 
         self.assertIn("Можно забрать: 900 ₽", said)
         self.assertIn("Ждёт подтверждения: 3 000 ₽", said)
 
     def test_a_category_shows_what_was_selling(self):
         said = self.asked([item_bot.PICK_STAT + "sales",
-                           item_bot.PICK_STAT + "g:к:xbox", "отмена"])
+                           item_bot.PICK_STAT + "g0", "отмена"])
 
         self.assertIn("Что продавалось", said)
         self.assertIn("Xbox Gift Card 100 TR", said)
 
     def test_a_category_shows_refunds(self):
         said = self.asked([item_bot.PICK_STAT + "sales",
-                           item_bot.PICK_STAT + "g:к:xbox", "отмена"])
+                           item_bot.PICK_STAT + "g0", "отмена"])
 
         self.assertIn("Возвраты: 900 ₽", said)
 
     def test_a_card_category_shows_the_profit(self):
         self.sold()
         said = self.asked([item_bot.PICK_STAT + "sales",
-                           item_bot.PICK_STAT + "g:к:xbox", "отмена"])
+                           item_bot.PICK_STAT + "g0", "отмена"])
 
         self.assertIn("Закупка: 7.1 $", said)
         self.assertIn("Профит 1 426 ₽", said)
 
     def test_a_foreign_category_promises_no_profit(self):
         """Закупку чужого товара бот не знает и выдумывать не станет."""
-        link = self.screen([item_bot.PICK_STAT + "sales", "отмена"])
-        values = [v for row in link.asked[-1][1] for _, v in row
-                  if v.startswith(item_bot.PICK_STAT + "g:н:")]
-        said = self.asked([item_bot.PICK_STAT + "sales", values[0],
-                           "отмена"])
+        said = self.asked([item_bot.PICK_STAT + "sales",
+                           item_bot.PICK_STAT + "g1", "отмена"])
 
+        self.assertIn("ПОПУЛЯРНЫЙ ПАКЕТ", said)
         self.assertNotIn("Профит", said)
 
     def test_a_vanished_category_is_said_plainly(self):
         said = self.screen([item_bot.PICK_STAT + "sales",
-                            item_bot.PICK_STAT + "g:к:нет-такой"]).said[-1]
+                            item_bot.PICK_STAT + "g99"]).said[-1]
 
         self.assertIn("нет", said)
 

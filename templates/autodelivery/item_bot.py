@@ -4369,16 +4369,26 @@ def deals_now(account, fresh: bool = False) -> tuple:
 
 
 def groups_of(account, fresh: bool = False) -> tuple:
-    """Продажи по категориям → (словарь, всё ли прочитано, причина отказа)."""
+    """Продажи по категориям → (список, всё ли прочитано, причина отказа).
+
+    Список, а не словарь, и порядок в нём один и тот же — от крупной
+    категории к мелкой. На этом порядке стоят кнопки: в значении кнопки
+    ездит НОМЕР, а не подпись.
+
+    Почему не подпись. Telegram разрешает в значении кнопки 64 БАЙТА, а
+    не знака: «🥳промокодом🥳 автовыдача😎» — это 31 знак и 63 байта, и
+    чуть более длинная подпись отвергает всю клавиатуру целиком. Со
+    стороны это выглядит как «кнопки не нажимаются».
+    """
     rows, whole, why = deals_now(account, fresh)
 
     if why:
-        return {}, whole, why
+        return [], whole, why
 
     found = sales.by_group(rows, lambda name: card_for_title(CARDS, name),
                            grouping.head)
 
-    return found, whole, ""
+    return sorted(found.values(), key=lambda one: -one.sold), whole, ""
 
 
 def stats_menu(link, account, fresh: bool = False) -> None:
@@ -4664,7 +4674,7 @@ def stats_sales(link, account, fresh: bool = False) -> None:
         link.screen("Продаж пока нет.", buttons=MENU)
         return
 
-    rows = sorted(found.items(), key=lambda pair: -pair[1].sold)
+    rows = list(found)
     total = sales.total_of(found)
     lines = [f"🧾 Продажи по категориям"
              + ("" if whole else " (список неполный)"), "",
@@ -4672,15 +4682,19 @@ def stats_sales(link, account, fresh: bool = False) -> None:
              + plural(total.count, "сделку", "сделки", "сделок"), ""]
     keys = []
 
-    for key, one in rows[:MAX_CHOICES]:
+    for number, one in enumerate(rows[:MAX_CHOICES]):
         share = one.sold / total.sold * 100 if total.sold else 0
         lines.append(f"{one.label}: {stats.money(one.sold)} "
                      f"({one.count}) · {share:.0f}%")
         lines.append(f"    можно забрать {stats.money(one.released)}"
                      + (f" · ждёт {stats.money(one.waiting)}"
                         if one.waiting else ""))
+        # В значении кнопки — НОМЕР в этом списке. Подпись туда класть
+        # нельзя: у Telegram на значение 64 байта, а у подписи с эмодзи их
+        # больше, и вся клавиатура уходит в отказ.
         keys.append([(f"{shorten(one.label, 24)} — "
-                      f"{stats.money(one.sold)}", PICK_STAT + "g:" + key)])
+                      f"{stats.money(one.sold)}",
+                      PICK_STAT + "g" + str(number))])
 
     if len(rows) > MAX_CHOICES:
         lines.append(f"… и ещё {len(rows) - MAX_CHOICES}")
@@ -4691,21 +4705,27 @@ def stats_sales(link, account, fresh: bool = False) -> None:
     if stats_back(link, account, text):
         return
 
-    if text.startswith(PICK_STAT + "g:"):
-        stats_group(link, account, text[len(PICK_STAT) + 2:])
+    if text.startswith(PICK_STAT + "g"):
+        stats_group(link, account, text[len(PICK_STAT) + 1:])
         return
 
     link.screen("Готово.", buttons=MENU)
 
 
-def stats_group(link, account, key: str) -> None:
-    """Одна категория: продажи, что можно забрать, профит, последние сделки."""
-    found, _, why = groups_of(account)
-    one = found.get(key)
+def stats_group(link, account, number: str) -> None:
+    """Одна категория: продажи, что можно забрать, профит, последние сделки.
 
-    if one is None:
+    `number` — место категории в том же списке, что показан кнопками.
+    Порядок один и тот же, и пересобрать его дешевле, чем возить подпись
+    в значении кнопки: у Telegram там 64 байта.
+    """
+    found, _, why = groups_of(account)
+
+    if not str(number).isdigit() or int(number) >= len(found):
         link.screen("Этой категории в продажах нет.", buttons=MENU)
         return
+
+    one = found[int(number)]
 
     conf = settings_of()
     rate = conf.rate()
@@ -4724,7 +4744,8 @@ def stats_group(link, account, key: str) -> None:
                      f"({one.refunds})")
 
     # Профит — только там, где закупку знает бот, то есть по своим картам.
-    card = card_by_slug(key[2:]) if key.startswith("к:") else None
+    card = next((c for c in CARDS
+                 if f"{c.emoji} {c.title}".strip() == one.label), None)
 
     if card is not None:
         mine = dict((c.slug, s) for c, s in stats.by_card(conf.store, CARDS))

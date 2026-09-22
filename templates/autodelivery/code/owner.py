@@ -407,10 +407,39 @@ def keyboard(buttons):
     rows = buttons if isinstance(first, list) else [list(buttons)]
 
     return {"inline_keyboard": [
-        [{"text": str(label), "callback_data": str(data)[:64]}
+        [{"text": str(label), "callback_data": short_data(data)}
          for label, data in row]
         for row in rows if row
     ]}
+
+
+# Сколько БАЙТОВ Telegram разрешает в значении кнопки. Не знаков: в
+# кириллице их по два, в эмодзи по четыре, и «🥳промокодом🥳 автовыдача😎»
+# — это 31 знак и 63 байта.
+CALLBACK_MAX = 64
+
+
+def short_data(value) -> str:
+    """Значение кнопки, укороченное по БАЙТАМ, а не по знакам.
+
+    Раньше стояло `str(value)[:64]` — обрезка по знакам, которая от
+    Telegram не спасала: он считает байты и на длинном значении отвергает
+    ВСЮ клавиатуру целиком (BUTTON_DATA_INVALID). Со стороны это выглядит
+    как «кнопки не нажимаются»: сообщение не обновилось, потому что не
+    отправилось вовсе.
+
+    Обрезка здесь — последняя защита, а не способ передавать данные:
+    обрезанное значение вызывающий уже не узнает. Поэтому в кнопки кладут
+    короткие метки (номер, id), а не подписи.
+    """
+    text = str(value)
+    raw = text.encode("utf-8")
+
+    if len(raw) <= CALLBACK_MAX:
+        return text
+
+    # Режем так, чтобы не разорвать символ пополам.
+    return raw[:CALLBACK_MAX].decode("utf-8", "ignore")
 
 
 def normalize_cookies(text: str) -> str:

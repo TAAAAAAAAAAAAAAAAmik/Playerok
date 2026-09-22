@@ -138,14 +138,24 @@ class SharesTest(unittest.TestCase):
                 ("Xbox 500", "PAID", 5000),
                 ("🏆 ПАКЕТ", "CONFIRMED", 1000)]
 
-        return sales.by_card(rows, card_of)
+        def card_with_label(name):
+            card = card_of(name)
+
+            if card is None:
+                return None
+
+            card.emoji, card.title = "", "Xbox"
+
+            return card
+
+        return sales.by_group(rows, card_with_label, lambda name: "Прочее")
 
     def test_the_sum_is_split_by_confirmed_sales(self):
         got = sales.shares(self.found(), 12000)
-        shares = dict((key, round(money)) for key, _, _, money in got)
+        shares = dict((one.label, round(money)) for _, one, _, money in got)
 
-        self.assertEqual(shares["xbox"], 9000)
-        self.assertEqual(shares[""], 3000)
+        self.assertEqual(shares["Xbox"], 9000)
+        self.assertEqual(shares["Прочее"], 3000)
 
     def test_the_shares_add_up_to_the_whole(self):
         got = sales.shares(self.found(), 12000)
@@ -155,22 +165,24 @@ class SharesTest(unittest.TestCase):
     def test_the_biggest_goes_first(self):
         got = sales.shares(self.found(), 12000)
 
-        self.assertEqual(got[0][0], "xbox")
+        self.assertEqual(got[0][1].label, "Xbox")
 
     def test_waiting_can_be_split_too(self):
         got = sales.shares(self.found(), 5000, "waiting")
 
         self.assertEqual(len(got), 1)
-        self.assertEqual(got[0][0], "xbox")
+        self.assertEqual(got[0][1].label, "Xbox")
 
     def test_nothing_confirmed_gives_nothing(self):
         """Делить нечего — не делим. Ни на ноль, ни поровну."""
         rows = [("Xbox 100", "PAID", 1000)]
+        found = sales.by_group(rows, card_of, lambda name: "Прочее")
 
-        self.assertEqual(sales.shares(sales.by_card(rows, card_of), 500), [])
+        self.assertEqual(sales.shares(found, 500), [])
 
     def test_no_sales_at_all(self):
         self.assertEqual(sales.shares({}, 1000), [])
+        self.assertEqual(sales.shares([], 1000), [])
 
     def test_zero_to_split_still_shows_the_shares(self):
         """Доли нужны и сами по себе: по ним видно, чем торгуешь."""

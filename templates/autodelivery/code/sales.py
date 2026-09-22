@@ -135,11 +135,16 @@ def by_group(rows, card_of, head_of) -> dict:
     return out
 
 
-def total_of(found: dict) -> Money:
+def rows_of(found):
+    """Итоги списком, как бы их ни передали: словарём или списком."""
+    return list(found.values()) if hasattr(found, "values") else list(found)
+
+
+def total_of(found) -> Money:
     """Сложить всё в один итог."""
     whole = Money()
 
-    for one in found.values():
+    for one in rows_of(found):
         whole.count += one.count
         whole.sold += one.sold
         whole.released += one.released
@@ -166,8 +171,10 @@ def shares(found: dict, money: float, field: str = "released") -> list:
     Если продаж нет вовсе, делить нечего: возвращается пустой список, а
     не деление на ноль и не «поровну».
     """
+    pairs = [(getattr(one, "label", "") or "", one)
+             for one in rows_of(found)]
     rows = [(key, one, float(getattr(one, field, 0.0) or 0.0))
-            for key, one in found.items()]
+            for key, one in pairs]
     whole = sum(value for _, _, value in rows)
 
     if whole <= 0:
