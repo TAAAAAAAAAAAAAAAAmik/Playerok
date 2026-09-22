@@ -455,14 +455,46 @@ def _direction_out():
 
 
 def _amount(deal: Any) -> float | None:
-    """Сумма сделки, если площадка её отдала."""
-    transaction = getattr(deal, "transaction", None)
-    value = getattr(transaction, "value", None) or getattr(transaction, "amount", None)
+    """Сумма сделки, если площадка её отдала.
 
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
+    Три источника по убыванию точности, и все три нужны. Транзакция есть
+    не у каждой сделки: в списке продаж площадка кладёт `transaction:
+    null`, и отчёт о деньгах выходил из одних нулей — «продано 0 ₽» по
+    всем категориям сразу.
+
+    Зато цена самого предмета приходит всегда, в любом его виде (MyItem,
+    ItemProfile). Она же и есть то, что заплатил покупатель.
+    """
+    transaction = getattr(deal, "transaction", None)
+    item = getattr(deal, "item", None)
+
+    for value in (getattr(transaction, "value", None),
+                  getattr(transaction, "amount", None),
+                  getattr(item, "price", None),
+                  getattr(item, "raw_price", None)):
+        if value in (None, ""):
+            continue
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+
+    return None
+
+
+def _game_label(deal: Any) -> str:
+    """Игра и категория предмета: «Roblox · Робуксы». Пусто — не отдали.
+
+    Площадка отдаёт предмет сделки в трёх видах. У «своего» (MyItem) игра
+    и категория есть, у укороченного профиля — нет вовсе, и тогда назвать
+    игру можно, только дочитав сам предмет.
+    """
+    item = getattr(deal, "item", None)
+    game = _text(getattr(getattr(item, "game", None), "name", ""))
+    category = _text(getattr(getattr(item, "category", None), "name", ""))
+
+    return " · ".join(part for part in (game, category) if part)
 
 
 # Как библиотека называет свои исключения входа. Смотреть надо на имя

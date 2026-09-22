@@ -192,5 +192,78 @@ class SharesTest(unittest.TestCase):
         self.assertAlmostEqual(got[0][2], 0.75)
 
 
+class ByGameTest(unittest.TestCase):
+    """Категория товара — это игра и раздел площадки, а не эмодзи в
+    названии.
+
+    «Roblox промокодом» и «Roblox геймпассом» — разный товар, и продавец
+    делит их так же. А два похожих названия одной игры — один товар,
+    даже если эмодзи в них разные.
+    """
+
+    def head_of(self, name):
+        return str(name).split()[0] if name else "Прочее"
+
+    def group(self, rows, game_of=None):
+        return sales.by_group(rows, card_of, self.head_of, game_of)
+
+    def test_the_game_wins_over_the_name(self):
+        rows = [("🥳ПРОМОКОДОМ🥳 робуксы", "CONFIRMED", 119,
+                 "Roblox · Промокоды"),
+                ("💥 МИНИМАЛЬНАЯ ЦЕНА робуксы", "CONFIRMED", 129,
+                 "Roblox · Промокоды")]
+        got = self.group(rows)
+
+        self.assertEqual(len(got), 1)
+        self.assertEqual(list(got.values())[0].sold, 248)
+
+    def test_one_game_two_categories_stay_apart(self):
+        """Промокод и геймпасс — разный товар и разная выдача."""
+        rows = [("80 РОБУКСОВ", "CONFIRMED", 99, "Roblox · Геймпассы"),
+                ("80 РОБУКСОВ", "CONFIRMED", 119, "Roblox · Промокоды")]
+
+        self.assertEqual(len(self.group(rows)), 2)
+
+    def test_the_label_is_the_game(self):
+        rows = [("что угодно", "CONFIRMED", 100, "ChatGPT · Подписки")]
+        one = list(self.group(rows).values())[0]
+
+        self.assertEqual(one.label, "ChatGPT · Подписки")
+
+    def test_a_missing_game_can_be_looked_up(self):
+        """У короткого предмета игры нет — её дочитывают у самого товара."""
+        rows = [("Claude Pro", "CONFIRMED", 1890, "", "i6")]
+        got = self.group(rows, game_of=lambda row: "Claude · Подписки")
+
+        self.assertEqual(list(got.values())[0].label, "Claude · Подписки")
+
+    def test_without_a_game_our_card_is_the_category(self):
+        def named(name):
+            card = card_of(name)
+
+            if card is not None:
+                card.emoji, card.title = "🟩", "Xbox"
+
+            return card
+
+        rows = [("Xbox Gift Card 100", "CONFIRMED", 900)]
+        got = sales.by_group(rows, named, self.head_of)
+        one = list(got.values())[0]
+
+        self.assertEqual(one.label, "🟩 Xbox")
+
+    def test_without_anything_the_name_is_the_last_resort(self):
+        rows = [("Аккаунт Steam 100 игр", "CONFIRMED", 500)]
+        one = list(self.group(rows).values())[0]
+
+        self.assertEqual(one.label, "Аккаунт")
+
+    def test_a_short_row_is_still_understood(self):
+        """Строки приходят из двух мест и бывают разной длины."""
+        got = self.group([("Xbox 100", "CONFIRMED", 900)])
+
+        self.assertEqual(sales.total_of(got).sold, 900)
+
+
 if __name__ == "__main__":
     unittest.main()

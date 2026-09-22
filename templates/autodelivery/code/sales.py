@@ -99,7 +99,8 @@ def by_card(rows, card_of) -> dict:
     """
     out: dict = {}
 
-    for title, status, amount in rows:
+    for row in rows:
+        title, status, amount, _game = row_of(row)
         card = card_of(str(title or ""))
         key = getattr(card, "slug", "") or ""
         out.setdefault(key, Money()).add(status, amount, title)
@@ -107,28 +108,57 @@ def by_card(rows, card_of) -> dict:
     return out
 
 
-def by_group(rows, card_of, head_of) -> dict:
-    """Сделки → {ключ: Money} по категориям, а не только по нашим картам.
+def row_of(row) -> tuple:
+    """Строка сделки в общем виде: (название, статус, сумма, игра).
 
-    Наши карты — своей кучкой: про них бот знает и закупку, и выдачу.
-    Остальное группируется по началу названия: продавец торгует не только
-    кодами, и «сколько принесли аккаунты» — такой же законный вопрос, как
-    «сколько принёс Xbox». Разбор названий тот же, что в списках товаров:
-    два разных однажды разошлись бы, и одна и та же продажа попадала бы в
-    разные кучки на разных экранах.
+    Читаем и короткую тройку, и четвёрку с игрой: строки приходят из двух
+    мест — от площадки и из тестов, — и требовать от обоих одного размера
+    значит чинить их каждый раз, когда прибавится поле.
+    """
+    row = tuple(row)
+
+    if len(row) >= 4:
+        return row[0], row[1], row[2], str(row[3] or "")
+
+    return row[0], row[1], row[2], ""
+
+
+def by_group(rows, card_of, head_of, game_of=None) -> dict:
+    """Сделки → {ключ: Money} по КАТЕГОРИИ ТОВАРА.
+
+    Что считать категорией, решают три источника по убыванию точности:
+
+    1. **игра и категория площадки** — «Roblox · Промокоды», «ChatGPT».
+       Это то, как продавец и сам делит свой товар, и берётся оно у
+       площадки, а не угадывается;
+    2. **наша карта** — когда игру площадка не отдала, но название
+       узнаётся: про свои карты бот знает и закупку, и выдачу;
+    3. **начало названия** — последний рубеж, когда не известно ничего.
+
+    Раньше первого источника не было вовсе, и «Roblox промокодом» и
+    «Roblox геймпассом» оказывались в разных кучках по эмодзи в названии,
+    а два похожих названия одной игры — в одной.
     """
     out: dict = {}
 
-    for title, status, amount in rows:
-        card = card_of(str(title or ""))
+    for row in rows:
+        title, status, amount, game = row_of(row)
 
-        if card is not None:
-            key = "к:" + str(getattr(card, "slug", ""))
-            label = f"{getattr(card, 'emoji', '')} " \
-                    f"{getattr(card, 'title', '')}".strip()
+        if not game and game_of is not None:
+            game = str(game_of(row) or "")
+
+        if game:
+            key, label = "и:" + game.lower(), game
         else:
-            label = head_of(str(title or "")) or "Прочее"
-            key = "н:" + label.lower()
+            card = card_of(str(title or ""))
+
+            if card is not None:
+                key = "к:" + str(getattr(card, "slug", ""))
+                label = f"{getattr(card, 'emoji', '')} " \
+                        f"{getattr(card, 'title', '')}".strip()
+            else:
+                label = head_of(str(title or "")) or "Прочее"
+                key = "н:" + label.lower()
 
         out.setdefault(key, Money(label)).add(status, amount, title)
 

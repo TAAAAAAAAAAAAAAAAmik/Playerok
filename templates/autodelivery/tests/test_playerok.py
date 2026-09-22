@@ -12,6 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 
+import playerok                                                # noqa: E402
 from playerok import PlayerokMarketplace, _explain             # noqa: E402
 
 
@@ -24,11 +25,15 @@ class FakeStatus:
 
 class FakeItem:
     def __init__(self, name: str, description: str = "", item_id="i1",
-                 attributes=None):
+                 attributes=None, price=None, game="", category=""):
         self.name = name
         self.description = description
         self.id = item_id
         self.attributes = attributes
+        self.price = price
+        self.raw_price = price
+        self.game = type("G", (), {"name": game})() if game else None
+        self.category = type("C", (), {"name": category})() if category else None
 
 
 class FakeChat:
@@ -43,10 +48,12 @@ class FakeUser:
 
 class FakeDeal:
     def __init__(self, deal_id, status, title="", description="",
-                 chat_id="", buyer="", item_id="i1"):
+                 chat_id="", buyer="", item_id="i1", price=None, game="",
+                 category=""):
         self.id = deal_id
         self.status = FakeStatus(status)
-        self.item = FakeItem(title, description, item_id)
+        self.item = FakeItem(title, description, item_id, price=price,
+                             game=game, category=category)
         self.chat = FakeChat(chat_id) if chat_id else None
         self.user = FakeUser(buyer)
         self.transaction = None
@@ -462,6 +469,44 @@ class ProtocolTest(unittest.TestCase):
 
         self.assertEqual(market.order_url(""), "")
         self.assertIn("playerok.com", market.order_url("42"))
+
+
+class AmountTest(unittest.TestCase):
+    """Сумма сделки. Отчёт о деньгах из одних нулей — хуже отсутствия
+    отчёта."""
+
+    def test_the_transaction_is_taken_first(self):
+        deal = FakeDeal("d1", "PAID", price=500)
+        deal.transaction = type("T", (), {"value": 900})()
+
+        self.assertEqual(playerok._amount(deal), 900)
+
+    def test_without_a_transaction_the_item_price_is_used(self):
+        """В списке продаж площадка кладёт transaction: null, и продажи
+        считались нулями по всем категориям сразу."""
+        self.assertEqual(playerok._amount(FakeDeal("d1", "PAID", price=900)),
+                         900)
+
+    def test_nothing_at_all_is_none_not_zero(self):
+        self.assertIsNone(playerok._amount(FakeDeal("d1", "PAID")))
+
+
+class GameLabelTest(unittest.TestCase):
+    """Игра и категория предмета — то, как продавец сам делит свой товар."""
+
+    def test_the_game_and_the_category_come_together(self):
+        deal = FakeDeal("d1", "PAID", game="Roblox", category="Промокоды")
+
+        self.assertEqual(playerok._game_label(deal), "Roblox · Промокоды")
+
+    def test_a_game_without_a_category(self):
+        deal = FakeDeal("d1", "PAID", game="ChatGPT")
+
+        self.assertEqual(playerok._game_label(deal), "ChatGPT")
+
+    def test_a_short_item_has_no_game(self):
+        """Тогда игру можно узнать только у самого предмета."""
+        self.assertEqual(playerok._game_label(FakeDeal("d1", "PAID")), "")
 
 
 if __name__ == "__main__":

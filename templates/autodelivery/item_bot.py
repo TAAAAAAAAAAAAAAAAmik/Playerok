@@ -2945,7 +2945,8 @@ def read_deals(account, pages: int = DEALS_PAGES) -> tuple:
     этом только площадка.
     """
     try:
-        from playerok import _amount, _direction_out, _status_name
+        from playerok import (_amount, _direction_out, _game_label,
+                              _status_name)
     except ImportError as e:                                  # noqa: BLE001
         raise RuntimeError(f"адаптер площадки не подключается: {e}")
 
@@ -2973,7 +2974,9 @@ def read_deals(account, pages: int = DEALS_PAGES) -> tuple:
             item = getattr(deal, "item", None)
             out.append((str(getattr(item, "name", "") or ""),
                         _status_name(getattr(deal, "status", None)),
-                        _amount(deal)))
+                        _amount(deal),
+                        _game_label(deal),
+                        str(getattr(item, "id", "") or "")))
 
         if not getattr(page, "has_next_page", False):
             break
@@ -4368,6 +4371,74 @@ def deals_now(account, fresh: bool = False) -> tuple:
     return rows, whole, ""
 
 
+# Сколько предметов дочитывать за раз ради их игры. Каждый — запрос к
+# площадке; узнанное запоминается навсегда, поэтому со второго раза экран
+# открывается без единого лишнего вызова.
+GAMES_AT_ONCE = 12
+
+
+def known_games(conf) -> dict:
+    """Что уже знаем про игры предметов: {номер предмета: «Игра · Раздел»}."""
+    shared = conf.store.shared()
+    found = shared.get("games")
+
+    if not isinstance(found, dict):
+        found = shared["games"] = {}
+
+    return found
+
+
+def learn_games(account, conf, rows) -> int:
+    """Дочитать игру у предметов, про которые ещё не знаем. → сколько узнали.
+
+    Площадка отдаёт предмет сделки в двух видах, и у короткого игры нет
+    вовсе. Тогда её можно узнать только у самого предмета — по одному
+    запросу на предмет, а не на сделку: один и тот же товар продаётся
+    десятки раз.
+
+    Узнанное кладётся в состояние навсегда: игра у товара не меняется.
+    """
+    games = known_games(conf)
+    unknown = []
+
+    for row in rows:
+        item_id = str(row[4]) if len(row) > 4 else ""
+
+        if not item_id or row[3] or item_id in games:
+            continue
+
+        if item_id not in unknown:
+            unknown.append(item_id)
+
+    if not unknown:
+        return 0
+
+    learned = 0
+
+    for number, item_id in enumerate(unknown[:GAMES_AT_ONCE]):
+        if number:
+            time.sleep(PAGE_PAUSE)
+
+        try:
+            item = account.get_item(id=item_id)
+        except Exception:                                     # noqa: BLE001
+            continue
+
+        game = str(getattr(getattr(item, "game", None), "name", "") or "")
+        category = str(getattr(getattr(item, "category", None), "name", "")
+                       or "")
+        label = " · ".join(part for part in (game, category) if part)
+
+        if label:
+            games[item_id] = label
+            learned += 1
+
+    if learned:
+        conf.store.save()
+
+    return learned
+
+
 def groups_of(account, fresh: bool = False) -> tuple:
     """Продажи по категориям → (список, всё ли прочитано, причина отказа).
 
@@ -4385,8 +4456,12 @@ def groups_of(account, fresh: bool = False) -> tuple:
     if why:
         return [], whole, why
 
-    found = sales.by_group(rows, lambda name: card_for_title(CARDS, name),
-                           grouping.head)
+    conf = settings_of()
+    learn_games(account, conf, rows)
+    games = known_games(conf)
+    found = sales.by_group(
+        rows, lambda name: card_for_title(CARDS, name), grouping.head,
+        game_of=lambda row: games.get(str(row[4]) if len(row) > 4 else ""))
 
     return sorted(found.values(), key=lambda one: -one.sold), whole, ""
 

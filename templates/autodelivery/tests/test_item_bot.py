@@ -2303,6 +2303,142 @@ class TuneCardTest(unittest.TestCase):
         self.assertIn("🚀 Настроить выдачу", names)
 
 
+class SalesByGameTest(unittest.TestCase):
+    """Категории продаж — игры площадки, а не эмодзи в названиях.
+
+    «Roblox промокодом» и «Roblox геймпассом» — разный товар с разной
+    выдачей, а «💥 МИНИМАЛЬНАЯ ЦЕНА» и «😍ВЫГОДНО😍» с робуксами — один и
+    тот же. Делить их по началу названия значит перепутать и то и другое.
+    """
+
+    DEALS = [("🥳ПРОМОКОДОМ🥳 АВТОВЫДАЧА😎", "CONFIRMED", "i1", 119,
+              "Roblox", "Промокоды"),
+             ("💥 МИНИМАЛЬНАЯ ЦЕНА 100 робуксов", "CONFIRMED", "i2", 129,
+              None, None),
+             ("🔴 80 РОБУКСОВ ГЕЙМПАСС", "CONFIRMED", "i4", 99, None, None),
+             ("ChatGPT Plus 1 месяц", "PAID", "i5", 1490, "ChatGPT",
+              "Подписки")]
+
+    ITEMS = {"i2": ("Roblox", "Промокоды"), "i4": ("Roblox", "Геймпассы")}
+
+    class Account:
+        def __init__(self, deals, items):
+            self.deals, self.items = deals, items
+            self.asked = []
+            self.profile = type("P", (), {"balance": None})()
+
+        def get(self):
+            return self.profile
+
+        def get_deals(self, direction=None, count=24, after_cursor=None):
+            rows = []
+
+            for name, status, item_id, price, game, category in self.deals:
+                item = type("I", (), {
+                    "name": name, "id": item_id, "price": price,
+                    "raw_price": price,
+                    "game": type("G", (), {"name": game})() if game else None,
+                    "category": (type("C", (), {"name": category})()
+                                 if category else None)})()
+                rows.append(type("D", (), {
+                    "item": item, "transaction": None,
+                    "status": type("S", (), {"name": status})()})())
+
+            return type("P", (), {"deals": rows, "has_next_page": False,
+                                  "end_cursor": None})()
+
+        def get_item(self, id=None):
+            self.asked.append(id)
+            game, category = self.items.get(id, (None, None))
+
+            if game is None:
+                raise RuntimeError("предмет не отдали")
+
+            return type("I", (), {
+                "game": type("G", (), {"name": game})(),
+                "category": type("C", (), {"name": category})()})()
+
+        def get_my_reviews(self, count=24, **kw):
+            return type("P", (), {"reviews": [], "total_count": 0})()
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.forget_deals()
+        self._pause = item_bot.PAGE_PAUSE
+        item_bot.PAGE_PAUSE = 0
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.forget_deals()
+
+    def account(self):
+        return self.Account(self.DEALS, self.ITEMS)
+
+    def sales_screen(self, account=None):
+        link = FakeLink([item_bot.PICK_STAT + "sales", "отмена"])
+        item_bot.stats_menu(link, account or self.account())
+
+        return link.asked[-1][0]
+
+    def test_the_money_is_not_zero(self):
+        """Транзакции у сделки нет — сумма берётся из цены предмета."""
+        said = self.sales_screen()
+
+        self.assertNotIn("Всего: 0 ₽", said)
+        self.assertIn("1 837 ₽", said)
+
+    def test_categories_are_games(self):
+        said = self.sales_screen()
+
+        self.assertIn("Roblox · Промокоды", said)
+        self.assertIn("ChatGPT · Подписки", said)
+
+    def test_one_game_two_categories_stay_apart(self):
+        said = self.sales_screen()
+
+        self.assertIn("Roblox · Геймпассы", said)
+
+    def test_different_names_of_one_game_come_together(self):
+        """«🥳ПРОМОКОДОМ🥳» и «💥 МИНИМАЛЬНАЯ ЦЕНА» — один товар."""
+        said = self.sales_screen()
+
+        self.assertIn("Roblox · Промокоды: 248 ₽ (2)", said)
+
+    def test_the_game_is_asked_only_for_unknown_items(self):
+        """Один и тот же товар продаётся десятки раз — спрашивать про
+        каждую сделку значит выбрать лимит площадки."""
+        account = self.account()
+        self.sales_screen(account)
+
+        self.assertEqual(sorted(account.asked), ["i2", "i4"])
+
+    def test_what_was_learned_is_remembered(self):
+        account = self.account()
+        self.sales_screen(account)
+        account.asked.clear()
+        item_bot.forget_deals()
+        self.sales_screen(account)
+
+        self.assertEqual(account.asked, [])
+
+    def test_an_item_the_platform_will_not_tell_about(self):
+        """Тогда в дело идут прежние правила: сначала наша карта…"""
+        account = self.Account(self.DEALS, {})
+        said = self.sales_screen(account)
+
+        self.assertIn("Roblox Gift Cards", said)
+
+    def test_and_the_name_is_the_last_resort(self):
+        """…а когда и карта не узнаёт — начало названия, а не пустота."""
+        deals = [("🏆 ПОПУЛЯРНЫЙ ПАКЕТ • 3 LVL", "CONFIRMED", "i9", 2500,
+                  None, None)]
+        said = self.sales_screen(self.Account(deals, {}))
+
+        self.assertIn("ПОПУЛЯРНЫЙ", said)
+
+
 class StatsMenuTest(unittest.TestCase):
     """📊 Статистика: сводка и разделы за кнопками.
 
