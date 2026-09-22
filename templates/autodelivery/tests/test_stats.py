@@ -235,5 +235,91 @@ class ReviewsTest(unittest.TestCase):
         self.assertEqual(stats.stars("нет"), "")
 
 
+class UnknownRevenueTest(unittest.TestCase):
+    """Известную закупку нельзя вычитать из неизвестной выручки.
+
+    Живой случай: у одиннадцати выдач сумма сделки не записана (их делали
+    до того, как бот стал её запоминать), а цена закупки записана всегда.
+    Отчёт показал «продано 0 ₽ · профит −2 131 ₽» — убыток, которого не
+    было.
+    """
+
+    def old(self, price=2.3):
+        """Старая выдача: закупка известна, сумма сделки — нет."""
+        row = entry(price=price)
+        del row["paid"]
+
+        return row
+
+    def test_profit_is_not_counted_at_all(self):
+        one = stats.Sum()
+        one.add(self.old())
+
+        self.assertIsNone(one.profit(84))
+
+    def test_the_revenue_is_not_called_zero(self):
+        one = stats.Sum()
+        one.add(self.old())
+
+        self.assertEqual(stats.revenue_line(one), "сумма не записана")
+
+    def test_the_reason_is_named(self):
+        one = stats.Sum()
+        one.add(self.old())
+
+        self.assertIn("не из чего", stats.profit_line(one, 84))
+
+    def test_the_known_ones_are_counted_alone(self):
+        """Одна выдача с суммой — профит по ней, а не по всем."""
+        one = stats.Sum()
+        one.add(self.old())
+        one.add(entry(paid=299, price=2.3))
+
+        self.assertAlmostEqual(one.profit(100), 299 - 230)
+        self.assertEqual(one.pairs, 1)
+
+    def test_it_says_how_many_it_counted(self):
+        one = stats.Sum()
+        one.add(self.old())
+        one.add(entry(paid=299, price=2.3))
+
+        self.assertIn("по 1 из 2", stats.profit_line(one, 100))
+
+    def test_the_margin_is_counted_from_the_same_revenue(self):
+        """Делить прибыль по части выдач на выручку по всем — значит
+        занизить её без предупреждения."""
+        one = stats.Sum()
+        one.add(self.old())
+        one.add(entry(paid=200, price=1.0))
+
+        self.assertAlmostEqual(stats.margin(one, 100), 50.0)
+
+    def test_the_cost_is_still_shown_in_full(self):
+        """Деньги потрачены — про них молчать нельзя."""
+        one = stats.Sum()
+        one.add(self.old(price=2.3))
+        one.add(entry(paid=299, price=2.3))
+
+        self.assertAlmostEqual(one.cost["USD"], 4.6)
+
+    def test_totals_keep_the_pairs_apart(self):
+        store = Store({"xbox": [self.old(), entry(paid=900, price=3.0)],
+                       "robux": [self.old()]})
+        whole = stats.total_of(stats.by_card(store, [XBOX, ROBUX]))
+
+        self.assertEqual(whole.count, 3)
+        self.assertEqual(whole.pairs, 1)
+        self.assertEqual(whole.profit(100), 900 - 300)
+
+    def test_a_cost_without_a_price_is_not_a_pair_either(self):
+        row = entry(paid=900)
+        del row["price"]
+        one = stats.Sum()
+        one.add(row)
+
+        self.assertIsNone(one.profit(100))
+        self.assertEqual(one.unknown_cost, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -55,6 +55,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import os
@@ -4425,8 +4426,8 @@ def stats_menu(link, account, fresh: bool = False) -> None:
         profit = whole_sum.profit(rate)
         lines.append(f"💹 Профит бота: "
                      + (stats.money(profit) if profit is not None
-                        else f"закупка {stats.cost_line(whole_sum.cost)}, "
-                             f"курс не задан")
+                        else stats.profit_line(whole_sum, rate).replace(
+                            "профит: ", ""))
                      + f" · выдано {plural(whole_sum.count, 'код', 'кода', 'кодов')}")
     else:
         lines.append("💹 Бот пока не выдал ни одного кода.")
@@ -4642,18 +4643,11 @@ def stats_group(link, account, key: str) -> None:
         got = mine.get(card.slug)
 
         if got is not None and got.count:
-            profit = got.profit(rate)
             lines += ["", f"Выдано ботом: "
                           + plural(got.count, "код", "кода", "кодов"),
                       f"Закупка: {stats.cost_line(got.cost) or '—'}"]
 
-            if profit is not None:
-                share = stats.margin(got, rate)
-                lines.append(f"Профит: {stats.money(profit)}"
-                             + (f" ({share:.0f}%)" if share is not None
-                                else ""))
-            else:
-                lines.append("Профит: курс доллара не задан")
+            lines.append(stats.profit_line(got, rate).capitalize())
         else:
             lines += ["", "Бот по этой карте ещё ничего не выдавал — "
                           "закупку взять неоткуда."]
@@ -4697,17 +4691,10 @@ def stats_profit(link, account) -> None:
             continue
 
         any_sold = True
-        profit = total.profit(rate)
-        line = (f"{label}: {stats.money(total.revenue)} за "
-                + plural(total.count, "код", "кода", "кодов")
-                + f" · закупка {stats.cost_line(total.cost) or '—'}")
-
-        if profit is not None:
-            share = stats.margin(total, rate)
-            line += (f" · профит {stats.money(profit)}"
-                     + (f" ({share:.0f}%)" if share is not None else ""))
-
-        lines.append(line)
+        lines.append(f"{label}: {stats.revenue_line(total)} за "
+                     + plural(total.count, "код", "кода", "кодов")
+                     + f" · закупка {stats.cost_line(total.cost) or '—'}"
+                     + f" · {stats.profit_line(total, rate)}")
 
     if not any_sold:
         lines.append("Бот пока не выдал ни одного кода.")
@@ -4716,29 +4703,37 @@ def stats_profit(link, account) -> None:
         lines.append("")
 
         for card, one in rows:
-            profit = one.profit(rate)
             lines.append(f"{card.emoji} {card.title}")
-            lines.append(f"    продано {stats.money(one.revenue)} за "
+            lines.append(f"    продано {stats.revenue_line(one)} за "
                          + plural(one.count, "код", "кода", "кодов")
-                         + f" · чек {stats.money(one.average)}")
-            lines.append(f"    закупка {stats.cost_line(one.cost) or '—'}"
-                         + (f" · профит {stats.money(profit)}"
-                            if profit is not None else ""))
+                         + (f" · чек {stats.money(one.average)}"
+                            if one.known else ""))
+            lines.append(f"    закупка {stats.cost_line(one.cost) or '—'} · "
+                         + stats.profit_line(one, rate))
 
         total = stats.total_of(rows)
 
         if total.unknown_price:
             lines += ["", f"⚠️ У {total.unknown_price} выдач сумма сделки не "
-                          f"записана — они не в счёте. Так бывает у выдач, "
-                          f"сделанных до того, как бот стал её запоминать."]
+                          f"записана, и профит по ним не считается: "
+                          f"известную закупку нельзя вычитать из "
+                          f"неизвестной выручки — вышел бы убыток, "
+                          f"которого не было. Так у всех выдач, сделанных "
+                          f"до того, как бот стал запоминать сумму."]
 
         if not rate and total.cost:
             lines += ["", "💱 Курс доллара не задан — профит в рублях "
                           "посчитать не из чего."]
 
+    extra = [[("💱 Курс доллара", PICK_STAT + "rate")]]
+    rows = stats.by_card(conf.store, CARDS)
+
+    if stats.total_of(rows).unknown_price:
+        extra.insert(0, [("📥 Дочитать суммы сделок",
+                          PICK_STAT + "fill")])
+
     answer = link.ask("\n".join(lines), ANSWER_WAIT,
-                      buttons=back_keys([[("💱 Курс доллара",
-                                           PICK_STAT + "rate")]]))
+                      buttons=back_keys(extra))
     text = str(answer.get("text") or "").strip()
 
     if stats_back(link, account, text):
@@ -4748,7 +4743,89 @@ def stats_profit(link, account) -> None:
         ask_rate(link, conf)
         return
 
+    if text == PICK_STAT + "fill":
+        fill_sums(link, account, conf)
+        return
+
     link.screen("Готово.", buttons=MENU)
+
+
+# Сколько сделок дочитывать за раз. Каждая — запрос к площадке, а она
+# считает частые обращения; больше сорока за нажатие не берём.
+FILL_MAX = 40
+
+
+def fill_sums(link, account, conf) -> None:
+    """📥 Дочитать у площадки суммы старых выдач.
+
+    Выдачи, сделанные до того, как бот стал запоминать сумму сделки, в
+    профит не попадают. Но сами сделки никуда не делись — площадка
+    помнит их и отдаёт по номеру. Дочитать дешевле, чем навсегда
+    вычеркнуть их из отчёта.
+    """
+    link.screen("Спрашиваю площадку о старых сделках…")
+    rows = []
+
+    for card in CARDS:
+        for entry in conf.store.conf(card.slug).get("log") or []:
+            if not isinstance(entry, dict) or entry.get("paid") is not None:
+                continue
+
+            if str(entry.get("state") or "") != stats.DONE:
+                continue
+
+            if str(entry.get("order") or ""):
+                rows.append(entry)
+
+    if not rows:
+        link.screen("Дочитывать нечего: суммы есть у всех выдач.",
+                    buttons=MENU)
+        return
+
+    from playerok import PlayerokMarketplace
+
+    market = PlayerokMarketplace(account)
+    done = 0
+    failed = 0
+
+    for number, entry in enumerate(rows[:FILL_MAX]):
+        if number:
+            time.sleep(PAGE_PAUSE)
+
+        try:
+            order = asyncio.run(market.get_order(str(entry.get("order"))))
+        except Exception:                                     # noqa: BLE001
+            failed += 1
+            continue
+
+        amount = getattr(order, "amount", None) if order is not None else None
+
+        if amount is None:
+            failed += 1
+            continue
+
+        entry["paid"] = float(amount)
+
+        if not entry.get("name"):
+            entry["name"] = str(getattr(order, "title", "") or "")[:120]
+
+        done += 1
+
+    conf.store.save()
+    left = max(0, len(rows) - FILL_MAX)
+    said = [f"Дочитал сумм: {done} из {len(rows[:FILL_MAX])}."]
+
+    if failed:
+        said.append(f"Не отдала площадка: {failed} — у старых сделок такое "
+                    f"бывает, их она уже не хранит.")
+
+    if left:
+        said.append(f"Осталось ещё {left} — нажмите ещё раз, чтобы не "
+                    f"выбрать лимит площадки разом.")
+
+    said.append("")
+    said.append("Теперь профит считается и по ним.")
+    link.screen("\n".join(said), buttons=MENU)
 
 
 def stats_reviews(link, account) -> None:

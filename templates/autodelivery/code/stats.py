@@ -65,6 +65,15 @@ class Sum:
         self.unknown_cost = 0          # записей без цены закупки
         self.first = 0.0               # когда была первая выдача
         self.last = 0.0                # когда последняя
+        # Профит считается ТОЛЬКО по записям, где известны оба числа.
+        #
+        # Иначе выходит так: у старых выдач сумма сделки не записана, а
+        # цена закупки записана всегда — и «ноль минус закупка» даёт
+        # минус две тысячи там, где на самом деле продано на десять.
+        # Отчёт о деньгах показывал убыток вместо прибыли.
+        self.pairs = 0                 # записей, где известно и то и то
+        self.pair_revenue = 0.0        # их выручка
+        self.pair_cost: dict = {}      # их закупка по валютам
 
     def add(self, entry: dict) -> None:
         self.count += 1
@@ -76,12 +85,17 @@ class Sum:
             self.revenue += paid
 
         cost = _number(entry.get("price"))
+        money = str(entry.get("currency") or "USD").upper()
 
         if cost is None:
             self.unknown_cost += 1
         else:
-            money = str(entry.get("currency") or "USD").upper()
             self.cost[money] = self.cost.get(money, 0.0) + cost
+
+        if paid is not None and cost is not None:
+            self.pairs += 1
+            self.pair_revenue += paid
+            self.pair_cost[money] = self.pair_cost.get(money, 0.0) + cost
 
         at = when(entry)
 
@@ -90,20 +104,24 @@ class Sum:
             self.last = max(self.last, at)
 
     @property
+    def known(self) -> int:
+        """По скольким выдачам известна сумма сделки."""
+        return self.count - self.unknown_price
+
+    @property
     def average(self) -> float:
         """Средний чек. Только по записям, где сумма известна."""
-        known = self.count - self.unknown_price
+        return self.revenue / self.known if self.known else 0.0
 
-        return self.revenue / known if known else 0.0
-
-    def cost_in_rubles(self, rate: float) -> float | None:
+    def cost_in_rubles(self, rate: float, cost: dict | None = None):
         """Закупка в рублях по курсу продавца. None — курс не назван.
 
         Рублёвая часть закупки в пересчёте не нуждается и прибавляется как
         есть: у поставщика бывают и рублёвые счета.
         """
-        rubles = self.cost.get("RUB", 0.0) + self.cost.get("RUR", 0.0)
-        other = sum(value for money, value in self.cost.items()
+        cost = self.cost if cost is None else cost
+        rubles = cost.get("RUB", 0.0) + cost.get("RUR", 0.0)
+        other = sum(value for money, value in cost.items()
                     if money not in ("RUB", "RUR"))
 
         if other and not rate:
@@ -112,10 +130,18 @@ class Sum:
         return rubles + other * rate
 
     def profit(self, rate: float) -> float | None:
-        """Профит в рублях. None — пока не с чем сравнивать."""
-        spent = self.cost_in_rubles(rate)
+        """Профит в рублях. None — считать не из чего.
 
-        return None if spent is None else self.revenue - spent
+        Считается по записям, где известны ОБА числа. Смешивать известную
+        закупку с неизвестной выручкой нельзя: получится убыток, которого
+        не было.
+        """
+        if not self.pairs:
+            return None
+
+        spent = self.cost_in_rubles(rate, self.pair_cost)
+
+        return None if spent is None else self.pair_revenue - spent
 
 
 def by_card(store, cards, since: float = 0.0) -> list:
@@ -153,9 +179,14 @@ def total_of(rows: list) -> Sum:
         whole.unknown_cost += one.unknown_cost
         whole.first = min(whole.first or one.first, one.first or whole.first)
         whole.last = max(whole.last, one.last)
+        whole.pairs += one.pairs
+        whole.pair_revenue += one.pair_revenue
 
         for money, value in one.cost.items():
             whole.cost[money] = whole.cost.get(money, 0.0) + value
+
+        for money, value in one.pair_cost.items():
+            whole.pair_cost[money] = whole.pair_cost.get(money, 0.0) + value
 
     return whole
 
@@ -176,6 +207,44 @@ def money(value) -> str:
     return f"{whole} ₽"
 
 
+def revenue_line(one: Sum) -> str:
+    """Выручка словами. Ноль показывается нулём, только если он настоящий.
+
+    «0 ₽ за 11 кодов» читается как «продали на ноль», хотя на деле суммы
+    просто не записаны. Это разные вещи, и путать их в отчёте о деньгах
+    нельзя.
+    """
+    if one.count and not one.known:
+        return "сумма не записана"
+
+    if one.known < one.count:
+        return f"{money(one.revenue)} (по {one.known} из {one.count})"
+
+    return money(one.revenue)
+
+
+def profit_line(one: Sum, rate: float) -> str:
+    """Профит словами: с оговоркой, если посчитан не по всем выдачам."""
+    got = one.profit(rate)
+
+    if got is None:
+        if not one.pairs:
+            return "профит: не из чего считать"
+
+        return "профит: курс доллара не задан"
+
+    share = margin(one, rate)
+    line = "профит " + money(got)
+
+    if share is not None:
+        line += f" ({share:.0f}%)"
+
+    if one.pairs < one.count:
+        line += f" — по {one.pairs} из {one.count}"
+
+    return line
+
+
 def cost_line(cost: dict) -> str:
     """Закупка по валютам одной строкой: «38.4 $ · 1 200 ₽»."""
     signs = {"USD": "$", "RUB": "₽", "RUR": "₽", "EUR": "€"}
@@ -190,13 +259,18 @@ def cost_line(cost: dict) -> str:
 
 
 def margin(one: Sum, rate: float) -> float | None:
-    """Доля профита в выручке, процентами. None — не посчитать."""
+    """Доля профита в выручке, процентами. None — не посчитать.
+
+    Доля считается от ТОЙ ЖЕ выручки, из которой посчитан профит: делить
+    прибыль по части выдач на выручку по всем — значит занизить её без
+    предупреждения.
+    """
     got = one.profit(rate)
 
-    if got is None or not one.revenue:
+    if got is None or not one.pair_revenue:
         return None
 
-    return got / one.revenue * 100.0
+    return got / one.pair_revenue * 100.0
 
 
 # ---------------------------------------------------------------------------

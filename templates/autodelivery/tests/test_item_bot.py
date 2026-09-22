@@ -2503,7 +2503,7 @@ class StatsMenuTest(unittest.TestCase):
                            item_bot.PICK_STAT + "g:к:xbox", "отмена"])
 
         self.assertIn("Закупка: 7.1 $", said)
-        self.assertIn("Профит: 1 426 ₽", said)
+        self.assertIn("Профит 1 426 ₽", said)
 
     def test_a_foreign_category_promises_no_profit(self):
         """Закупку чужого товара бот не знает и выдумывать не станет."""
@@ -2554,7 +2554,7 @@ class StatsMenuTest(unittest.TestCase):
         said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
 
         self.assertIn("Курс доллара не задан", said)
-        self.assertNotIn("· профит", said)
+        self.assertNotIn("профит 1", said)
 
     def test_the_cost_is_always_shown(self):
         self.sold()
@@ -2577,6 +2577,82 @@ class StatsMenuTest(unittest.TestCase):
         said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
 
         self.assertIn("сумма сделки не записана", said)
+
+    def test_old_deliveries_do_not_show_a_loss(self):
+        """Живой случай: у 11 выдач суммы нет, закупка есть — и отчёт
+        показывал «профит −2 131 ₽»."""
+        conf = item_bot.settings_of()
+        conf.set_rate(84)
+        log = conf.store.conf("robux").setdefault("log", [])
+
+        for number in range(11):
+            log.append({"order": f"old{number}", "state": "выдан",
+                        "price": 2.3, "currency": "USD", "at": time.time(),
+                        "done_at": time.time()})
+
+        conf.store.save()
+        said = self.asked([item_bot.PICK_STAT + "profit", "отмена"])
+
+        self.assertNotIn("-", said)
+        self.assertIn("не из чего считать", said)
+        self.assertIn("сумма не записана", said)
+
+    def test_the_missing_sums_can_be_fetched(self):
+        """Площадка помнит сделки — дочитать дешевле, чем вычеркнуть."""
+        conf = item_bot.settings_of()
+        log = conf.store.conf("robux").setdefault("log", [])
+        log.append({"order": "d-1", "state": "выдан", "price": 2.3,
+                    "currency": "USD", "at": time.time(),
+                    "done_at": time.time()})
+        conf.store.save()
+
+        class Remembers(self.Account):
+            def get_deal(self, deal_id):
+                return type("D", (), {
+                    "id": deal_id,
+                    "item": type("I", (), {"name": "Робуксы",
+                                           "description": ""})(),
+                    "status": type("S", (), {"name": "CONFIRMED"})(),
+                    "chat": type("C", (), {"id": "c1"})(),
+                    "user": type("U", (), {"username": "vasya"})(),
+                    "transaction": type("T", (), {"value": 299})()})()
+
+        link = FakeLink([item_bot.PICK_STAT + "profit",
+                         item_bot.PICK_STAT + "fill"])
+        item_bot.stats_menu(link, Remembers(self.Balance()))
+        entry = item_bot.settings_of().store.conf("robux")["log"][0]
+
+        self.assertEqual(entry["paid"], 299)
+        self.assertIn("Дочитал сумм: 1", link.said[-1])
+
+    def test_nothing_to_fetch_is_said_plainly(self):
+        self.sold()
+        link = FakeLink([item_bot.PICK_STAT + "profit",
+                         item_bot.PICK_STAT + "fill"])
+        item_bot.stats_menu(link, self.account())
+
+        self.assertIn("Дочитывать нечего", link.said[-1])
+
+    def test_a_deal_the_platform_forgot_is_counted_apart(self):
+        conf = item_bot.settings_of()
+        conf.store.conf("robux").setdefault("log", []).append(
+            {"order": "gone", "state": "выдан", "price": 2.3,
+             "currency": "USD", "at": time.time(), "done_at": time.time()})
+        conf.store.save()
+
+        class Forgot(self.Account):
+            def get_deal(self, deal_id):
+                raise RuntimeError("нет такой сделки")
+
+            def get_deals(self, direction=None, count=24, after_cursor=None):
+                return type("P", (), {"deals": [], "has_next_page": False,
+                                      "end_cursor": None})()
+
+        link = FakeLink([item_bot.PICK_STAT + "profit",
+                         item_bot.PICK_STAT + "fill"])
+        item_bot.stats_menu(link, Forgot(self.Balance()))
+
+        self.assertIn("Не отдала площадка: 1", link.said[-1])
 
     # ---------- отзывы ----------
 
