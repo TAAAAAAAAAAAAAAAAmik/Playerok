@@ -721,6 +721,10 @@ class Denomination:
     price: float | None = None
     in_stock: int = 0
     region: str = ""
+    # Валюта закупки. У поставщика цены в USD, но счета есть и рублёвые, и
+    # без валюты «закуплено на 38.4» — это не число, а загадка: то ли
+    # тридцать восемь долларов, то ли тридцать восемь рублей.
+    currency: str = "USD"
 
 
 def match_denomination(rows: list[Denomination], region: str,
@@ -836,6 +840,7 @@ ITEM_FIELDS = ("items", "denominations", "nominals", "values")
 # Где лежит число, которое мы считаем номиналом. Если ни одного нет —
 # читаем его из названия, как делаем с товарами площадки.
 VALUE_FIELDS = ("value", "denomination", "nominal", "amount", "faceValue")
+PRICE_CURRENCY_FIELDS = ("currency", "currencyCode", "priceCurrency")
 
 NAME_FIELDS = ("name", "title", "label", "denominationName")
 STOCK_FIELDS = ("inStock", "stock", "quantity", "available", "count")
@@ -909,6 +914,9 @@ def denominations_from(service: dict, service_id: str = "",
             # такой номинал выглядел бы доступным.
             in_stock=max(0, int(stock)),
             region=region.upper(),
+            currency=str(_first(item, PRICE_CURRENCY_FIELDS, "")
+                         or _first(service, PRICE_CURRENCY_FIELDS, "")
+                         or "USD").upper(),
         ))
 
     return rows

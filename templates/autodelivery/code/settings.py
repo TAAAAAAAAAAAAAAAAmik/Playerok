@@ -118,6 +118,27 @@ class Settings:
         self._shared()["paused"] = bool(on)
         self.store.save()
 
+    def rate(self) -> float:
+        """Курс доллара, которым считать закупку в рублях. 0 — не задан.
+
+        Задаёт продавец: настоящего курса ни площадка, ни поставщик не
+        отдают, а выдумывать его в отчёте о деньгах нельзя. Не задан —
+        отчёт честно показывает закупку в долларах отдельной строкой.
+        """
+        try:
+            return float(self._shared().get("rate") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def set_rate(self, value) -> None:
+        try:
+            rate = float(str(value).replace(",", ".").strip())
+        except (TypeError, ValueError):
+            rate = 0.0
+
+        self._shared()["rate"] = max(0.0, rate)
+        self.store.save()
+
     def held(self) -> dict:
         """Заказы на паузе: номер → {«title», «at»}."""
         rows = self._shared().get("held")

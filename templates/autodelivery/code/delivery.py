@@ -40,6 +40,14 @@ from supplier import TERMINAL_STATUSES, Supplier, balance_line
 
 logger = logging.getLogger(__name__)
 
+
+def _money(value):
+    """Сумма сделки числом. Не число — None, и это честнее нуля."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 # Сколько ждать код, если поставщик ответил «принято». Ожидание занимает
 # поток, а на нём стоит опрос заказов, поэтому потолок жёсткий.
 # Незаконченная запись не теряется: её подберёт `resume_unfinished`.
@@ -313,6 +321,13 @@ class DeliveryEngine:
             "denomination": row.item_id,
             "service_id": row.service_id,
             "price": row.price,
+            # Валюта закупки и сумма продажи — ради статистики. Записать их
+            # ПОТОМ будет неоткуда: цена у поставщика меняется, а сумма
+            # сделки живёт на площадке, которую придётся перечитывать
+            # сотнями запросов. Здесь оба числа уже в руках.
+            "currency": getattr(row, "currency", "") or "USD",
+            "paid": _money(getattr(order, "amount", None)),
+            "name": str(getattr(order, "title", "") or "")[:120],
             # Ссылка считается ОДИН раз и живёт в записи. Пересчёт при
             # повторе = вторая покупка за свои деньги.
             "reference": order_reference(self.prefix, card.slug, order.id),
@@ -420,6 +435,10 @@ class DeliveryEngine:
 
         # Только теперь.
         entry["state"] = STATE_DONE
+        # Когда именно выдан: по нему статистика считает «за сегодня», а
+        # время НАМЕРЕНИЯ для этого не годится — покупка могла висеть
+        # ночь, дожидаясь денег на счёте.
+        entry["done_at"] = time.time()
         delivered = conf.setdefault("delivered", [])
         if str(order_id) not in [str(x) for x in delivered]:
             delivered.append(str(order_id))

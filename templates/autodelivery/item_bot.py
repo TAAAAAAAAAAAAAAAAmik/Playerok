@@ -74,6 +74,8 @@ import oneshot                                                # noqa: E402
 import pricing                                                # noqa: E402
 import series                                                 # noqa: E402
 import setup                                                  # noqa: E402
+import sales                                                 # noqa: E402
+import stats                                                 # noqa: E402
 import vary                                                   # noqa: E402
 import bump                                                   # noqa: E402
 from bump import Ledger                                       # noqa: E402
@@ -106,7 +108,8 @@ MENU = [[("➕ Новый товар", "новый товар"),
          ("⚙️ Автовыдача", "настройки")],
         [("🔑 Проверить сессию", "проверить"),
          ("👤 Аккаунт", "аккаунт")],
-        [("🩺 Проверка выдачи", "проверка")]]
+        [("📊 Статистика", "статистика"),
+         ("🩺 Проверка выдачи", "проверка")]]
 
 # Команды в меню Telegram — та кнопка слева от поля ввода. Без неё их
 # надо помнить и набирать вслепую.
@@ -123,6 +126,7 @@ COMMANDS = [
     ("check", "Проверить сессию"),
     ("health", "Проверка выдачи: почему не выдаёт"),
     ("attrs", "Характеристики категории: что спрашивает площадка"),
+    ("stats", "Статистика: продажи, профит, отзывы"),
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
@@ -154,6 +158,7 @@ SERIES_WORDS = ("серия", "серия номиналов", "номиналы
 HEALTH_WORDS = ("проверка", "проверка выдачи", "почему не работает",
                 "/health")
 ATTRS_WORDS = ("характеристики", "атрибуты", "/attrs")
+STATS_WORDS = ("статистика", "стата", "заработок", "/stats")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -2924,6 +2929,65 @@ def my_items(account, fresh: bool = False, game_id: str = "",
     return out, whole
 
 
+# Сколько страниц сделок читать для отчёта. Двадцать четыре на странице,
+# десять страниц — двести сорок последних сделок. Больше не берём
+# нарочно: площадка считает частые запросы, а отчёт о деньгах не стоит
+# того, чтобы после него бот на полчаса остался без чтения витрины.
+DEALS_PAGES = 10
+
+
+def read_deals(account, pages: int = DEALS_PAGES) -> tuple:
+    """Сделки площадки → ([(название, статус, сумма)], всё ли прочитано).
+
+    Читаем ПРОДАЖИ, а не журнал выдач: продавец спрашивает про все свои
+    деньги, включая те, что заработаны до бота и выданы руками. Знает об
+    этом только площадка.
+    """
+    try:
+        from playerok import _amount, _direction_out, _status_name
+    except ImportError as e:                                  # noqa: BLE001
+        raise RuntimeError(f"адаптер площадки не подключается: {e}")
+
+    out: list = []
+    cursor = None
+    whole = True
+
+    for number in range(max(1, int(pages))):
+        if number:
+            time.sleep(PAGE_PAUSE)
+
+        try:
+            page = account.get_deals(direction=_direction_out(), count=24,
+                                     after_cursor=cursor)
+        except Exception as e:                                # noqa: BLE001
+            if out and is_too_often(e):
+                whole = False
+                break
+
+            raise
+
+        rows = list(getattr(page, "deals", None) or [])
+
+        for deal in rows:
+            item = getattr(deal, "item", None)
+            out.append((str(getattr(item, "name", "") or ""),
+                        _status_name(getattr(deal, "status", None)),
+                        _amount(deal)))
+
+        if not getattr(page, "has_next_page", False):
+            break
+
+        cursor = getattr(page, "end_cursor", None) or getattr(page, "cursor",
+                                                              None)
+
+        if not cursor:
+            break
+    else:
+        whole = False
+
+    return out, whole
+
+
 PICK_CAT = "cat2:"
 
 
@@ -4238,6 +4302,234 @@ def attrs_menu(link, account) -> None:
     link.screen("\n".join(lines), buttons=MENU)
 
 
+def balance_lines(account) -> list:
+    """Деньги на площадке: сколько есть, сколько можно забрать, сколько ждёт.
+
+    Три разных числа, и путать их дорого: «на счету» включает то, что ещё
+    не ваше — покупатель не подтвердил заказ, и сделку могут откатить.
+    """
+    profile = getattr(account, "profile", None)
+    money = getattr(profile, "balance", None)
+
+    if money is None:
+        return ["Баланс площадка не отдала."]
+
+    def number(name):
+        return getattr(money, name, None)
+
+    lines = []
+    pairs = [("withdrawable", "💸 Можно вывести сейчас"),
+             ("available", "💳 Доступно на счету"),
+             ("pending_income", "⏳ Ждёт подтверждения покупателями"),
+             ("frozen", "🧊 Заморожено площадкой"),
+             ("value", "Σ Всего на счету")]
+
+    for field, label in pairs:
+        got = number(field)
+
+        if got is None:
+            continue
+
+        lines.append(f"{label}: {stats.money(got)}")
+
+    return lines or ["Баланс площадка не отдала."]
+
+
+def stats_menu(link, account) -> None:
+    """📊 Статистика: продажи, профит, деньги на площадке и отзывы.
+
+    Профит считается по журналу выдач — там записана и сумма сделки, и
+    цена закупки у поставщика в тот самый час, когда покупали. Продажи
+    целиком — по сделкам площадки: продавец спрашивает про все свои
+    деньги, включая заработанные до бота и выданные руками.
+    """
+    if account is None:
+        link.screen("Сначала нужен рабочий кабинет: откройте «Аккаунт».",
+                    buttons=MENU)
+        return
+
+    link.screen("Считаю…")
+    conf = settings_of()
+    rate = conf.rate()
+    lines = ["📊 Статистика", ""]
+
+    # 1. Деньги на площадке. Первым: это то, ради чего экран и открывают.
+    try:
+        account.get()
+    except Exception:                                         # noqa: BLE001
+        pass
+
+    lines += balance_lines(account)
+
+    # 2. Продажи по сделкам площадки — по каждому товару.
+    try:
+        rows, whole = read_deals(account)
+    except Exception as e:                                    # noqa: BLE001
+        rows, whole = [], True
+        lines += ["", f"⚠️ Сделки прочитать не вышло: {shorten(str(e), 60)}"]
+
+    if rows:
+        found = sales.by_card(rows, lambda name: card_for_title(CARDS, name))
+        whole_money = sales.total_of(found)
+        seen = plural(len(rows), "сделка", "сделки", "сделок")
+        lines += ["", f"🧾 Продажи (последние {seen}"
+                      + ("" if whole else ", список неполный") + "):",
+                  f"  Продано: {stats.money(whole_money.sold)} "
+                  f"за {plural(whole_money.count, 'сделку', 'сделки', 'сделок')}",
+                  f"  Из них подтверждено: "
+                  f"{stats.money(whole_money.released)}",
+                  f"  Ждёт подтверждения: {stats.money(whole_money.waiting)}"]
+
+        if whole_money.refunds:
+            lines.append(f"  Возвраты: {stats.money(whole_money.refunded)} "
+                         f"({whole_money.refunds})")
+
+        by_name = []
+
+        for card in CARDS:
+            one = found.get(card.slug)
+
+            if one is None or not one.count:
+                continue
+
+            by_name.append((one.sold, card, one))
+
+        stranger = found.get("")
+
+        if by_name:
+            lines.append("")
+
+            for _, card, one in sorted(by_name, key=lambda r: -r[0]):
+                lines.append(f"  {card.emoji} {card.title}: "
+                             f"{stats.money(one.sold)} "
+                             f"({one.count}) · можно забрать "
+                             f"{stats.money(one.released)}")
+
+        if stranger is not None and stranger.count:
+            lines.append(f"  📦 Прочие товары: {stats.money(stranger.sold)} "
+                         f"({stranger.count}) · можно забрать "
+                         f"{stats.money(stranger.released)}")
+
+    # 3. Профит — только по выдачам бота: закупку знает он один.
+    lines += ["", "💰 Профит (по выдачам бота):"]
+    any_sold = False
+
+    for label, since in stats.periods().items():
+        got = stats.by_card(conf.store, CARDS, since)
+        whole_sum = stats.total_of(got)
+
+        if not whole_sum.count:
+            continue
+
+        any_sold = True
+        profit = whole_sum.profit(rate)
+        share = stats.margin(whole_sum, rate)
+        line = (f"  {label}: {stats.money(whole_sum.revenue)} "
+                f"за {plural(whole_sum.count, 'код', 'кода', 'кодов')}"
+                f" · закупка {stats.cost_line(whole_sum.cost) or '—'}")
+
+        if profit is not None:
+            line += (f" · профит {stats.money(profit)}"
+                     + (f" ({share:.0f}%)" if share is not None else ""))
+
+        lines.append(line)
+
+    if not any_sold:
+        lines.append("  Бот пока не выдал ни одного кода.")
+    else:
+        got = stats.by_card(conf.store, CARDS)
+        lines.append("")
+
+        for card, one in got:
+            profit = one.profit(rate)
+            line = (f"  {card.emoji} {card.title}: "
+                    f"{stats.money(one.revenue)} за "
+                    f"{plural(one.count, 'код', 'кода', 'кодов')} · "
+                    f"средний чек {stats.money(one.average)}")
+
+            if profit is not None:
+                line += f" · профит {stats.money(profit)}"
+
+            lines.append(line)
+
+        whole_sum = stats.total_of(got)
+
+        if whole_sum.unknown_price:
+            lines.append(f"  ⚠️ У {whole_sum.unknown_price} выдач сумма "
+                         f"сделки не записана — они не в счёте.")
+
+        if not rate and whole_sum.cost:
+            lines.append("  💱 Курс доллара не задан — профит в рублях "
+                         "посчитать не из чего. Кнопка ниже.")
+
+    # 4. Отзывы.
+    lines += ["", "⭐ Отзывы:"]
+
+    try:
+        page = account.get_my_reviews(count=24)
+        told = stats.reviews_of(getattr(page, "reviews", None) or [],
+                                getattr(page, "total_count", 0))
+    except Exception as e:                                    # noqa: BLE001
+        told = None
+        lines.append(f"  прочитать не вышло: {shorten(str(e), 50)}")
+
+    if told is not None and told.count:
+        lines.append(f"  {stats.stars(told.average)} {told.average:.2f} "
+                     f"из 5 · всего {told.total}")
+
+        if told.bad:
+            lines.append(f"  ⚠️ Ниже четвёрки: {told.bad}")
+
+        for mark, text, who in told.last:
+            lines.append(f"  {stats.stars(mark)} {who}: "
+                         f"{shorten(text, 40) or '— без текста'}")
+    elif told is not None:
+        lines.append("  Отзывов пока нет.")
+
+    keys = [[("💱 Курс доллара", "стат:курс")],
+            [("🔄 Обновить", "стат:ещё"), ("✖️ Назад", "отмена")]]
+    answer = link.ask("\n".join(lines), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip().lower()
+
+    if text == "стат:ещё":
+        stats_menu(link, account)
+        return
+
+    if text == "стат:курс":
+        ask_rate(link, conf)
+        return
+
+    link.screen("Готово.", buttons=MENU)
+
+
+def ask_rate(link, conf) -> None:
+    """Спросить курс доллара: без него профит в рублях не посчитать."""
+    now = conf.rate()
+    answer = link.ask(
+        "💱 Курс доллара — по нему считается закупка у поставщика.\n\n"
+        "Цены поставщика в долларах, продажи в рублях. Сложить их без "
+        "курса нельзя, а выдумывать курс в отчёте о деньгах я не "
+        "стану.\n\n"
+        + (f"Сейчас: {stats.money(now)} за $1" if now else "Сейчас не задан")
+        + "\n\nНапишите число, например 95.",
+        ANSWER_WAIT, buttons=[CANCEL])
+    text = str(answer.get("text") or "").strip()
+
+    if not text or wizard.cancelled(text):
+        link.screen("Оставил как было.", buttons=MENU)
+        return
+
+    conf.set_rate(text)
+    got = conf.rate()
+
+    if not got:
+        link.screen(f"«{text}» — не число. Курс не поменял.", buttons=MENU)
+        return
+
+    link.screen(f"Курс: {stats.money(got)} за $1. Теперь профит считается "
+                f"в рублях.", buttons=MENU)
+
+
 def health_menu(link, account) -> None:
     """🩺 Проверка выдачи: почему кода не будет — прямо в телеграме.
 
@@ -4801,6 +5093,8 @@ def handle_command(link, account, text: str):
         health_menu(link, account)
     elif text in ATTRS_WORDS:
         attrs_menu(link, account)
+    elif text in STATS_WORDS:
+        stats_menu(link, account)
     elif text in ACCOUNT_WORDS:
         account = accounts_menu(link, account)
     elif not wizard.cancelled(text):

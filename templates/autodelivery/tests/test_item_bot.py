@@ -2303,6 +2303,239 @@ class TuneCardTest(unittest.TestCase):
         self.assertIn("🚀 Настроить выдачу", names)
 
 
+class StatsMenuTest(unittest.TestCase):
+    """📊 Статистика: деньги на площадке, продажи, профит, отзывы.
+
+    Отчёт о деньгах врать не имеет права: по нему продавец решает, что
+    закупать и по какой цене продавать.
+    """
+
+    class Balance:
+        value, frozen, available = 18400, 0, 18400
+        withdrawable, pending_income = 12300, 6100
+
+    class Account:
+        DEALS = [("Xbox Gift Card 100 TR", "CONFIRMED", 900),
+                 ("Xbox Gift Card 500 TR", "PAID", 3000),
+                 ("🏆 ПОПУЛЯРНЫЙ ПАКЕТ 3 LVL", "CONFIRMED", 2500),
+                 ("Xbox Gift Card 100 TR", "ROLLED_BACK", 900)]
+
+        def __init__(self, balance=None, reviews=None, deals=None):
+            self.profile = type("P", (), {"balance": balance})()
+            self.reviews = reviews
+            self.deals = self.DEALS if deals is None else deals
+
+        def get(self):
+            return self.profile
+
+        def get_deals(self, direction=None, count=24, after_cursor=None):
+            rows = [type("D", (), {
+                "item": type("I", (), {"name": name})(),
+                "status": type("S", (), {"name": status})(),
+                "transaction": type("T", (), {"value": amount})()})()
+                for name, status, amount in self.deals]
+
+            return type("P", (), {"deals": rows, "has_next_page": False,
+                                  "end_cursor": None})()
+
+        def get_my_reviews(self, count=24, **kw):
+            if self.reviews is None:
+                raise RuntimeError("площадка молчит")
+
+            return type("P", (), {"reviews": self.reviews,
+                                  "total_count": len(self.reviews)})()
+
+    class Review:
+        def __init__(self, rating, text="", who="покупатель"):
+            self.rating, self.text = rating, text
+            self.creator = type("U", (), {"username": who})()
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        self._pause = item_bot.PAGE_PAUSE
+        item_bot.PAGE_PAUSE = 0
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+
+    def sold(self, rate=95, rows=((900, 3.1), (1200, 4.0))):
+        conf = item_bot.settings_of()
+        conf.set_rate(rate)
+        log = conf.store.conf("xbox").setdefault("log", [])
+        now = time.time()
+
+        for number, (paid, price) in enumerate(rows):
+            log.append({"order": f"o{number}", "state": "выдан", "paid": paid,
+                        "price": price, "currency": "USD", "done_at": now,
+                        "at": now})
+
+        conf.store.save()
+
+        return conf
+
+    def report(self, account=None, reviews=None, deals=None):
+        link = FakeLink(["отмена"])
+        item_bot.stats_menu(link, account or self.Account(self.Balance(),
+                                                          reviews, deals))
+
+        return link.asked[0][0]
+
+    # ---------- деньги на площадке ----------
+
+    def test_what_can_be_withdrawn_is_first(self):
+        """Ради этого экран и открывают."""
+        said = self.report()
+
+        self.assertIn("Можно вывести сейчас: 12 300 ₽", said)
+
+    def test_pending_income_is_not_called_earned(self):
+        """Покупатель не подтвердил — сделку могут откатить."""
+        said = self.report()
+
+        self.assertIn("Ждёт подтверждения покупателями: 6 100 ₽", said)
+
+    def test_a_missing_balance_is_said_plainly(self):
+        said = self.report(self.Account(None))
+
+        self.assertIn("Баланс площадка не отдала", said)
+
+    # ---------- продажи ----------
+
+    def test_sales_are_split_by_card(self):
+        said = self.report()
+
+        self.assertIn("Xbox", said)
+        self.assertIn("3 900 ₽", said)
+
+    def test_what_can_be_taken_is_apart_from_what_waits(self):
+        said = self.report()
+
+        self.assertIn("Из них подтверждено: 3 400 ₽", said)
+        self.assertIn("Ждёт подтверждения: 3 000 ₽", said)
+
+    def test_refunds_are_named(self):
+        said = self.report()
+
+        self.assertIn("Возвраты: 900 ₽", said)
+
+    def test_other_goods_are_counted_too(self):
+        """Это тоже деньги продавца, просто не наши карты."""
+        said = self.report()
+
+        self.assertIn("Прочие товары: 2 500 ₽", said)
+
+    def test_unreadable_deals_do_not_break_the_report(self):
+        class Broken(self.Account):
+            def get_deals(self, **kw):
+                raise RuntimeError("слишком много попыток")
+
+        said = self.report(Broken(self.Balance()))
+
+        self.assertIn("Сделки прочитать не вышло", said)
+        self.assertIn("Можно вывести", said)
+
+    # ---------- профит ----------
+
+    def test_the_profit_is_counted_from_the_journal(self):
+        self.sold()
+        said = self.report()
+
+        self.assertIn("профит", said)
+        self.assertIn("2 100 ₽", said)
+
+    def test_without_a_rate_the_profit_is_not_invented(self):
+        """Сложить рубли с долларами без курса нельзя."""
+        self.sold(rate=0)
+        said = self.report()
+
+        self.assertIn("Курс доллара не задан", said)
+        self.assertNotIn("· профит", said)
+
+    def test_the_cost_is_always_shown(self):
+        self.sold()
+        said = self.report()
+
+        self.assertIn("закупка 7.1 $", said)
+
+    def test_nothing_delivered_is_said_plainly(self):
+        said = self.report()
+
+        self.assertIn("не выдал ни одного кода", said)
+
+    def test_the_periods_are_counted(self):
+        self.sold()
+        said = self.report()
+
+        self.assertIn("сегодня:", said)
+        self.assertIn("всего:", said)
+
+    def test_the_average_check_is_shown(self):
+        self.sold()
+        said = self.report()
+
+        self.assertIn("средний чек", said)
+
+    # ---------- отзывы ----------
+
+    def test_reviews_are_summed_up(self):
+        said = self.report(reviews=[self.Review(5, "Спасибо"),
+                                    self.Review(4)])
+
+        self.assertIn("4.50 из 5", said)
+
+    def test_bad_reviews_are_called_out(self):
+        said = self.report(reviews=[self.Review(5), self.Review(2, "Долго")])
+
+        self.assertIn("Ниже четвёрки: 1", said)
+
+    def test_the_last_reviews_are_quoted(self):
+        said = self.report(reviews=[self.Review(5, "Всё быстро", "vasya")])
+
+        self.assertIn("Всё быстро", said)
+        self.assertIn("vasya", said)
+
+    def test_no_reviews_is_not_an_error(self):
+        said = self.report(reviews=[])
+
+        self.assertIn("Отзывов пока нет", said)
+
+    def test_unreadable_reviews_do_not_break_the_report(self):
+        said = self.report()
+
+        self.assertIn("прочитать не вышло", said)
+
+    # ---------- курс ----------
+
+    def test_the_rate_can_be_set(self):
+        link = FakeLink(["стат:курс", "95"])
+        item_bot.stats_menu(link, self.Account(self.Balance()))
+
+        self.assertEqual(item_bot.settings_of().rate(), 95)
+
+    def test_a_word_instead_of_a_rate_is_refused(self):
+        link = FakeLink(["стат:курс", "много"])
+        item_bot.stats_menu(link, self.Account(self.Balance()))
+
+        self.assertEqual(item_bot.settings_of().rate(), 0)
+        self.assertIn("не число", link.said[-1])
+
+    def test_without_an_account_it_says_so(self):
+        link = FakeLink([])
+        item_bot.stats_menu(link, None)
+
+        self.assertIn("кабинет", link.said[-1])
+
+    def test_it_is_reachable_by_the_button(self):
+        link = FakeLink(["отмена"])
+        item_bot.handle_command(link, self.Account(self.Balance()),
+                                "статистика")
+
+        self.assertTrue(any("📊 Статистика" in said for said in link.said),
+                        link.said)
+
+
 class SettingsMenuTest(unittest.TestCase):
     """«Автовыдача» — кнопка, за которой продавец включает выдачу кодов.
 
