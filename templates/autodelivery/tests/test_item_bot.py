@@ -2139,6 +2139,290 @@ class AttributeRetryTest(unittest.TestCase):
         self.assertEqual(item_bot.what_we_sent(self.draft(100),
                                                "куки истекли"), "")
 
+    def test_a_missing_attribute_is_not_retried_by_number(self):
+        """«Заполните обязательные» — это не про форму числа. Второй
+        такой же запрос стоит минуту ожидания и кончается тем же."""
+        class Never(self.Picky):
+            def create_item(self, **kw):
+                self.tries.append(kw["options"])
+
+                raise RuntimeError("Пожалуйста, заполните все обязательные "
+                                   "характеристики товара")
+
+        market = Never()
+        item_bot.create_item(market, self.draft(100))
+
+        self.assertEqual(market.tries, [{"amount": 100}])
+
+    def test_skipped_fields_are_tried_once_as_empty(self):
+        """Пропущенное поле мы не отправляем вовсе, а сайт отправляет его
+        пустым. Проверить догадку дешевле, чем гадать: создание ничего не
+        тратит."""
+        class Once:
+            def __init__(self):
+                self.tries = []
+
+            def create_item(self, **kw):
+                self.tries.append([(f.id, f.value)
+                                   for f in kw["data_fields"]])
+
+                if len(self.tries) == 1:
+                    raise RuntimeError("Пожалуйста, заполните все "
+                                       "обязательные характеристики товара")
+
+                return type("I", (), {"id": "item-1"})()
+
+        market = Once()
+        d = self.draft(100)
+        d.fields = [{"id": "f1", "label": "Комментарий", "required": False,
+                     "value": "быстро"},
+                    {"id": "f2", "label": "Инструкция", "required": False,
+                     "value": ""}]
+        item_id, why = item_bot.create_item(market, d)
+
+        self.assertEqual(item_id, "item-1")
+        self.assertEqual(market.tries, [[("f1", "быстро")],
+                                        [("f1", "быстро"), ("f2", "")]])
+
+    def test_nothing_was_skipped_means_nothing_to_retry(self):
+        class Never:
+            def __init__(self):
+                self.tries = []
+
+            def create_item(self, **kw):
+                self.tries.append(kw["data_fields"])
+
+                raise RuntimeError("Пожалуйста, заполните все обязательные "
+                                   "характеристики товара")
+
+        market = Never()
+        item_bot.create_item(market, self.draft(100))
+
+        self.assertEqual(len(market.tries), 1)
+
+    def test_what_went_empty_is_named(self):
+        """Пустая характеристика в запрос не попадает вовсе — на списке
+        отправленного её не видно, а площадка молчит именно про неё."""
+        d = self.draft(100)
+        d.options.append({"field": "platform", "group": "Платформа",
+                          "value": None,
+                          "choices": [{"label": "ПК", "value": "PC"},
+                                      {"label": "Телефон", "value": "MOB"}]})
+        said = item_bot.what_we_sent(
+            d, "Пожалуйста, заполните все обязательные характеристики товара")
+
+        self.assertIn("ушло пустым", said)
+        self.assertIn("Платформа", said)
+        self.assertIn("выбор из 2", said)
+
+    def test_an_empty_required_field_is_named_too(self):
+        d = self.draft(100)
+        d.fields = [{"id": "f1", "label": "Промокод", "required": True,
+                     "value": ""}]
+        said = item_bot.what_we_sent(
+            d, "Пожалуйста, заполните все обязательные характеристики товара")
+
+        self.assertIn("Промокод", said)
+        self.assertIn("требует", said)
+
+    def test_when_nothing_is_empty_it_says_so(self):
+        """Иначе продавец жмёт «ещё раз» и получает тот же отказ."""
+        said = item_bot.what_we_sent(
+            self.draft(100),
+            "Пожалуйста, заполните все обязательные характеристики товара")
+
+        self.assertIn("Пустых характеристик у меня нет", said)
+
+
+class MergedOptionsTest(unittest.TestCase):
+    """Шаблон помнит характеристики так, как их отдал готовый товар: только
+    заполненные и без списка вариантов. Повторить его значит отправить
+    неполный набор — а площадка на это отвечает «заполните все
+    обязательные», не называя какие."""
+
+    class Acc:
+        ROWS = [("platform", "Платформа", "ПК", "PC"),
+                ("platform", "Платформа", "Телефон", "MOBILE"),
+                ("amount", "Сумма пополнения", "Сумма пополнения", None)]
+
+        def __init__(self, rows=None):
+            self.rows = rows if rows is not None else self.ROWS
+
+        def get_game_category(self, id=None):
+            rows = []
+
+            for field, group, label, value in self.rows:
+                limit = (type("L", (), {"min": 1, "max": 100000})()
+                         if field == "amount" else None)
+                rows.append(type("O", (), {
+                    "field": field, "group": group, "label": label,
+                    "value": value, "value_range_limit": limit,
+                    "type": None})())
+
+            return type("C", (), {"options": rows})()
+
+    SAVED = [{"field": "platform", "value": "PC", "chosen": "PC",
+              "group": "", "choices": []}]
+
+    def test_the_platform_list_comes_back_whole(self):
+        got = item_bot.merged_options(self.Acc(), "c1", self.SAVED)
+        fields = [o["field"] for o in got]
+
+        self.assertEqual(sorted(fields), ["amount", "platform"])
+
+    def test_what_was_answered_stays_answered(self):
+        got = item_bot.merged_options(self.Acc(), "c1", self.SAVED)
+        platform = [o for o in got if o["field"] == "platform"][0]
+
+        self.assertEqual(platform["value"], "PC")
+
+    def test_what_was_never_asked_comes_back_empty(self):
+        got = item_bot.merged_options(self.Acc(), "c1", self.SAVED)
+        amount = [o for o in got if o["field"] == "amount"][0]
+
+        self.assertIsNone(amount["value"])
+
+    def test_an_answer_the_category_forgot_is_kept(self):
+        """Площадка его больше не спрашивает, а товар с ним продавался."""
+        saved = self.SAVED + [{"field": "old", "value": "да", "choices": []}]
+        got = item_bot.merged_options(self.Acc(), "c1", saved)
+
+        self.assertIn("old", [o["field"] for o in got])
+
+    def test_a_silent_marketplace_does_not_block_the_repeat(self):
+        """Отказать в повторе из-за сетевой заминки хуже, чем повторить
+        как раньше."""
+        class Broken:
+            def get_game_category(self, id=None):
+                raise RuntimeError("площадка молчит")
+
+        got = item_bot.merged_options(Broken(), "c1", self.SAVED)
+
+        self.assertEqual([o["field"] for o in got], ["platform"])
+
+    def test_the_copy_is_not_the_template(self):
+        saved = [dict(o) for o in self.SAVED]
+        got = item_bot.merged_options(self.Acc(), "c1", saved)
+        got[0]["value"] = "MOBILE"
+
+        self.assertEqual(saved[0]["value"], "PC")
+
+    def test_the_amount_of_another_item_is_forgotten(self):
+        """Серия меняет номинал, а характеристику помнит одну — ту, что
+        была у образца."""
+        options = item_bot.merged_options(self.Acc(), "c1", [
+            {"field": "amount", "value": 100, "chosen": "100"}])
+        item_bot.forget_amount(options, 400)
+        amount = [o for o in options if o["field"] == "amount"][0]
+
+        self.assertIsNone(amount["value"])
+
+    def test_without_a_new_nominal_nothing_is_forgotten(self):
+        options = item_bot.merged_options(self.Acc(), "c1", [
+            {"field": "amount", "value": 100, "chosen": "100"}])
+        item_bot.forget_amount(options, 0)
+        amount = [o for o in options if o["field"] == "amount"][0]
+
+        self.assertEqual(amount["value"], 100)
+
+    def test_other_options_survive_the_forgetting(self):
+        options = item_bot.merged_options(self.Acc(), "c1", self.SAVED)
+        item_bot.forget_amount(options, 400)
+        platform = [o for o in options if o["field"] == "platform"][0]
+
+        self.assertEqual(platform["value"], "PC")
+
+
+class AskMissingOptionsTest(unittest.TestCase):
+    """Досопрос: спрашиваем ровно то, на что ответа нет."""
+
+    def draft(self, options, nominal=0, region=""):
+        d = draft()
+        d.nominal = nominal
+        d.region = region
+        d.options = options
+
+        return d
+
+    def test_the_answered_one_is_not_asked_again(self):
+        d = self.draft([{"field": "platform", "group": "Платформа",
+                         "value": "PC", "chosen": "ПК", "choices": []}])
+        link = FakeLink([])
+
+        self.assertTrue(item_bot.ask_missing_options(link, None, d))
+        self.assertEqual(link.asked, [])
+
+    def test_the_empty_one_is_asked(self):
+        d = self.draft([{"field": "platform", "group": "Платформа",
+                         "value": None,
+                         "choices": [{"label": "ПК", "value": "PC"},
+                                     {"label": "Телефон", "value": "MOB"}]}])
+        link = FakeLink([item_bot.PICK_OPTION + "0"])
+
+        self.assertTrue(item_bot.ask_missing_options(link, None, d))
+        self.assertEqual(d.attributes(), {"platform": "PC"})
+
+    def test_the_nominal_answers_the_amount_itself(self):
+        """Спрашивать номинал второй раз — значит развести объявление с
+        описанием, откуда читает выдача."""
+        d = self.draft([{"field": "amount", "group": "Сумма пополнения",
+                         "value": None, "choices": [],
+                         "limit": {"min": 1, "max": 100000}}], nominal=400)
+        link = FakeLink([])
+
+        self.assertTrue(item_bot.ask_missing_options(link, None, d))
+        self.assertEqual(d.attributes(), {"amount": 400})
+        self.assertEqual(link.asked, [])
+
+    def test_leaving_stops_the_repeat(self):
+        d = self.draft([{"field": "platform", "group": "Платформа",
+                         "value": None,
+                         "choices": [{"label": "ПК", "value": "PC"},
+                                     {"label": "Телефон", "value": "MOB"}]}])
+
+        self.assertFalse(item_bot.ask_missing_options(FakeLink(["отмена"]),
+                                                      None, d))
+
+
+class OptionWithoutChoicesTest(unittest.TestCase):
+    """Ни списка, ни разброса — одно название. Раньше такую молча считали
+    незаполненной, и площадка отвечала отказом на ровном месте."""
+
+    def draft(self):
+        d = draft()
+        d.options = [{"field": "note", "group": "Примечание", "value": None,
+                      "choices": []}]
+
+        return d
+
+    def ask(self, link, d):
+        return item_bot.choose_option(link, None, d, option=d.options[0])
+
+    def test_the_seller_is_asked(self):
+        d = self.draft()
+        link = FakeLink(["Global"])
+
+        self.assertTrue(self.ask(link, d))
+        self.assertEqual(d.attributes(), {"note": "Global"})
+
+    def test_the_question_says_what_is_going_on(self):
+        d = self.draft()
+        link = FakeLink(["Global"])
+        self.ask(link, d)
+
+        self.assertIn("Примечание", link.asked[0][0])
+
+    def test_skipping_is_allowed(self):
+        """Какая характеристика обязательна, площадка не говорит."""
+        d = self.draft()
+        link = FakeLink([item_bot.PICK_OPTION + "мимо"])
+
+        self.assertTrue(self.ask(link, d))
+        self.assertEqual(d.attributes(), {})
+
+    def test_leaving_is_allowed_too(self):
+        self.assertFalse(self.ask(FakeLink(["отмена"]), self.draft()))
+
 
 class TuneCardTest(unittest.TestCase):
     """🚀 «Настроить выдачу»: включить карту по тому, что уже на витрине.
@@ -4706,3 +4990,101 @@ class TemplateFromShopTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SeriesAttributesTest(unittest.TestCase):
+    """Серия делает десяток объявлений из одного образца, меняя номинал.
+
+    Характеристику «Сумма пополнения» образец помнит одну — свою. Оставить
+    её значит выставить десять объявлений, где в названии 800, а в
+    характеристике площадки 100. А вопрос, на который образец ответа не
+    знает, спрашивается один раз на партию: посреди создания спрашивать
+    поздно, половина уже на витрине.
+    """
+
+    class Market:
+        def __init__(self):
+            self.created = []
+            self.asked_category = 0
+
+        def get_game_category(self, id=None):                 # noqa: A002
+            self.asked_category += 1
+            limit = type("L", (), {"min": 1, "max": 100000})()
+            rows = [type("O", (), {"field": "amount",
+                                   "group": "Сумма пополнения",
+                                   "label": "Сумма пополнения", "value": None,
+                                   "value_range_limit": limit,
+                                   "type": None})(),
+                    type("O", (), {"field": "platform", "group": "Платформа",
+                                   "label": "ПК", "value": "PC",
+                                   "value_range_limit": None,
+                                   "type": None})(),
+                    type("O", (), {"field": "platform", "group": "Платформа",
+                                   "label": "Телефон", "value": "MOB",
+                                   "value_range_limit": None,
+                                   "type": None})()]
+
+            return type("C", (), {"options": rows})()
+
+        def create_item(self, **kw):
+            self.created.append(kw)
+
+            return type("I", (), {"id": f"item-{len(self.created)}"})()
+
+        def get_my_items(self, **kw):
+            return type("P", (), {
+                "items": [],
+                "page_info": type("I", (), {"has_next_page": False,
+                                            "end_cursor": None})()})()
+
+    class Template:
+        name, price, region = "100 Robux", 179, "GL"
+        game, category, obtaining = GAME, CATEGORY, OBTAINING
+        fields: list = []
+        options = [{"field": "amount", "value": 100, "chosen": "100",
+                    "group": "", "choices": []}]
+
+    JOBS = [{"name": "400 Robux", "price": 540, "nominal": 400,
+             "description": "Номинал: 400"},
+            {"name": "800 Robux", "price": 1060, "nominal": 800,
+             "description": "Номинал: 800"}]
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        item_bot.TEMPLATE_DIR = os.path.join(self.root, "шаблоны")
+        self._pause, item_bot.PAGE_PAUSE = item_bot.PAGE_PAUSE, 0
+        item_bot.forget_items()
+
+    def tearDown(self):
+        item_bot.PAGE_PAUSE = self._pause
+        item_bot.forget_items()
+
+    def go(self, *answers):
+        market = self.Market()
+        link = FakeLink(list(answers))
+        item_bot.run_series(link, market, self.Template(), [PNG],
+                            [dict(j) for j in self.JOBS])
+
+        return link, market
+
+    def test_each_listing_gets_its_own_nominal(self):
+        _, market = self.go(item_bot.PICK_OPTION + "0")
+
+        self.assertEqual([c["options"]["amount"] for c in market.created],
+                         [400, 800])
+
+    def test_the_answer_is_asked_once_for_the_whole_batch(self):
+        link, market = self.go(item_bot.PICK_OPTION + "0")
+        questions = [t for t, _ in link.asked if "Платформа" in t]
+
+        self.assertEqual(len(questions), 1)
+        self.assertEqual([c["options"]["platform"] for c in market.created],
+                         ["PC", "PC"])
+
+    def test_leaving_creates_nothing(self):
+        """Вопрос задан до первого объявления — уйти можно без потерь."""
+        _, market = self.go("отмена")
+
+        self.assertEqual(market.created, [])

@@ -733,6 +733,62 @@ def category_options(account, category_id: str) -> list:
     return list(groups.values())
 
 
+def merged_options(account, category_id: str, saved) -> list:
+    """Характеристики категории СЕЙЧАС + уже известные ответы. → список.
+
+    Шаблон и копия с витрины помнят характеристики так, как их отдал
+    готовый товар: словарём «поле → значение», и только те, у которых
+    значение есть. Чего у товара не было — в шаблоне нет вовсе, и
+    повторить его значит отправить неполный набор. Площадка на это
+    отвечает «заполните все обязательные характеристики», не называя
+    какие: список она знает, а мы его не спрашивали.
+
+    Поэтому берём список у площадки заново и кладём поверх него
+    известное. Незакрытые останутся с `value=None` — и мастер про них
+    спросит, вместо того чтобы получить отказ.
+
+    Площадка не ответила — работаем по памяти: отказать продавцу в
+    повторе из-за сетевой заминки хуже, чем повторить как раньше.
+    """
+    fresh = category_options(account, category_id)
+
+    if not fresh:
+        return copy.deepcopy(list(saved or []))
+
+    known = {str(o.get("field")): o for o in (saved or [])
+             if o.get("value") not in (None, "")}
+
+    for option in fresh:
+        was = known.pop(str(option.get("field")), None)
+
+        if was is None:
+            continue
+
+        option["value"] = was.get("value")
+        option["chosen"] = was.get("chosen") or str(was.get("value"))
+
+    # Ответы на вопросы, которых в нынешнем списке нет, не выбрасываем:
+    # площадка их у себя помнит, а товар с ними уже продавался.
+    return fresh + [copy.deepcopy(o) for o in known.values()]
+
+
+def forget_amount(options, nominal) -> None:
+    """Забыть номинал, записанный в характеристике, — он от другого товара.
+
+    Серия делает десяток объявлений из одного шаблона, меняя номинал:
+    80, 100, 400, 1000. Характеристику «Сумма пополнения» шаблон помнит
+    одну — ту, что была у образца. Оставить её значит выставить десять
+    объявлений, где в названии одно, а в характеристике площадки другое.
+    """
+    if not nominal:
+        return
+
+    for option in options or []:
+        if about_amount(option) and input_option(option):
+            option["value"] = None
+            option.pop("chosen", None)
+
+
 # По этим словам числовая характеристика узнаётся как «про номинал».
 AMOUNT_WORDS = ("сумма", "amount", "номинал", "nominal", "количество",
                 "quantity", "объём", "объем", "value")
@@ -948,6 +1004,42 @@ def ask_option_value(link, option, draft=None) -> bool:
         return True
 
 
+def ask_option_text(link, option, draft=None) -> bool:
+    """Спросить характеристику, про которую площадка ничего не сказала.
+
+    Бывает и так: ни списка вариантов, ни разброса чисел — одно название.
+    Раньше такую молча считали незаполненной, и площадка отвечала
+    «заполните все обязательные характеристики», не называя какую.
+    Отказ на ровном месте: ответ-то у продавца есть, его просто не
+    спрашивали.
+
+    «Пропустить» оставляем: у необязательной характеристики пустота —
+    законный ответ, а какая обязательна, площадка не говорит.
+    """
+    title = option.get("group") or option.get("field") or "Характеристика"
+    keys = [[("⏭ Пропустить", PICK_OPTION + "мимо")],
+            [("✖️ Отмена", "отмена")]]
+    answer = link.ask(
+        screen_text(draft, f"{title}?\n\nПлощадка не дала ни списка, ни "
+                           f"разброса — впишите значение сами. Если эта "
+                           f"характеристика не нужна, нажмите «Пропустить»."),
+        ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if wizard.cancelled(text) or not text:
+        link.screen("Отменил.", buttons=MENU)
+        return False
+
+    if text == PICK_OPTION + "мимо" or wizard.skipped(text):
+        option["value"] = ""
+        return True
+
+    option["value"] = text
+    option["chosen"] = text
+
+    return True
+
+
 def option_matches(choices, word: str) -> list:
     """Варианты характеристики, подходящие под слово. → [(номер, вариант)].
 
@@ -963,7 +1055,7 @@ def option_matches(choices, word: str) -> list:
             if word in str(c.get("label") or "").lower()]
 
 
-def choose_option(link, account, draft, page: int = 0) -> bool:
+def choose_option(link, account, draft, page: int = 0, option=None) -> bool:
     """Спросить одну характеристику. → продолжать ли.
 
     Вариантов у площадки бывает три десятка: «Валюта» у Xbox — это все
@@ -976,8 +1068,9 @@ def choose_option(link, account, draft, page: int = 0) -> bool:
     телефона всё равно не помещаются, а «турция» набрать быстрее, чем
     долистать до буквы Т.
     """
-    step = draft.step
-    option = draft.option(step[len(wizard.OPTION):])
+    if option is None:
+        step = draft.step
+        option = draft.option(step[len(wizard.OPTION):])
 
     if option is None:
         return True
@@ -988,9 +1081,7 @@ def choose_option(link, account, draft, page: int = 0) -> bool:
         return ask_option_value(link, option, draft)
 
     if not choices:
-        # Спрашивать нечего — считаем незаполненной и идём дальше.
-        option["value"] = ""
-        return True
+        return ask_option_text(link, option, draft)
 
     if len(choices) == 1:
         # Один вариант — это не выбор, а формальность. Площадка так и
@@ -1087,6 +1178,26 @@ def choose_option(link, account, draft, page: int = 0) -> bool:
         rows = found
         page = 0
         complaint = f"По слову «{text}» нашлось {len(found)}:"
+
+
+def ask_missing_options(link, account, draft) -> bool:
+    """Досопросить характеристики, на которые ответа ещё нет. → продолжать ли.
+
+    Нужно там, где черновик собран не опросом, а повтором: из шаблона или
+    копией с витрины. Спрашиваем ровно те, что остались пустыми после
+    слияния со списком площадки, — остальное продавец уже говорил.
+    """
+    fill_region_options(draft)
+    fill_amount_options(draft)
+
+    for option in getattr(draft, "options", None) or []:
+        if option.get("value") is not None:
+            continue
+
+        if not choose_option(link, account, draft, option=option):
+            return False
+
+    return True
 
 
 def item_fields(account, category_id: str, obtaining_id: str) -> list:
@@ -1675,6 +1786,38 @@ SHOW_SENT_WORDS = ("атрибут", "характеристик", "attribute", 
                    "некорректн", "invalid")
 
 
+# Слова из отказа, который означает «одной характеристики не хватает
+# вовсе». Это не про форму значения, и повторять отправку другим числом
+# тут бессмысленно: площадка ждёт ответа, которого у неё нет.
+MISSING_WORDS = ("обязательн", "заполните", "required", "не заполнен")
+
+
+def is_missing_attrs(why: str) -> bool:
+    """Отказ «заполните все обязательные характеристики»?"""
+    low = str(why or "").lower()
+
+    return any(word in low for word in MISSING_WORDS)
+
+
+def about_option(option) -> str:
+    """Чем эта характеристика была — словами, а не внутренним именем."""
+    choices = option.get("choices") or []
+
+    if option.get("limit"):
+        limit = option["limit"]
+
+        return (f"вписывают число от {shown_number(limit.get('min'))} до "
+                f"{shown_number(limit.get('max'))}")
+
+    if len(choices) > 1:
+        return f"выбор из {len(choices)}"
+
+    if choices:
+        return "один вариант"
+
+    return "площадка не дала ни вариантов, ни разброса"
+
+
 def what_we_sent(draft, why: str) -> str:
     """Что именно ушло на площадку — когда она ругается на это.
 
@@ -1682,6 +1825,12 @@ def what_we_sent(draft, why: str) -> str:
     самих атрибутов — это загадка: продавец видит отказ, а чинить нечего.
     Показываем ровно то, что отправили, его же словами: подпись, которую
     он выбирал, и значение, которое ушло.
+
+    А когда площадка говорит «заполните обязательные», важнее обратное —
+    что НЕ ушло: пустая характеристика в запрос не попадает вовсе, и на
+    списке отправленного её не видно. Поэтому пустые показываем отдельно
+    и с пояснением, чем они были: по ним сразу видно, про что площадка
+    молчит.
     """
     low = str(why or "").lower()
 
@@ -1689,27 +1838,47 @@ def what_we_sent(draft, why: str) -> str:
         return ""
 
     lines = []
+    empty = []
 
     for option in getattr(draft, "options", None) or []:
         value = option.get("value")
+        title = option.get("group") or option.get("field") or "Характеристика"
 
         if value in (None, ""):
+            empty.append(f"  • {title} ({option.get('field')}, "
+                         f"{about_option(option)})")
             continue
 
-        lines.append(f"  • {option.get('group') or option.get('field')}: "
-                     f"«{option.get('chosen') or value}» → {value!r}")
+        lines.append(f"  • {title}: «{option.get('chosen') or value}» "
+                     f"→ {value!r}")
 
     for field in getattr(draft, "fields", None) or []:
+        mark = " — площадка его требует" if field.get("required") else ""
+
         if field.get("value"):
             lines.append(f"  • поле «{field.get('label')}»: "
                          f"{str(field.get('value'))[:40]!r}")
+        else:
+            empty.append(f"  • поле «{field.get('label')}»{mark}")
 
-    if not lines:
-        return "\n\nХарактеристик я не отправлял вовсе."
+    out = ("\n\nЯ отправил вот это:\n" + "\n".join(lines) if lines
+           else "\n\nХарактеристик я не отправлял вовсе.")
 
-    return ("\n\nЯ отправил вот это:\n" + "\n".join(lines)
-            + "\n\nПокажите этот список — разберём, что площадке не "
-              "понравилось.")
+    if empty:
+        out += ("\n\nА вот это ушло пустым — площадка этого не получила:\n"
+                + "\n".join(empty))
+    elif is_missing_attrs(why):
+        # Пустых нет, а площадка всё равно требует — значит она ждёт то,
+        # чего нет в её же списке характеристик. Гадать тут нечего, но
+        # сказать об этом честно надо: иначе продавец будет жать «ещё
+        # раз» и получать то же самое.
+        out += ("\n\nПустых характеристик у меня нет: всё, о чём площадка "
+                "спрашивала, заполнено. Похоже, она ждёт чего-то, чего в "
+                "её списке для этой категории нет — покажите мне этот "
+                "экран.")
+
+    return out + ("\n\nПокажите этот список — разберём, что площадке не "
+                  "понравилось.")
 
 
 def templates_of(account_id: str = "") -> TemplateStore:
@@ -1973,8 +2142,15 @@ def make_from_template(link, account, store, template_id: str) -> None:
     # Копия полей, а не тот же список: шаблон повторяют много раз, и
     # правка в одном повторе не должна менять сам шаблон.
     draft.fields = copy.deepcopy(template.fields)
-    draft.options = copy.deepcopy(template.options)
+    # Характеристики берём у площадки заново: шаблон помнит только те, что
+    # были у образца, а категория успевает обзавестись новыми.
+    draft.options = merged_options(account, (template.category or {}).get("id"),
+                                   template.options)
+    forget_amount(draft.options, draft.nominal)
     draft.photos = photos
+
+    if not ask_missing_options(link, account, draft):
+        return
 
     # Свободные поля слегка меняем: площадки не любят объявления,
     # совпадающие до буквы. Что именно вписано — видно в сводке ниже, это
@@ -2474,6 +2650,32 @@ def apply_bump(jobs, live=None) -> int:
     return raised
 
 
+def series_options(link, account, template, jobs) -> list | None:
+    """Характеристики, общие для всей партии. → список или None, если ушли.
+
+    Спрашиваем ОДИН раз на партию, до первого объявления: вопрос про
+    «Платформу» одинаков для всех десяти номиналов, а посреди создания
+    его задавать поздно — половина уже на витрине.
+    """
+    options = merged_options(account, (template.category or {}).get("id"),
+                             getattr(template, "options", None))
+    first = jobs[0] if jobs else {}
+    draft = wizard.Draft()
+    draft.game = template.game
+    draft.category = template.category
+    draft.obtaining = template.obtaining
+    draft.region = template.region
+    draft.name = first.get("name") or template.name
+    draft.price = first.get("price") or template.price
+    draft.nominal = first.get("nominal") or 0.0
+    draft.options = options
+
+    if not ask_missing_options(link, account, draft):
+        return None
+
+    return options
+
+
 def run_series(link, account, template, photos, jobs) -> None:
     """Создать объявления по плану, показывая ход одним экраном."""
     done, failed = [], []
@@ -2481,6 +2683,10 @@ def run_series(link, account, template, photos, jobs) -> None:
     # получают одну фразу, а ровно этого мы и избегаем.
     rotation = vary.Rotation()
     vary_on = ledger_of().rules()["vary"]
+    base = series_options(link, account, template, jobs)
+
+    if base is None:
+        return
 
     for number, job in enumerate(jobs, start=1):
         link.screen(f"Создаю {number} из {len(jobs)}: {job['name']}…")
@@ -2497,7 +2703,12 @@ def run_series(link, account, template, photos, jobs) -> None:
         # Своя копия полей и характеристик на каждое объявление: один
         # список на все означал бы, что правка в третьем меняет первое.
         draft.fields = copy.deepcopy(template.fields)
-        draft.options = copy.deepcopy(template.options)
+        draft.options = copy.deepcopy(base)
+        # Номинал у каждого объявления свой — характеристику площадки он
+        # тоже меняет, иначе в партии будет десять «сумм пополнения» по
+        # номиналу образца.
+        forget_amount(draft.options, draft.nominal)
+        fill_amount_options(draft)
         draft.photos = list(photos)
 
         if vary_on:
@@ -2587,9 +2798,13 @@ def flip_numbers(attributes: dict) -> dict:
 def create_item(account, draft: wizard.Draft):
     """Создать черновик → (номер товара, причина отказа)."""
     fields = [Field(f["id"], f["value"]) for f in draft.filled_fields()]
+    # Те же поля, но целиком, включая пропущенные: пустое поле в запросе
+    # это не то же самое, что поле, которого в запросе нет.
+    whole = [Field(f["id"], f.get("value") or "")
+             for f in getattr(draft, "fields", None) or []]
     attributes = draft.attributes()
 
-    def send(options):
+    def send(options, data_fields):
         return account.create_item(
             game_category_id=draft.category["id"],
             obtaining_type_id=draft.obtaining["id"],
@@ -2597,12 +2812,12 @@ def create_item(account, draft: wizard.Draft):
             price=draft.price,
             description=wizard.description_for(draft),
             options=options,
-            data_fields=fields,
+            data_fields=data_fields,
             attachments=list(draft.photos),
         )
 
     try:
-        item = send(attributes)
+        item = send(attributes, fields)
     except Exception as e:                                    # noqa: BLE001
         why = str(e)
 
@@ -2612,13 +2827,34 @@ def create_item(account, draft: wizard.Draft):
         if not any(w in why.lower() for w in SHOW_SENT_WORDS):
             return "", why
 
+        if is_missing_attrs(why):
+            # Площадке не хватает не формы значения, а самого ответа.
+            # Одна догадка тут есть, и проверить её дешевле, чем гадать:
+            # пропущенные поля мы вовсе не отправляем, а сайт отправляет
+            # их пустыми. Повторяем со всеми полями — вдруг площадка
+            # считает отсутствующее поле незаполненным.
+            if len(whole) == len(fields):
+                return "", why
+
+            try:
+                item = send(attributes, whole)
+            except Exception as second:                       # noqa: BLE001
+                logging.warning("со всеми полями тоже не вышло: %s", second)
+
+                return "", why
+
+            logging.info("площадка приняла товар, когда ушли все поля, "
+                         "включая пустые")
+
+            return str(item.id), ""
+
         other = flip_numbers(attributes)
 
         if not other:
             return "", why
 
         try:
-            item = send(other)
+            item = send(other, fields)
         except Exception as second:                           # noqa: BLE001
             # Говорим про ПЕРВЫЙ отказ: вторая попытка была нашей
             # догадкой, и жаловаться на неё продавцу незачем.
@@ -3418,9 +3654,13 @@ def make_copy(link, account, item_id: str) -> None:
     draft.price = plan["price"]
     draft.region = plan["region"]
     draft.nominal = plan["nominal"]
-    draft.options = plan["options"]
+    draft.options = merged_options(account, (plan["category"] or {}).get("id"),
+                                   plan["options"])
     draft.fields = plan["fields"]
     draft.photos = photos
+
+    if not ask_missing_options(link, account, draft):
+        return
 
     # Описание прогоняем тем же разбором, что и набранное руками: он
     # вырезает строки про регион и номинал. Скопированные как есть, они
