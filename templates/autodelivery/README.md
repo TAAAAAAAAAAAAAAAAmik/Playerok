@@ -31,6 +31,8 @@ code/
   store.py         состояние выдачи, атомарная запись, журнал
   statepath.py     ГДЕ лежит это состояние — один путь на весь проект
   delivery.py      движок: покупка, ожидание кода, отправка, возобновление
+  manager.py       менеджер: ответы покупателю, жалобы, напоминания, отчёт
+  chats.py         чаты площадки строками: список, переписка, кто написал
 tests/
   test_delivery.py 25 тестов движка на поддельных площадке и поставщике
   test_playerok.py 32 теста адаптера на поддельном аккаунте
@@ -38,6 +40,8 @@ tests/
   test_auth.py     10 тестов входа в кабинет
   test_pull.py     8 тестов обновления кода без git
   test_envfile.py  7 тестов чтения .env
+  test_manager.py  57 тестов менеджера: что он отвечает и чего не отвечает
+  test_chats.py    17 тестов чтения чатов
 docs/
   01_ARCHITECTURE.md   конвейер, состояния, инварианты
   02_MARKETPLACE_PORT.md что именно писать под PlayerOK
@@ -73,7 +77,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 1396 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 1421 тест, сети не требуют
 ```
 
 ---

@@ -80,6 +80,7 @@ import stats                                                 # noqa: E402
 import vary                                                   # noqa: E402
 import bump                                                   # noqa: E402
 import manager                                                # noqa: E402
+import chats                                                  # noqa: E402
 from bump import Ledger                                       # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
@@ -112,7 +113,8 @@ MENU = [[("➕ Новый товар", "новый товар"),
          ("👤 Аккаунт", "аккаунт")],
         [("📊 Статистика", "статистика"),
          ("🩺 Проверка выдачи", "проверка")],
-        [("👔 Менеджер", "менеджер")]]
+        [("👔 Менеджер", "менеджер"),
+         ("💬 Чаты", "чаты")]]
 
 # Команды в меню Telegram — та кнопка слева от поля ввода. Без неё их
 # надо помнить и набирать вслепую.
@@ -131,6 +133,7 @@ COMMANDS = [
     ("attrs", "Характеристики категории: что спрашивает площадка"),
     ("stats", "Статистика: продажи, профит, отзывы"),
     ("manager", "Менеджер: автоответы покупателям"),
+    ("chats", "Чаты: прочитать и ответить"),
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
@@ -164,6 +167,7 @@ HEALTH_WORDS = ("проверка", "проверка выдачи", "почем
 ATTRS_WORDS = ("характеристики", "атрибуты", "/attrs")
 STATS_WORDS = ("статистика", "стата", "заработок", "/stats")
 MANAGER_WORDS = ("менеджер", "автоответчик", "ответы", "/manager")
+CHAT_WORDS = ("чаты", "чат", "переписка", "/chats")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -3817,6 +3821,130 @@ def mute_verdicts(conf, held) -> list:
 # Приставка у кнопок менеджера.
 PICK_MAN = "мен:"
 
+# Приставка у кнопок чатов.
+PICK_CHAT = "чат:"
+
+# Сколько чатов показывать. Столько помещается на экране телефона, а
+# дальше продавец и сам не листает: свежие сверху.
+CHATS_SHOWN = 10
+
+# Сколько сообщений показывать в переписке.
+TALK_SHOWN = 10
+
+
+def chats_menu(link, account) -> None:
+    """💬 Чаты: прочитать и ответить, не уходя в браузер.
+
+    Уведомление говорит «покупатель написал», а ответить было негде: бот
+    умел писать в чат сам, а продавец — нет. За каждым «как активировать»
+    приходилось идти на сайт с телефона, где чат открывается третьим
+    нажатием.
+    """
+    if account is None:
+        link.screen("Сначала кабинет: «👤 Аккаунт».", buttons=MENU)
+        return
+
+    link.screen("Читаю чаты…")
+
+    try:
+        page = account.get_chats(count=CHATS_SHOWN)
+        rows = list(getattr(page, "chats", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Чаты прочитать не вышло: {e}", buttons=MENU)
+        return
+
+    me = str(getattr(account, "id", "") or "")
+
+    if not rows:
+        link.screen("Чатов пока нет.", buttons=MENU)
+        return
+
+    said = ["💬 Чаты", ""]
+    keys = []
+
+    for number, chat in enumerate(rows):
+        said.append(chats.line_of(chat, me))
+        keys.append([(chats.label_of(chat, me),
+                      PICK_CHAT + str(getattr(chat, "id", "") or number))])
+
+    keys.append([("🔄 Обновить", PICK_CHAT + "ещё")])
+    keys.append([("✖️ Назад", "отмена")])
+
+    answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if text == PICK_CHAT + "ещё":
+        chats_menu(link, account)
+        return
+
+    if text.startswith(PICK_CHAT):
+        one_chat(link, account, text[len(PICK_CHAT):])
+        return
+
+    link.screen("Готово.", buttons=MENU)
+
+
+def one_chat(link, account, chat_id: str) -> None:
+    """Одна переписка: прочитать и ответить."""
+    link.screen("Читаю переписку…")
+    me = str(getattr(account, "id", "") or "")
+
+    try:
+        page = account.get_chat_messages(chat_id, count=TALK_SHOWN)
+        rows = list(getattr(page, "messages", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Переписку прочитать не вышло: {e}", buttons=MENU)
+        return
+
+    talk = chats.talk_of(rows, me, TALK_SHOWN)
+    said = ["💬 Переписка", ""] + (talk or ["Пока пусто."])
+    keys = [[("✉️ Ответить", PICK_CHAT + "отв:" + chat_id)],
+            [("✅ Отметить прочитанным", PICK_CHAT + "чит:" + chat_id)],
+            [("⬅️ К чатам", PICK_CHAT + "назад")]]
+
+    answer = link.ask("\n\n".join(said), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if text.startswith(PICK_CHAT + "отв:"):
+        write_to_chat(link, account, chat_id)
+        return
+
+    if text.startswith(PICK_CHAT + "чит:"):
+        try:
+            account.mark_chat_as_read(chat_id)
+        except Exception as e:                                # noqa: BLE001
+            link.screen(f"Отметить не вышло: {e}", buttons=MENU)
+            return
+
+        chats_menu(link, account)
+        return
+
+    if text.startswith(PICK_CHAT):
+        chats_menu(link, account)
+        return
+
+    link.screen("Готово.", buttons=MENU)
+
+
+def write_to_chat(link, account, chat_id: str) -> None:
+    """Ответить покупателю. Отправляем ровно то, что написал продавец."""
+    answer = link.ask("Что ответить покупателю?\n\nОтправлю как есть, от "
+                      "вашего имени.", ANSWER_WAIT, buttons=[CANCEL])
+    body = str(answer.get("text") or "").strip()
+
+    if not body or wizard.cancelled(body):
+        one_chat(link, account, chat_id)
+        return
+
+    try:
+        account.send_message(chat_id, body)
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Отправить не вышло: {e}\n\nТекст не потерян:\n"
+                    f"{body}", buttons=MENU)
+        return
+
+    link.screen("Отправлено.", buttons=MENU)
+
 # Сколько правил показывать на экране. Больше — и список не помещается на
 # телефоне, а продавцу важнее видеть первые: они и срабатывают первыми.
 RULES_SHOWN = 8
@@ -6357,6 +6485,8 @@ def handle_command(link, account, text: str):
         stats_menu(link, account)
     elif text in MANAGER_WORDS:
         manager_menu(link)
+    elif text in CHAT_WORDS:
+        chats_menu(link, account)
     elif text in ACCOUNT_WORDS:
         account = accounts_menu(link, account)
     elif stale_press(text):

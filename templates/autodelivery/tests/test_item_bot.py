@@ -5265,3 +5265,114 @@ class ManagerClockScreenTest(unittest.TestCase):
         link = self.open("отмена")
 
         self.assertIn("часы молчат", link.asked[1][0])
+
+
+class ChatsScreenTest(unittest.TestCase):
+    """💬 Чаты: прочитать и ответить, не уходя в браузер."""
+
+    class Account:
+        id = "me-1"
+
+        def __init__(self, broken=False, fail_send=False):
+            self.sent = []
+            self.read = []
+            self.broken = broken
+            self.fail_send = fail_send
+
+        def _chat(self, number):
+            user = type("U", (), {"id": f"u{number}", "username": f"buyer{number}"})()
+            me = type("U", (), {"id": self.id, "username": "seller"})()
+            item = type("I", (), {"name": f"{number}0 РОБУКСОВ"})()
+
+            return type("C", (), {
+                "id": f"c{number}", "users": [me, user],
+                "unread_messages_counter": number,
+                "deals": [type("D", (), {"item": item})()],
+                "last_message": type("M", (), {
+                    "text": "как активировать?", "user": user,
+                    "created_at": "", "images": []})()})()
+
+        def get_chats(self, count=24, **kw):
+            if self.broken:
+                raise RuntimeError("площадка молчит")
+
+            return type("P", (), {"chats": [self._chat(1), self._chat(2)]})()
+
+        def get_chat_messages(self, chat_id, count=24, **kw):
+            user = type("U", (), {"id": "u1", "username": "buyer1"})()
+
+            return type("P", (), {"messages": [
+                type("M", (), {"text": "второе", "user": user,
+                               "created_at": "", "images": []})(),
+                type("M", (), {"text": "первое", "user": user,
+                               "created_at": "", "images": []})()]})()
+
+        def send_message(self, chat_id, text):
+            if self.broken or self.fail_send:
+                raise RuntimeError("чат закрыт")
+
+            self.sent.append((chat_id, text))
+
+        def mark_chat_as_read(self, chat_id):
+            self.read.append(chat_id)
+
+    def test_the_list_shows_who_and_what(self):
+        link = FakeLink(["отмена"])
+        item_bot.chats_menu(link, self.Account())
+        said = link.asked[0][0]
+
+        self.assertIn("buyer1", said)
+        self.assertIn("РОБУКСОВ", said)
+        self.assertNotIn("seller", said)
+
+    def test_a_chat_opens_into_the_talk(self):
+        link = FakeLink([item_bot.PICK_CHAT + "c1", "отмена"])
+        item_bot.chats_menu(link, self.Account())
+        said = link.asked[-1][0]
+
+        self.assertIn("первое", said)
+        self.assertLess(said.index("первое"), said.index("второе"))
+
+    def test_the_answer_reaches_the_buyer(self):
+        account = self.Account()
+        link = FakeLink([item_bot.PICK_CHAT + "c1",
+                         item_bot.PICK_CHAT + "отв:c1", "Код уже в чате"])
+        item_bot.chats_menu(link, account)
+
+        self.assertEqual(account.sent, [("c1", "Код уже в чате")])
+        self.assertIn("Отправлено", link.said[-1])
+
+    def test_a_refusal_does_not_eat_the_text(self):
+        """Иначе продавец набирал ответ, а он исчезал вместе с отказом."""
+        account = self.Account(fail_send=True)
+        link = FakeLink([item_bot.PICK_CHAT + "c1",
+                         item_bot.PICK_CHAT + "отв:c1", "Код уже в чате"])
+        item_bot.chats_menu(link, account)
+
+        self.assertIn("Код уже в чате", link.said[-1])
+        self.assertIn("не вышло", link.said[-1])
+
+    def test_marking_as_read_goes_to_the_marketplace(self):
+        account = self.Account()
+        link = FakeLink([item_bot.PICK_CHAT + "c1",
+                         item_bot.PICK_CHAT + "чит:c1", "отмена"])
+        item_bot.chats_menu(link, account)
+
+        self.assertEqual(account.read, ["c1"])
+
+    def test_without_an_account_it_says_so(self):
+        link = FakeLink([])
+        item_bot.chats_menu(link, None)
+
+        self.assertIn("кабинет", link.said[-1])
+
+    def test_a_silent_marketplace_is_not_a_crash(self):
+        link = FakeLink([])
+        item_bot.chats_menu(link, self.Account(broken=True))
+
+        self.assertIn("не вышло", link.said[-1])
+
+    def test_the_menu_has_the_button(self):
+        names = [name for row in item_bot.MENU for name, _ in row]
+
+        self.assertIn("💬 Чаты", names)
