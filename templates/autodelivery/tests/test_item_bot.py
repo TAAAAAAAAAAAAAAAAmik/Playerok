@@ -5376,3 +5376,69 @@ class ChatsScreenTest(unittest.TestCase):
         names = [name for row in item_bot.MENU for name, _ in row]
 
         self.assertIn("💬 Чаты", names)
+
+
+class ChatQuickRepliesTest(unittest.TestCase):
+    """Готовые ответы и тишина — прямо из переписки.
+
+    Список готовых один и тот же с менеджером: два списка одного и того же
+    однажды расходятся, и тогда бот отвечает одно, а продавец другое.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+        conf, store = item_bot.manager_conf()
+        conf["faq"] = [{"word": "активир", "text": "Вставьте код в Robux"}]
+        store.save()
+
+    def account(self):
+        return ChatsScreenTest.Account()
+
+    def open(self, *answers):
+        account = self.account()
+        link = FakeLink([item_bot.PICK_CHAT + "c1", *answers])
+        item_bot.chats_menu(link, account)
+
+        return link, account
+
+    def test_the_ready_answer_is_a_button(self):
+        link, _ = self.open("отмена")
+        names = [name for row in link.asked[-1][1] for name, _ in row]
+
+        self.assertTrue(any("Вставьте код" in name for name in names))
+
+    def test_pressing_it_sends_it(self):
+        link, account = self.open(item_bot.PICK_CHAT + "б0")
+
+        self.assertEqual(account.sent, [("c1", "Вставьте код в Robux")])
+
+    def test_what_was_sent_is_shown_back(self):
+        """Иначе непонятно, какая из кнопок нажалась."""
+        link, _ = self.open(item_bot.PICK_CHAT + "б0")
+
+        self.assertIn("Вставьте код в Robux", link.said[-1])
+
+    def test_a_chat_can_be_silenced(self):
+        link, _ = self.open(item_bot.PICK_CHAT + "тихо", "отмена")
+        conf, _ = item_bot.manager_conf()
+
+        self.assertIn("c1", conf["mute"])
+        self.assertIn("менеджер не пишет", link.asked[-1][0])
+
+    def test_and_unsilenced(self):
+        self.open(item_bot.PICK_CHAT + "тихо",
+                  item_bot.PICK_CHAT + "тихо", "отмена")
+        conf, _ = item_bot.manager_conf()
+
+        self.assertEqual(conf["mute"], [])
+
+    def test_without_ready_answers_there_are_no_buttons(self):
+        conf, store = item_bot.manager_conf()
+        conf["faq"] = []
+        store.save()
+        link, _ = self.open("отмена")
+        names = [name for row in link.asked[-1][1] for name, _ in row]
+
+        self.assertFalse(any(name.startswith("⚡") for name in names))

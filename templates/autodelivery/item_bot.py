@@ -3831,6 +3831,10 @@ CHATS_SHOWN = 10
 # Сколько сообщений показывать в переписке.
 TALK_SHOWN = 10
 
+# Сколько готовых ответов вешать кнопками в переписке. Три: больше не
+# помещается вместе с остальными кнопками, а нужны обычно первые.
+QUICK_SHOWN = 3
+
 
 def chats_menu(link, account) -> None:
     """💬 Чаты: прочитать и ответить, не уходя в браузер.
@@ -3897,13 +3901,55 @@ def one_chat(link, account, chat_id: str) -> None:
         return
 
     talk = chats.talk_of(rows, me, TALK_SHOWN)
+    conf, store = manager_conf()
+    quick = [rule for rule in (conf.get("faq") or [])
+             if str(rule.get("text") or "").strip()][:QUICK_SHOWN]
+    silent = manager.muted(conf, chat_id)
     said = ["💬 Переписка", ""] + (talk or ["Пока пусто."])
-    keys = [[("✉️ Ответить", PICK_CHAT + "отв:" + chat_id)],
-            [("✅ Отметить прочитанным", PICK_CHAT + "чит:" + chat_id)],
-            [("⬅️ К чатам", PICK_CHAT + "назад")]]
+
+    if silent:
+        said.append("\n🔇 В этот чат менеджер не пишет — отвечаете только "
+                    "вы.")
+
+    keys = [[("✉️ Ответить", PICK_CHAT + "отв:" + chat_id)]]
+
+    # Готовые ответы — те же, которыми отвечает менеджер. Второго списка
+    # не заводим: два списка одного и того же однажды расходятся, и тогда
+    # бот отвечает одно, а продавец другое.
+    for number, rule in enumerate(quick):
+        keys.append([(f"⚡ {shorten(str(rule.get('text') or ''), 28)}",
+                      PICK_CHAT + "б" + str(number))])
+
+    keys.append([("✅ Отметить прочитанным", PICK_CHAT + "чит:" + chat_id)])
+    keys.append([("🔊 Пусть отвечает" if silent else "🔇 Не отвечать здесь",
+                  PICK_CHAT + "тихо")])
+    keys.append([("⬅️ К чатам", PICK_CHAT + "назад")])
 
     answer = link.ask("\n\n".join(said), ANSWER_WAIT, buttons=keys)
     text = str(answer.get("text") or "").strip()
+
+    if text.startswith(PICK_CHAT + "б") and text[len(PICK_CHAT) + 1:].isdigit():
+        number = int(text[len(PICK_CHAT) + 1:])
+
+        if number < len(quick):
+            send_to_chat(link, account, chat_id,
+                         str(quick[number].get("text") or ""))
+            return
+
+        one_chat(link, account, chat_id)
+        return
+
+    if text == PICK_CHAT + "тихо":
+        mute = conf.setdefault("mute", [])
+
+        if silent:
+            conf["mute"] = [one for one in mute if str(one) != str(chat_id)]
+        else:
+            mute.append(str(chat_id))
+
+        store.save()
+        one_chat(link, account, chat_id)
+        return
 
     if text.startswith(PICK_CHAT + "отв:"):
         write_to_chat(link, account, chat_id)
@@ -3936,6 +3982,15 @@ def write_to_chat(link, account, chat_id: str) -> None:
         one_chat(link, account, chat_id)
         return
 
+    send_to_chat(link, account, chat_id, body)
+
+
+def send_to_chat(link, account, chat_id: str, body: str) -> None:
+    """Отправить готовый текст. → экран с ответом площадки.
+
+    Отказ показывает и сам текст: продавец набирал его минуту, и терять
+    его вместе с отказом — значит заставить набирать заново.
+    """
     try:
         account.send_message(chat_id, body)
     except Exception as e:                                    # noqa: BLE001
@@ -3943,7 +3998,7 @@ def write_to_chat(link, account, chat_id: str) -> None:
                     f"{body}", buttons=MENU)
         return
 
-    link.screen("Отправлено.", buttons=MENU)
+    link.screen(f"Отправлено:\n{body}", buttons=MENU)
 
 # Сколько правил показывать на экране. Больше — и список не помещается на
 # телефоне, а продавцу важнее видеть первые: они и срабатывают первыми.
