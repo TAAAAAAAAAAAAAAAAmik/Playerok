@@ -81,6 +81,7 @@ import vary                                                   # noqa: E402
 import bump                                                   # noqa: E402
 import manager                                                # noqa: E402
 import chats                                                  # noqa: E402
+import boost                                                  # noqa: E402
 from bump import Ledger                                       # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
@@ -114,7 +115,8 @@ MENU = [[("➕ Новый товар", "новый товар"),
         [("📊 Статистика", "статистика"),
          ("🩺 Проверка выдачи", "проверка")],
         [("👔 Менеджер", "менеджер"),
-         ("💬 Чаты", "чаты")]]
+         ("💬 Чаты", "чаты")],
+        [("⬆️ Поднятие", "поднятие")]]
 
 # Команды в меню Telegram — та кнопка слева от поля ввода. Без неё их
 # надо помнить и набирать вслепую.
@@ -134,6 +136,7 @@ COMMANDS = [
     ("stats", "Статистика: продажи, профит, отзывы"),
     ("manager", "Менеджер: автоответы покупателям"),
     ("chats", "Чаты: прочитать и ответить"),
+    ("boost", "Поднятие объявлений"),
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
@@ -168,6 +171,7 @@ ATTRS_WORDS = ("характеристики", "атрибуты", "/attrs")
 STATS_WORDS = ("статистика", "стата", "заработок", "/stats")
 MANAGER_WORDS = ("менеджер", "автоответчик", "ответы", "/manager")
 CHAT_WORDS = ("чаты", "чат", "переписка", "/chats")
+BOOST_WORDS = ("поднятие", "поднять", "автоподнятие", "/boost")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -3818,6 +3822,189 @@ def mute_verdicts(conf, held) -> list:
     return rows
 
 
+# Приставка у кнопок поднятия.
+PICK_UP = "вверх:"
+
+
+def boost_conf():
+    """Настройки поднятия и хранилище, в котором они лежат."""
+    store = settings_of().store
+
+    return boost.settings_of(store.shared()), store
+
+
+def boost_menu(link, account=None) -> None:
+    """⬆️ Поднятие объявлений: само, по часам, и только на разрешённые деньги.
+
+    Объявление тонет: в категории три сотни одинаковых промокодов, и
+    вчерашнее не видит никто. Поднимать десяток руками каждый день не
+    станет никто — а не поднимать значит продавать вдвое меньше.
+
+    Деньги здесь на виду с первого экрана: поднятие на площадке бывает
+    платным, и продавец должен видеть, сколько бот потратил, раньше, чем
+    искать это в банковской выписке.
+    """
+    conf, store = boost_conf()
+    on = bool(conf.get("on"))
+    paid = bool(conf.get("paid"))
+    now = time.time()
+
+    said = ["⬆️ Поднятие объявлений", "",
+            f"Сейчас: {mark(on)}",
+            f"Поднимаю каждый товар раз в {manager._hours(conf.get('every') or 8)}",
+            f"Платное поднятие: {'🟢 разрешено' if paid else '🔴 запрещено'}"]
+
+    if paid:
+        said += [f"  до {stats.money(conf.get('max_price') or 0)} за раз",
+                 f"  не больше {stats.money(conf.get('limit') or 0)} в сутки",
+                 f"  сегодня потрачено "
+                 f"{stats.money(conf.get('spent') or 0)}"]
+
+    if conf.get("count"):
+        said.append(f"Всего поднятий: {conf.get('count')}")
+
+    said += ["", "Бесплатный статус беру всегда. Платный — только если "
+                 "разрешите, и только в пределах, которые назовёте сами: "
+                 "цикл, который тратит деньги без спроса, — худшее, что "
+                 "тут можно придумать."]
+
+    keys = [[("🔴 Выключить" if on else "🟢 Включить", PICK_UP + "вкл")],
+            [("⏱ Как часто", PICK_UP + "часто")],
+            [("💳 Платное: " + ("запретить" if paid else "разрешить"),
+              PICK_UP + "платно")]]
+
+    if paid:
+        keys.append([("💰 За раз", PICK_UP + "цена"),
+                     ("📅 В сутки", PICK_UP + "потолок")])
+
+    keys.append([("🔍 Что предлагает площадка", PICK_UP + "что")])
+    keys.append([("✖️ Назад", "отмена")])
+
+    answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if text == PICK_UP + "вкл":
+        conf["on"] = not on
+        store.save()
+        boost_menu(link, account)
+        return
+
+    if text == PICK_UP + "платно":
+        conf["paid"] = not paid
+
+        if conf["paid"] and not conf.get("max_price"):
+            # Разрешение без пределов — это не разрешение, а подпись под
+            # пустым листом. Спрашиваем их сразу же.
+            store.save()
+            ask_boost_number(link, account, "цена")
+            return
+
+        store.save()
+        boost_menu(link, account)
+        return
+
+    if text in (PICK_UP + "часто", PICK_UP + "цена", PICK_UP + "потолок"):
+        ask_boost_number(link, account, text[len(PICK_UP):])
+        return
+
+    if text == PICK_UP + "что":
+        boost_prices(link, account)
+        return
+
+    link.screen("Готово.", buttons=MENU)
+
+
+# Что спрашиваем у продавца про поднятие: ключ настройки, вопрос, пределы.
+BOOST_ASKS = {
+    "часто": ("every", "Как часто поднимать один и тот же товар?\n\n"
+                       "В часах. 8 — три раза в сутки.", 1, 240),
+    "цена": ("max_price", "Сколько разрешаете тратить на ОДНО поднятие?\n\n"
+                          "В рублях. 0 — не платить вовсе.", 0, 100000),
+    "потолок": ("limit", "Сколько разрешаете тратить на поднятия в СУТКИ?\n\n"
+                         "В рублях. 0 — не платить вовсе.", 0, 1000000),
+}
+
+
+def ask_boost_number(link, account, what: str) -> None:
+    """Спросить одно число из настроек поднятия."""
+    key, question, low, high = BOOST_ASKS[what]
+    answer = link.ask(question, ANSWER_WAIT, buttons=[CANCEL])
+    value, why = wizard.accept_number(str(answer.get("text") or ""),
+                                      allow_zero=low == 0)
+
+    if why:
+        link.screen(f"{why}\n\nНичего не менял.", buttons=MENU)
+        return
+
+    if not low <= value <= high:
+        link.screen(f"Нужно число от {low} до {high}. Ничего не менял.",
+                    buttons=MENU)
+        return
+
+    conf, store = boost_conf()
+    conf[key] = int(value)
+
+    # Ноль в деньгах — это «не плати»: разрешение без суммы бессмысленно.
+    if key in ("max_price", "limit") and not int(value):
+        conf["paid"] = False
+
+    store.save()
+    boost_menu(link, account)
+
+
+def boost_prices(link, account) -> None:
+    """Что площадка предлагает за поднятие — на живом товаре продавца.
+
+    Цену знает только площадка, и знает её на каждый товар отдельно:
+    от цены товара зависит и цена статуса. Догадываться тут нельзя —
+    спрашиваем и показываем как есть.
+    """
+    if account is None:
+        link.screen("Сначала кабинет: «👤 Аккаунт».", buttons=MENU)
+        return
+
+    link.screen("Спрашиваю площадку…")
+
+    try:
+        page = account.get_my_items(statuses=[boost.Approved()],
+                                    count=1)
+        rows = list(getattr(page, "items", None) or [])
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Витрину прочитать не вышло: {e}", buttons=MENU)
+        return
+
+    if not rows:
+        link.screen("На витрине нет ни одного товара — поднимать нечего.",
+                    buttons=MENU)
+        return
+
+    item = rows[0]
+    name = str(getattr(item, "name", "") or "без названия")
+    price = getattr(item, "price", None) or getattr(item, "raw_price", 0) or 0
+
+    try:
+        statuses = account.get_item_priority_statuses(
+            str(getattr(item, "id", "") or ""), price)
+    except Exception as e:                                    # noqa: BLE001
+        link.screen(f"Статусы прочитать не вышло: {e}", buttons=MENU)
+        return
+
+    said = [f"🔍 Что площадка предлагает для «{shorten(name, 40)}»", ""]
+
+    if not statuses:
+        said.append("Ни одного статуса — поднимать этот товар нечем.")
+    else:
+        for status in listing.ordered(statuses):
+            said.append(f"  • {listing.describe(status)}")
+
+        free = [s for s in statuses if listing.is_free(s)]
+        said += ["", "Бесплатный есть — поднимать буду им." if free
+                 else "Бесплатного нет: без разрешения на платное я "
+                      "поднимать не стану."]
+
+    link.screen("\n".join(said), buttons=MENU)
+
+
 # Приставка у кнопок менеджера.
 PICK_MAN = "мен:"
 
@@ -6542,6 +6729,8 @@ def handle_command(link, account, text: str):
         manager_menu(link)
     elif text in CHAT_WORDS:
         chats_menu(link, account)
+    elif text in BOOST_WORDS:
+        boost_menu(link, account)
     elif text in ACCOUNT_WORDS:
         account = accounts_menu(link, account)
     elif stale_press(text):

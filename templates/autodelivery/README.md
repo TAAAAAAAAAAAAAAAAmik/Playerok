@@ -33,6 +33,7 @@ code/
   delivery.py      движок: покупка, ожидание кода, отправка, возобновление
   manager.py       менеджер: ответы покупателю, жалобы, напоминания, отчёт
   chats.py         чаты площадки строками: список, переписка, кто написал
+  boost.py         поднятие: когда, каким статусом и на какие деньги
 tests/
   test_delivery.py 25 тестов движка на поддельных площадке и поставщике
   test_playerok.py 32 теста адаптера на поддельном аккаунте
@@ -42,6 +43,7 @@ tests/
   test_envfile.py  7 тестов чтения .env
   test_manager.py  57 тестов менеджера: что он отвечает и чего не отвечает
   test_chats.py    17 тестов чтения чатов
+  test_boost.py    23 теста поднятия — почти все про то, что бот НЕ тратит
 docs/
   01_ARCHITECTURE.md   конвейер, состояния, инварианты
   02_MARKETPLACE_PORT.md что именно писать под PlayerOK
@@ -77,7 +79,7 @@ example_bot.py     минимальная сборка: как всё соеди
 
 ```bash
 cd templates/autodelivery
-python3 -m unittest discover tests -v      # 1427 тестов, сети не требуют
+python3 -m unittest discover tests -v      # 1469 тестов, сети не требуют
 ```
 
 ---

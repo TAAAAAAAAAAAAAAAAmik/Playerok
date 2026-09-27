@@ -25,6 +25,8 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "code"))
 
 import restore                                                # noqa: E402
+import boost                                                  # noqa: E402
+import statepath as _statepath                                # noqa: E402
 from alarm import Alarm, COOKIES_ADVICE                       # noqa: E402
 from auth import sign_in                                      # noqa: E402
 from playerok import is_auth_error                            # noqa: E402
@@ -223,6 +225,104 @@ def handle(account, item, handled):
     return f"⚠️ «{name}» восстановить не вышло: {why}\n{MANUAL}"
 
 
+# Как часто заходить с поднятием. Не чаще: каждый заход читает витрину, а
+# поднимать один и тот же товар всё равно можно раз в несколько часов.
+BOOST_EVERY = 600.0
+
+
+# Оставлено именем: тесты и бот зовут его отсюда же.
+Approved = boost.Approved
+
+
+def live_items(account, count: int = BATCH) -> list:
+    """Товары, которые СЕЙЧАС на витрине."""
+    page = account.get_my_items(statuses=[boost.Approved()], count=count)
+
+    return list(getattr(page, "items", None) or [])
+
+
+def lift_one(account, item, conf, now) -> tuple:
+    """Поднять один товар. → (подняли ли, потрачено, причина отказа)."""
+    item_id = str(getattr(item, "id", "") or "")
+    price = getattr(item, "price", None) or getattr(item, "raw_price", 0) or 0
+
+    try:
+        statuses = account.get_item_priority_statuses(item_id, price)
+    except Exception as e:                                    # noqa: BLE001
+        return False, 0.0, f"статусы приоритета не прочитались: {e}"
+
+    status, why = boost.pick(statuses, conf, now)
+
+    if status is None:
+        return False, 0.0, why
+
+    try:
+        account.increase_item_priority_status(item_id, status.id)
+    except Exception as e:                                    # noqa: BLE001
+        return False, 0.0, str(e)
+
+    import listing
+
+    cost = listing.price_of(status)
+    cost = 0.0 if cost <= 0 else float(cost)
+
+    if cost:
+        boost.spend(conf, cost, now)
+
+    boost.remember(conf, item_id, now)
+
+    return True, cost, ""
+
+
+def boost_pass(account, store, now=None) -> str:
+    """Один проход поднятия. → что сказать продавцу («» — молчим).
+
+    Отдельным проходом, а не внутри восстановления: восстановление
+    занимается проданным, а поднимать надо живое. И реже: поднятие
+    осмысленно раз в часы, а проданное надо возвращать в минуты.
+    """
+    now = time.time() if now is None else now
+    conf = boost.settings_of(store.shared())
+
+    if not conf.get("on"):
+        return ""
+
+    items = live_items(account)
+    rows = boost.due(items, conf, now)
+
+    if not rows:
+        return ""
+
+    done, failed, spent = [], [], 0.0
+    # Про отказ говорим ОДИН раз за проход: причина у всех товаров обычно
+    # одна и та же («платное не разрешено»), и десять одинаковых строк —
+    # это не десять бед, а одна.
+    told = set()
+
+    for item in rows:
+        ok, cost, why = lift_one(account, item, conf, now)
+        name = str(getattr(item, "name", "") or "без названия")[:40]
+
+        if ok:
+            done.append(name)
+            spent += cost
+            continue
+
+        if restore.try_later(why):
+            raise TooFast(why)
+
+        if why not in told:
+            told.add(why)
+            failed.append((name, why))
+
+    store.save()
+
+    if done:
+        log.info("поднято: %s (потрачено %.0f ₽)", len(done), spent)
+
+    return boost.report(done, spent, failed)
+
+
 def main() -> None:
     load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
     account, _store, link = sign_in()
@@ -235,6 +335,10 @@ def main() -> None:
 
     period = PERIOD
     slow = Alarm(link, "Восстановление")
+    # Поднятие живёт в том же процессе: это тоже про объявления, и второй
+    # процесс ради него означал бы второй вход в кабинет и второй темп.
+    store = _statepath.open_store()
+    lifted_at = 0.0
 
     while True:
         try:
@@ -243,6 +347,13 @@ def main() -> None:
 
                 if told and link:
                     link.say(told)
+
+            if time.time() - lifted_at >= BOOST_EVERY:
+                lifted_at = time.time()
+                said = boost_pass(account, store)
+
+                if said and link:
+                    link.say(said)
 
             # Проход дошёл до конца — значит вход в кабинет работает, и
             # темп площадку устраивает.

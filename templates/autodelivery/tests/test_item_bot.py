@@ -5442,3 +5442,110 @@ class ChatQuickRepliesTest(unittest.TestCase):
         names = [name for row in link.asked[-1][1] for name, _ in row]
 
         self.assertFalse(any(name.startswith("⚡") for name in names))
+
+
+class BoostScreenTest(unittest.TestCase):
+    """⬆️ Поднятие: деньги на виду и ни рубля без разрешения."""
+
+    class Account:
+        def __init__(self, statuses=None, items=None):
+            self.statuses = statuses
+            self.items = items
+
+        def get_my_items(self, statuses=None, count=24, **kw):
+            rows = self.items
+
+            if rows is None:
+                rows = [type("I", (), {"id": "i1", "name": "80 робуксов",
+                                       "price": 149})()]
+
+            return type("P", (), {"items": rows})()
+
+        def get_item_priority_statuses(self, item_id, price):
+            if self.statuses is None:
+                return [type("S", (), {"id": "s0", "price": 0,
+                                       "name": "Обычный", "period": 30})()]
+
+            return self.statuses
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+
+    def conf(self):
+        return item_bot.boost_conf()[0]
+
+    def test_it_starts_switched_off_and_unpaid(self):
+        link = FakeLink(["отмена"])
+        item_bot.boost_menu(link)
+        conf = self.conf()
+
+        self.assertFalse(conf["on"])
+        self.assertFalse(conf["paid"])
+        self.assertIn("🔴 запрещено", link.asked[0][0])
+
+    def test_the_button_switches_it_on(self):
+        link = FakeLink([item_bot.PICK_UP + "вкл", "отмена"])
+        item_bot.boost_menu(link)
+
+        self.assertTrue(self.conf()["on"])
+
+    def test_allowing_paid_asks_for_the_limit_right_away(self):
+        """Разрешение без пределов — подпись под пустым листом."""
+        link = FakeLink([item_bot.PICK_UP + "платно", "20", "отмена"])
+        item_bot.boost_menu(link)
+        conf = self.conf()
+
+        self.assertTrue(conf["paid"])
+        self.assertEqual(conf["max_price"], 20)
+
+    def test_a_zero_limit_turns_paid_off(self):
+        """Ноль в деньгах — это «не плати»."""
+        link = FakeLink([item_bot.PICK_UP + "платно", "0", "отмена"])
+        item_bot.boost_menu(link)
+        conf = self.conf()
+
+        self.assertFalse(conf["paid"])
+
+    def test_the_interval_is_kept(self):
+        link = FakeLink([item_bot.PICK_UP + "часто", "4", "отмена"])
+        item_bot.boost_menu(link)
+
+        self.assertEqual(self.conf()["every"], 4)
+
+    def test_nonsense_changes_nothing(self):
+        link = FakeLink([item_bot.PICK_UP + "часто", "скоро"])
+        item_bot.boost_menu(link)
+
+        self.assertEqual(self.conf()["every"], 8)
+
+    def test_the_marketplace_prices_are_shown_as_they_came(self):
+        """Цену знает только площадка, и на каждый товар свою."""
+        account = self.Account(statuses=[
+            type("S", (), {"id": "s1", "price": 300, "name": "Премиум",
+                           "period": 7})()])
+        link = FakeLink([item_bot.PICK_UP + "что"])
+        item_bot.boost_menu(link, account)
+        said = link.said[-1]
+
+        self.assertIn("Премиум", said)
+        self.assertIn("300", said)
+        self.assertIn("Бесплатного нет", said)
+
+    def test_a_free_status_is_named_as_the_one_we_will_use(self):
+        link = FakeLink([item_bot.PICK_UP + "что"])
+        item_bot.boost_menu(link, self.Account())
+
+        self.assertIn("Бесплатный есть", link.said[-1])
+
+    def test_an_empty_showcase_says_so(self):
+        link = FakeLink([item_bot.PICK_UP + "что"])
+        item_bot.boost_menu(link, self.Account(items=[]))
+
+        self.assertIn("нет ни одного товара", link.said[-1])
+
+    def test_the_menu_has_the_button(self):
+        names = [name for row in item_bot.MENU for name, _ in row]
+
+        self.assertIn("⬆️ Поднятие", names)

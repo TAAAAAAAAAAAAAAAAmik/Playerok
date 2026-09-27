@@ -178,3 +178,120 @@ class TooFastTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BoostPassTest(unittest.TestCase):
+    """Проход поднятия: что поднимается, что не поднимается и где
+    останавливаются деньги."""
+
+    class Store:
+        def __init__(self, conf=None):
+            self.data = {"boost": conf or {}}
+            self.saves = 0
+
+        def shared(self):
+            return self.data
+
+        def save(self):
+            self.saves += 1
+
+    class Account:
+        def __init__(self, statuses=None, items=None, fails=""):
+            self.statuses = statuses if statuses is not None else [Status(0)]
+            self.items = items
+            self.fails = fails
+            self.lifted = []
+
+        def get_my_items(self, statuses=None, count=24, **kw):
+            rows = self.items
+
+            if rows is None:
+                rows = [Item("i1", "80 робуксов"), Item("i2", "100 робуксов")]
+
+            return type("P", (), {"items": rows})()
+
+        def get_item_priority_statuses(self, item_id, price):
+            return self.statuses
+
+        def increase_item_priority_status(self, item_id, status_id, **kw):
+            if self.fails:
+                raise RuntimeError(self.fails)
+
+            self.lifted.append((item_id, status_id))
+
+    NOW = 1_700_000_000.0
+
+    def test_nothing_happens_while_it_is_off(self):
+        account = self.Account()
+        said = restore_bot.boost_pass(account, self.Store({"on": False}),
+                                      now=self.NOW)
+
+        self.assertEqual(account.lifted, [])
+        self.assertEqual(said, "")
+
+    def test_the_free_status_lifts_everything_silently(self):
+        """Поднятие идёт каждые несколько часов — письмо о каждом стало бы
+        шумом, в котором потеряется важное."""
+        account = self.Account()
+        said = restore_bot.boost_pass(account, self.Store({"on": True}),
+                                      now=self.NOW)
+
+        self.assertEqual(len(account.lifted), 2)
+        self.assertEqual(said, "")
+
+    def test_a_paid_status_is_not_bought_by_itself(self):
+        account = self.Account(statuses=[Status(300)])
+        store = self.Store({"on": True})
+        said = restore_bot.boost_pass(account, store, now=self.NOW)
+
+        self.assertEqual(account.lifted, [])
+        self.assertIn("не разрешено", said)
+
+    def test_the_refusal_is_said_once_not_per_item(self):
+        account = self.Account(statuses=[Status(300)])
+        said = restore_bot.boost_pass(account, self.Store({"on": True}),
+                                      now=self.NOW)
+
+        self.assertEqual(said.count("не разрешено"), 1)
+
+    def test_an_allowed_paid_status_is_bought_within_the_ceiling(self):
+        account = self.Account(statuses=[Status(15)])
+        store = self.Store({"on": True, "paid": True, "limit": 20,
+                            "max_price": 20})
+        said = restore_bot.boost_pass(account, store, now=self.NOW)
+
+        # Второго не будет: 15 + 15 не помещается в потолок 20 ₽.
+        self.assertEqual(len(account.lifted), 1)
+        self.assertIn("15 ₽", said)
+
+    def test_what_was_lifted_is_remembered(self):
+        account = self.Account()
+        store = self.Store({"on": True})
+        restore_bot.boost_pass(account, store, now=self.NOW)
+        again = restore_bot.boost_pass(account, store, now=self.NOW + 60)
+
+        self.assertEqual(len(account.lifted), 2)
+        self.assertEqual(again, "")
+        self.assertTrue(store.saves)
+
+    def test_a_refusal_of_the_marketplace_is_named(self):
+        account = self.Account(fails="площадка отказала")
+        said = restore_bot.boost_pass(account, self.Store({"on": True}),
+                                      now=self.NOW)
+
+        self.assertIn("отказала", said)
+
+    def test_too_fast_stops_the_pass(self):
+        """Площадка просит сбавить темп — это не отказ, а просьба."""
+        account = self.Account(fails="Слишком много попыток")
+
+        with self.assertRaises(restore_bot.TooFast):
+            restore_bot.boost_pass(account, self.Store({"on": True}),
+                                   now=self.NOW)
+
+    def test_an_empty_showcase_is_not_a_crash(self):
+        account = self.Account(items=[])
+        said = restore_bot.boost_pass(account, self.Store({"on": True}),
+                                      now=self.NOW)
+
+        self.assertEqual(said, "")
