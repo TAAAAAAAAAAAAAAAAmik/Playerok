@@ -79,6 +79,7 @@ import sales                                                 # noqa: E402
 import stats                                                 # noqa: E402
 import vary                                                   # noqa: E402
 import bump                                                   # noqa: E402
+import manager                                                # noqa: E402
 from bump import Ledger                                       # noqa: E402
 import wizard                                                 # noqa: E402
 from accounts import AccountStore                             # noqa: E402
@@ -110,7 +111,8 @@ MENU = [[("➕ Новый товар", "новый товар"),
         [("🔑 Проверить сессию", "проверить"),
          ("👤 Аккаунт", "аккаунт")],
         [("📊 Статистика", "статистика"),
-         ("🩺 Проверка выдачи", "проверка")]]
+         ("🩺 Проверка выдачи", "проверка")],
+        [("👔 Менеджер", "менеджер")]]
 
 # Команды в меню Telegram — та кнопка слева от поля ввода. Без неё их
 # надо помнить и набирать вслепую.
@@ -128,6 +130,7 @@ COMMANDS = [
     ("health", "Проверка выдачи: почему не выдаёт"),
     ("attrs", "Характеристики категории: что спрашивает площадка"),
     ("stats", "Статистика: продажи, профит, отзывы"),
+    ("manager", "Менеджер: автоответы покупателям"),
     ("account", "Кабинеты"),
 ]
 CANCEL = [("✖️ Отмена", "отмена")]
@@ -160,6 +163,7 @@ HEALTH_WORDS = ("проверка", "проверка выдачи", "почем
                 "/health")
 ATTRS_WORDS = ("характеристики", "атрибуты", "/attrs")
 STATS_WORDS = ("статистика", "стата", "заработок", "/stats")
+MANAGER_WORDS = ("менеджер", "автоответчик", "ответы", "/manager")
 
 # Где лежат шаблоны. Рядом с состоянием выдач: это тоже рабочие данные,
 # которые переживают перезапуск и не место им в репозитории.
@@ -3810,6 +3814,254 @@ def mute_verdicts(conf, held) -> list:
     return rows
 
 
+# Приставка у кнопок менеджера.
+PICK_MAN = "мен:"
+
+# Сколько правил показывать на экране. Больше — и список не помещается на
+# телефоне, а продавцу важнее видеть первые: они и срабатывают первыми.
+RULES_SHOWN = 8
+
+# Что предлагаем первым, когда правил нет вовсе. Не выдумка: это ровно те
+# три вопроса, которые покупатель задаёт после оплаты.
+STARTER = [
+    {"word": "как активировать", "text": "Код вводится на сайте товара в "
+                                         "разделе пополнения. Если не "
+                                         "получается — напишите, помогу."},
+    {"word": "сколько ждать", "text": "Код приходит сюда же, в чат, сразу "
+                                      "после оплаты — обычно за минуту."},
+    {"word": "спасибо", "text": "Спасибо вам! Буду рад отзыву 🙂"},
+]
+
+
+def manager_conf():
+    """Настройки менеджера и хранилище, в котором они лежат."""
+    store = settings_of().store
+
+    return manager.settings_of(store.shared()), store
+
+
+def mark(on: bool) -> str:
+    return "🟢 включён" if on else "🔴 выключен"
+
+
+def manager_menu(link) -> None:
+    """👔 Менеджер: кто отвечает покупателю, пока продавец занят.
+
+    Один экран на всё: включатель, счётчики правил и две двери — в ответы
+    и в приветствие. Правила живут за кнопками, потому что их бывает два
+    десятка, а на экране телефона помещается восемь.
+    """
+    conf, store = manager_conf()
+    on = bool(conf.get("on"))
+    hello = conf.get("hello") or {}
+    complaint = conf.get("complaint") or {}
+
+    said = ["👔 Менеджер", "",
+            "Отвечает покупателям вместо вас и зовёт вас на жалобы.", "",
+            f"Сейчас: {mark(on)}",
+            f"Приветствие после покупки: {mark(bool(hello.get('on')))}",
+            f"Ответов на вопросы: {len(conf.get('faq') or [])}",
+            f"Ответов по товарам: {len(conf.get('rules') or [])}",
+            f"Жалобы: {'🟢 зову вас' if complaint.get('on', True) else '🔴 молчу'}"]
+
+    if not on:
+        said += ["", "Пока выключен, в чаты не пишет ничего. Включайте, "
+                     "когда прочитаете свои ответы: уходят они живым людям "
+                     "от вашего имени."]
+
+    said += ["", "Жалобу («обманули», «верните деньги», «не пришёл») "
+                 "менеджер не отвечает никогда — пишет вам. Шаблон в ответ "
+                 "на недовольство превращает его в спор."]
+
+    keys = [[("🔴 Выключить" if on else "🟢 Включить", PICK_MAN + "вкл")],
+            [("💬 Ответы на вопросы", PICK_MAN + "faq")],
+            [("🎮 Ответы по товарам", PICK_MAN + "rules")],
+            [("👋 Приветствие", PICK_MAN + "hello")],
+            [("⚠️ Жалобы: " + ("выключить" if complaint.get("on", True)
+                              else "включить"), PICK_MAN + "жалобы")],
+            [("✖️ Назад", "отмена")]]
+
+    answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if text == PICK_MAN + "вкл":
+        conf["on"] = not on
+        store.save()
+        manager_menu(link)
+        return
+
+    if text == PICK_MAN + "жалобы":
+        complaint["on"] = not complaint.get("on", True)
+        conf["complaint"] = complaint
+        store.save()
+        manager_menu(link)
+        return
+
+    if text in (PICK_MAN + "faq", PICK_MAN + "rules"):
+        rules_menu(link, text[len(PICK_MAN):])
+        return
+
+    if text == PICK_MAN + "hello":
+        hello_menu(link)
+        return
+
+    link.screen("Готово.", buttons=MENU)
+
+
+# Как называется каждый список правил на экране.
+RULE_NAMES = {
+    "faq": ("💬 Ответы на вопросы",
+            "Слово ищется в СООБЩЕНИИ покупателя: написал «как "
+            "активировать» — уйдёт ваш ответ."),
+    "rules": ("🎮 Ответы по товарам",
+              "Слово ищется в НАЗВАНИИ товара: им отвечаем на вопросы, "
+              "для которых своего ответа не нашлось, и здороваемся после "
+              "покупки."),
+}
+
+
+def rules_menu(link, which: str) -> None:
+    """Список правил одного вида: посмотреть, добавить, убрать."""
+    conf, store = manager_conf()
+    title, about = RULE_NAMES.get(which, RULE_NAMES["faq"])
+    rules = conf.get(which)
+
+    if not isinstance(rules, list):
+        rules = conf[which] = []
+
+    said = [title, "", about, ""]
+
+    if rules:
+        said.append("Сейчас отвечаю так (сверху вниз — первое подошедшее):")
+
+        for number, rule in enumerate(rules[:RULES_SHOWN], start=1):
+            said.append(f"{number}. «{rule.get('word')}» → "
+                        f"{shorten(str(rule.get('text') or ''), 60)}")
+
+        if len(rules) > RULES_SHOWN:
+            said.append(f"… и ещё {len(rules) - RULES_SHOWN}")
+    else:
+        said.append("Пока ни одного — значит на такие вопросы отвечаете вы.")
+
+    keys = [[("➕ Добавить ответ", PICK_MAN + "доб:" + which)]]
+
+    if not rules and which == "faq":
+        keys.append([("✨ Взять три готовых", PICK_MAN + "готовые")])
+
+    for number, rule in enumerate(rules[:RULES_SHOWN]):
+        keys.append([(f"🗑 {shorten(str(rule.get('word') or ''), 28)}",
+                      PICK_MAN + f"убр:{which}:{number}")])
+
+    keys.append([("✖️ Назад", PICK_MAN + "назад")])
+
+    answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
+    text = str(answer.get("text") or "").strip()
+
+    if text == PICK_MAN + "готовые":
+        rules.extend(copy.deepcopy(STARTER))
+        store.save()
+        rules_menu(link, which)
+        return
+
+    if text == PICK_MAN + "доб:" + which:
+        ask_rule(link, which)
+        return
+
+    if text.startswith(PICK_MAN + "убр:"):
+        _, _, number = text[len(PICK_MAN) + 4:].partition(":")
+
+        if number.isdigit() and int(number) < len(rules):
+            rules.pop(int(number))
+            store.save()
+
+        rules_menu(link, which)
+        return
+
+    manager_menu(link)
+
+
+def ask_rule(link, which: str) -> None:
+    """Спросить слово и ответ. Два вопроса, а не один: так их не спутать."""
+    where = ("в сообщении покупателя" if which == "faq"
+             else "в названии товара")
+    answer = link.ask(
+        f"По какому слову отвечать?\n\nИщу его {where}, регистр и «ё» не "
+        f"важны. Например: «активир» поймает и «как активировать», и "
+        f"«активация».", ANSWER_WAIT, buttons=[CANCEL])
+    word = " ".join(str(answer.get("text") or "").split())
+
+    if not word or wizard.cancelled(word):
+        rules_menu(link, which)
+        return
+
+    answer = link.ask(f"Что отвечать на «{word}»?\n\nТекст уйдёт "
+                      f"покупателю в чат от вашего имени — как есть.",
+                      ANSWER_WAIT, buttons=[CANCEL])
+    said = str(answer.get("text") or "").strip()
+
+    if not said or wizard.cancelled(said):
+        rules_menu(link, which)
+        return
+
+    conf, store = manager_conf()
+    rules = conf.setdefault(which, [])
+    rules.append({"word": word, "text": said})
+    store.save()
+    rules_menu(link, which)
+
+
+def hello_menu(link) -> None:
+    """Приветствие после покупки: включить, выключить, переписать."""
+    conf, store = manager_conf()
+    hello = conf.get("hello") or {}
+    on = bool(hello.get("on"))
+    text = str(hello.get("text") or "")
+
+    said = ["👋 Приветствие после покупки", "",
+            f"Сейчас: {mark(on)}"]
+
+    if text:
+        said += ["", f"«{text}»"]
+    else:
+        said += ["", "Текста нет — без него приветствие молчит, даже "
+                     "включённое."]
+
+    said += ["", "Уходит сразу после оплаты. Если на товар есть ответ по "
+                 "названию, уйдёт он — он точнее."]
+
+    keys = [[("🔴 Выключить" if on else "🟢 Включить", PICK_MAN + "здр:вкл")],
+            [("✏️ Написать текст", PICK_MAN + "здр:текст")],
+            [("✖️ Назад", PICK_MAN + "назад")]]
+
+    answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
+    got = str(answer.get("text") or "").strip()
+
+    if got == PICK_MAN + "здр:вкл":
+        hello["on"] = not on
+        conf["hello"] = hello
+        store.save()
+        hello_menu(link)
+        return
+
+    if got == PICK_MAN + "здр:текст":
+        answer = link.ask("Что писать покупателю сразу после покупки?",
+                          ANSWER_WAIT, buttons=[CANCEL])
+        body = str(answer.get("text") or "").strip()
+
+        if body and not wizard.cancelled(body):
+            hello["text"] = body
+            # Написал текст — значит хочет, чтобы он уходил. Оставить его
+            # выключенным после этого значит сделать вид, что не поняли.
+            hello["on"] = True
+            conf["hello"] = hello
+            store.save()
+
+        hello_menu(link)
+        return
+
+    manager_menu(link)
+
+
 def mute_menu(link) -> None:
     """Глушка: остановить выдачу и разобрать отложенные заказы.
 
@@ -6003,6 +6255,8 @@ def handle_command(link, account, text: str):
         attrs_menu(link, account)
     elif text in STATS_WORDS:
         stats_menu(link, account)
+    elif text in MANAGER_WORDS:
+        manager_menu(link)
     elif text in ACCOUNT_WORDS:
         account = accounts_menu(link, account)
     elif stale_press(text):

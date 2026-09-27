@@ -133,7 +133,8 @@ SUP = Chat(id="c2", type=ChatTypes.SUPPORT)
 NOTIF = Chat(id="c3", type=ChatTypes.NOTIFICATIONS)
 
 
-def run(rounds, link=None, seen_path="", support_id="", system_id=""):
+def run(rounds, link=None, seen_path="", support_id="", system_id="",
+        man=None):
     """Прогнать цикл уведомлений до конца заготовленных кругов."""
     import notify_bot
 
@@ -144,7 +145,7 @@ def run(rounds, link=None, seen_path="", support_id="", system_id=""):
     try:
         notify_bot.pump(listener, link, seen, ME, notices.DEFAULT,
                         sleeper=lambda seconds: None,
-                        support_id=support_id, system_id=system_id)
+                        support_id=support_id, system_id=system_id, man=man)
     except StopTest:
         pass
 
@@ -441,3 +442,67 @@ class ReconnectTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManagerOnTheLineTest(unittest.TestCase):
+    """Менеджер отвечает покупателю прямо на событии — и не мешает
+    уведомлениям, ради которых бот и работает."""
+
+    class Store:
+        def __init__(self, conf):
+            self.data = {"manager": conf}
+            self.saves = 0
+
+        def shared(self):
+            return self.data
+
+        def save(self):
+            self.saves += 1
+
+    CONF = {"on": True,
+            "faq": [{"word": "активир", "text": "Вставьте код в Robux"}]}
+
+    def build(self, conf=None):
+        import manager as manager_module
+
+        sent = []
+        link = FakeLink()
+        store = self.Store(conf or self.CONF)
+        man = manager_module.Manager(
+            store, lambda chat_id, text: sent.append((chat_id, text)) or True,
+            link.say)
+
+        return man, sent, link
+
+    def question(self):
+        return message_event(Message(id="m1", text="как активировать?",
+                                     user=BUYER), PM)
+
+    def test_the_buyer_gets_the_answer(self):
+        man, sent, link = self.build()
+        run([[self.question()]], link=link, man=man)
+
+        self.assertEqual(sent, [("c1", "Вставьте код в Robux")])
+
+    def test_the_seller_still_gets_the_notification(self):
+        """Менеджер ничего не прячет — он только отвечает раньше."""
+        man, _, link = self.build()
+        run([[self.question()]], link=link, man=man)
+
+        self.assertTrue(any("как активировать" in (t or "")
+                            for t in link.sent))
+
+    def test_a_complaint_reaches_the_seller_as_an_alarm(self):
+        man, sent, link = self.build()
+        angry = message_event(Message(id="m2", text="вы меня обманули",
+                                      user=BUYER), PM)
+        run([[angry]], link=link, man=man)
+
+        self.assertEqual(sent, [])
+        self.assertTrue(any("ЖАЛОБА" in (t or "") for t in link.sent))
+
+    def test_without_a_manager_nothing_changes(self):
+        link, _ = run([[self.question()]])
+
+        self.assertTrue(any("как активировать" in (t or "")
+                            for t in link.sent))

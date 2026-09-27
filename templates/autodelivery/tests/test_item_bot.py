@@ -14,6 +14,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import manager
 import item_bot                                                 # noqa: E402
 import wizard                                                   # noqa: E402
 from accounts import AccountStore                               # noqa: E402
@@ -5088,3 +5089,115 @@ class SeriesAttributesTest(unittest.TestCase):
         _, market = self.go("отмена")
 
         self.assertEqual(market.created, [])
+
+
+class ManagerScreensTest(unittest.TestCase):
+    """👔 Менеджер: включатель и правила, по которым он отвечает.
+
+    Ответы уходят живым покупателям от имени продавца, поэтому проверяем
+    прежде всего две вещи: выключён по умолчанию и включается его рукой.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+
+    def conf(self):
+        return item_bot.manager_conf()[0]
+
+    def test_it_starts_switched_off(self):
+        link = FakeLink(["отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertIn("🔴 выключен", link.asked[0][0])
+        self.assertFalse(self.conf()["on"])
+
+    def test_the_button_switches_it_on(self):
+        link = FakeLink([item_bot.PICK_MAN + "вкл", "отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertTrue(self.conf()["on"])
+
+    def test_switching_on_survives_a_restart(self):
+        """Настройки читает другой процесс — слушатель событий."""
+        link = FakeLink([item_bot.PICK_MAN + "вкл", "отмена"])
+        item_bot.manager_menu(link)
+
+        fresh = item_bot.settings_of().store
+        self.assertTrue(manager.settings_of(fresh.shared())["on"])
+
+    def test_a_rule_is_added_by_two_questions(self):
+        link = FakeLink([item_bot.PICK_MAN + "faq",
+                         item_bot.PICK_MAN + "доб:faq",
+                         "активир", "Вставьте код в Robux", "отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertEqual(self.conf()["faq"],
+                         [{"word": "активир", "text": "Вставьте код в Robux"}])
+
+    def test_the_rule_is_shown_back(self):
+        link = FakeLink([item_bot.PICK_MAN + "faq",
+                         item_bot.PICK_MAN + "доб:faq",
+                         "активир", "Вставьте код в Robux", "отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertTrue(any("активир" in question
+                            for question, _ in link.asked))
+
+    def test_a_rule_can_be_removed(self):
+        link = FakeLink([item_bot.PICK_MAN + "faq",
+                         item_bot.PICK_MAN + "доб:faq", "активир", "вот так",
+                         item_bot.PICK_MAN + "убр:faq:0", "отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertEqual(self.conf()["faq"], [])
+
+    def test_three_ready_answers_can_be_taken(self):
+        """Пустой список — это «отвечаете вы», и начать с нуля тяжелее,
+        чем поправить готовое."""
+        link = FakeLink([item_bot.PICK_MAN + "faq",
+                         item_bot.PICK_MAN + "готовые", "отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertEqual(len(self.conf()["faq"]), len(item_bot.STARTER))
+
+    def test_leaving_the_word_empty_adds_nothing(self):
+        link = FakeLink([item_bot.PICK_MAN + "faq",
+                         item_bot.PICK_MAN + "доб:faq", "отмена", "отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertEqual(self.conf()["faq"], [])
+
+    def test_the_greeting_turns_itself_on_when_written(self):
+        """Написал текст — значит хочет, чтобы он уходил."""
+        link = FakeLink([item_bot.PICK_MAN + "hello",
+                         item_bot.PICK_MAN + "здр:текст",
+                         "Спасибо за покупку!", "отмена"])
+        item_bot.manager_menu(link)
+        hello = self.conf()["hello"]
+
+        self.assertTrue(hello["on"])
+        self.assertEqual(hello["text"], "Спасибо за покупку!")
+
+    def test_complaints_can_be_switched_off_but_are_on_by_default(self):
+        link = FakeLink(["отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertTrue(self.conf()["complaint"]["on"])
+
+        link = FakeLink([item_bot.PICK_MAN + "жалобы", "отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertFalse(self.conf()["complaint"]["on"])
+
+    def test_the_screen_says_complaints_are_never_answered(self):
+        link = FakeLink(["отмена"])
+        item_bot.manager_menu(link)
+
+        self.assertIn("спор", link.asked[0][0].lower())
+
+    def test_the_menu_has_the_button(self):
+        names = [name for row in item_bot.MENU for name, _ in row]
+
+        self.assertIn("👔 Менеджер", names)

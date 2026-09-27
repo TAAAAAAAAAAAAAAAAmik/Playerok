@@ -33,6 +33,7 @@ from playerok import is_auth_error                            # noqa: E402
 from envfile import load_env_file                             # noqa: E402
 import statepath                                  # noqa: E402
 import alive                                      # noqa: E402
+import manager                                    # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -103,7 +104,37 @@ def main() -> None:
     pump(EventListener(account), link, seen, me, show,
          alarm=Alarm(link, "Уведомления"),
          support_id=str(getattr(account, "support_chat_id", "") or ""),
-         system_id=str(getattr(account, "system_chat_id", "") or ""))
+         system_id=str(getattr(account, "system_chat_id", "") or ""),
+         man=manager_for(account, link))
+
+
+def manager_for(account, link):
+    """Менеджер поверх этого же кабинета. None — если собрать не вышло.
+
+    Живёт он ЗДЕСЬ, а не в выдаче, по одной причине: отвечать покупателю
+    надо в ту же минуту, когда он написал, а выдача ходит по заказам раз в
+    минуту и сообщений не видит вовсе. Слушатель событий видит их первым.
+
+    Настройки читаются из того же файла, который правит телеграм-бот, —
+    продавец включает менеджера кнопкой, не перезапуская ничего.
+    """
+    def reply(chat_id: str, text: str) -> bool:
+        try:
+            account.send_message(str(chat_id), text)
+        except Exception as e:                                # noqa: BLE001
+            log.warning("не написалось в чат %s: %s", chat_id, e)
+
+            return False
+
+        return True
+
+    try:
+        return manager.Manager(statepath.open_store(), reply, link.say)
+    except Exception as e:                                    # noqa: BLE001
+        # Менеджер — помощник. Не собрался — уведомления всё равно идут.
+        log.error("менеджер не поднялся: %s", e)
+
+        return None
 
 
 # Про мёртвую выдачу говорим не чаще, чем раз в это время: покупок может
@@ -142,7 +173,7 @@ def delivery_warning(text: str, now=None) -> str:
 
 def pump(listener, link, seen, me: str, show, alarm=None,
          sleeper=time.sleep, support_id: str = "",
-         system_id: str = "") -> None:
+         system_id: str = "", man=None) -> None:
     """Вечный цикл: событие площадки → сообщение владельцу.
 
     Вынесен из `main` не ради красоты. Здесь живёт всё, что может пойти не
@@ -162,6 +193,18 @@ def pump(listener, link, seen, me: str, show, alarm=None,
 
                 if not seen.is_new(event):
                     continue
+
+                # Менеджер отвечает покупателю САМ и делает это до
+                # уведомления: продавец читает телеграм не мгновенно, а
+                # покупатель ждёт ответа именно сейчас. Уведомление о том
+                # же сообщении всё равно придёт — менеджер ничего не
+                # прячет, он только отвечает раньше.
+                if man is not None:
+                    did = man.handle(event, notices.kind_of(
+                        event, support_id, system_id), me)
+
+                    if did:
+                        log.info("менеджер: %s", did)
 
                 text = notices.describe(event, me, show,
                                         support_id, system_id)
