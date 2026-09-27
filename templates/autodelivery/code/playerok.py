@@ -304,6 +304,19 @@ class PlayerokMarketplace:
 
         return True, "отправлено"
 
+    async def balance(self):
+        """Баланс кабинета или None, если площадка не ответила.
+
+        None, а не ноль: ноль в разговоре о деньгах читается как факт
+        («вывести нечего»), а «не ответила» — это незнание.
+        """
+        try:
+            profile = await _run(self.account.get)
+        except Exception:                                  # noqa: BLE001
+            return None
+
+        return getattr(profile, "balance", None)
+
     async def mark_sent(self, order_id: str) -> tuple[bool, str]:
         """Пометить сделку отправленной → (получилось, причина по-русски).
 

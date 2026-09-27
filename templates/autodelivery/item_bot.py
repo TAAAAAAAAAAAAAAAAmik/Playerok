@@ -3879,6 +3879,7 @@ def manager_menu(link) -> None:
             [("👋 Приветствие", PICK_MAN + "hello")],
             [("⚠️ Жалобы: " + ("выключить" if complaint.get("on", True)
                               else "включить"), PICK_MAN + "жалобы")],
+            [("⏰ Напоминания и отчёт", PICK_MAN + "часы")],
             [("✖️ Назад", "отмена")]]
 
     answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
@@ -3903,6 +3904,10 @@ def manager_menu(link) -> None:
 
     if text == PICK_MAN + "hello":
         hello_menu(link)
+        return
+
+    if text == PICK_MAN + "часы":
+        clock_menu(link)
         return
 
     link.screen("Готово.", buttons=MENU)
@@ -4057,6 +4062,101 @@ def hello_menu(link) -> None:
             store.save()
 
         hello_menu(link)
+        return
+
+    manager_menu(link)
+
+
+def clock_menu(link) -> None:
+    """⏰ То, что менеджер делает по времени, а не по событию.
+
+    Три разных напоминания в одном экране, потому что нужны они одному и
+    тому же человеку в одном и том же случае: когда он занят другим, а
+    бот работает.
+    """
+    conf, store = manager_conf()
+    remind = conf.get("remind") or {}
+    report = conf.get("report") or {}
+    money = conf.get("money") or {}
+
+    said = ["⏰ Напоминания и отчёт", ""]
+
+    if not conf.get("on"):
+        said += ["Менеджер выключен — часы молчат вместе с ним.", ""]
+
+    said += [
+        f"Заказ висит без выдачи: "
+        f"{mark(bool(remind.get('on')))} "
+        f"(после {manager._hours(remind.get('hours') or 6)})",
+        f"Отчёт за сутки: {mark(bool(report.get('on')))} "
+        f"(в {int(report.get('hour') or 20)}:00)",
+        f"«Накопилось — выводите»: {mark(bool(money.get('on')))} "
+        f"(от {stats.money(money.get('from') or 0)})",
+        "",
+        "Напоминание про висящий заказ — самое важное из трёх: выдача "
+        "молчит только тогда, когда ей нечем выдать, а покупатель всё это "
+        "время ждёт.",
+    ]
+
+    keys = [[("🔴 Выкл" if remind.get("on") else "🟢 Вкл",
+              PICK_MAN + "час:висит"),
+             ("⏱ Через сколько", PICK_MAN + "час:часы")],
+            [("🔴 Выкл" if report.get("on") else "🟢 Вкл",
+              PICK_MAN + "час:отчёт"),
+             ("🕗 Во сколько", PICK_MAN + "час:когда")],
+            [("🔴 Выкл" if money.get("on") else "🟢 Вкл",
+              PICK_MAN + "час:деньги"),
+             ("💸 С какой суммы", PICK_MAN + "час:сумма")],
+            [("✖️ Назад", PICK_MAN + "назад")]]
+
+    answer = link.ask("\n".join(said), ANSWER_WAIT, buttons=keys)
+    got = str(answer.get("text") or "").strip()
+    flips = {PICK_MAN + "час:висит": (remind, "on"),
+             PICK_MAN + "час:отчёт": (report, "on"),
+             PICK_MAN + "час:деньги": (money, "on")}
+
+    if got in flips:
+        where, key = flips[got]
+        where[key] = not where.get(key)
+        store.save()
+        clock_menu(link)
+        return
+
+    asks = {
+        PICK_MAN + "час:часы": (
+            remind, "hours",
+            "Через сколько часов напоминать о невыданном заказе?\n\n"
+            "Например: 6. Меньше двух не ставьте — выдача иногда ждёт "
+            "поставщика.", 2, 240),
+        PICK_MAN + "час:когда": (
+            report, "hour", "Во сколько присылать отчёт за сутки?\n\n"
+                            "Час дня числом: 20 — это в восемь вечера.",
+            0, 23),
+        PICK_MAN + "час:сумма": (
+            money, "from", "С какой суммы напоминать про вывод?\n\n"
+                           "В рублях. Например: 3000.", 1, 1000000),
+    }
+
+    if got in asks:
+        where, key, question, low, high = asks[got]
+        answer = link.ask(question, ANSWER_WAIT, buttons=[CANCEL])
+        value, why = wizard.accept_number(str(answer.get("text") or ""),
+                                          allow_zero=key == "hour")
+
+        if why:
+            link.screen(f"{why}\n\nНичего не менял.", buttons=MENU)
+            return
+
+        if not low <= value <= high:
+            link.screen(f"Нужно число от {low} до {high}. Ничего не менял.",
+                        buttons=MENU)
+            return
+
+        where[key] = int(value)
+        # Задал число — значит хочет, чтобы напоминание работало.
+        where["on"] = True
+        store.save()
+        clock_menu(link)
         return
 
     manager_menu(link)

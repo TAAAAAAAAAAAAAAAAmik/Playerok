@@ -27,6 +27,7 @@ from cards import CARDS                           # noqa: E402
 from catalog import (Card, Denomination,           # noqa: E402
                      denominations_for, denominations_from, find_service)
 from delivery import DeliveryEngine               # noqa: E402
+import manager                                   # noqa: E402
 from envfile import load_env_file                 # noqa: E402
 from owner import link_from_env, renew_cookies    # noqa: E402
 from playerok import PlayerokMarketplace, is_auth_error   # noqa: E402
@@ -224,7 +225,7 @@ def held_orders(orders, whose_of=None) -> str:
     return "\n".join(lines)
 
 
-async def one_pass(market, engine, seen: set, notify) -> list:
+async def one_pass(market, engine, seen: set, notify, chores=None) -> list:
     """Один проход по оплаченным заказам. → непризнанные заказы.
 
     Отдельной функцией, а не телом цикла: так проход можно прогнать в
@@ -274,6 +275,12 @@ async def one_pass(market, engine, seen: set, notify) -> list:
     # покупатель — без кода.
     await engine.resume_unfinished()
 
+    # Часы менеджера — последними: сначала выдать, потом рассказывать. Они
+    # ничего не покупают и не пишут покупателю, только говорят продавцу.
+    if chores is not None:
+        money = await market.balance() if chores.wants_money() else None
+        await to_thread(chores.tick, orders, money)
+
     return unknown
 
 
@@ -317,10 +324,17 @@ async def main() -> None:
         reference_prefix="pk",
     )
 
+    # Часы менеджера: напоминания о висящих заказах, отчёт за сутки и
+    # «накопилось — выводите». Включает их продавец в боте, там же и
+    # настраивает; здесь мы только даём им проход и голос.
+    chores = manager.Chores(store, lambda text: link.say(text) if link
+                            else logging.info("[продавцу] %s", text),
+                            cards=CARDS)
+
     seen: set[str] = set()
     while True:
         try:
-            await one_pass(market, engine, seen, notify)
+            await one_pass(market, engine, seen, notify, chores)
         except Exception as e:                       # noqa: BLE001
             # Исключение не убивает цикл: один упавший заказ не должен
             # уносить с собой остальные.

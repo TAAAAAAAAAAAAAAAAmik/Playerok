@@ -353,3 +353,269 @@ class AlarmTextTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Order:
+    def __init__(self, id, title=""):                          # noqa: A002
+        self.id, self.title = id, title
+
+
+class Card:
+    def __init__(self, slug, title):
+        self.slug, self.title = slug, title
+
+
+class ChoresStore(FakeStore):
+    """Хранилище с журналом выдач — тем самым, по которому считается
+    отчёт за сутки."""
+
+    def __init__(self, data=None, log=None):
+        super().__init__(data)
+        self.log = {"robux": list(log or [])}
+
+    def conf(self, slug):
+        return {"log": self.log.get(slug, [])}
+
+
+class RemindTest(unittest.TestCase):
+    """Выдача молчит только тогда, когда ей нечем выдать, — а покупатель
+    всё это время ждёт."""
+
+    def build(self, hours=6, on=True, now=10_000.0):
+        store = ChoresStore({"manager": {"on": True,
+                                         "remind": {"on": on, "hours": hours}}})
+        told = []
+        self.clock = {"now": now}
+        chores = manager.Chores(store, told.append,
+                                now=lambda: self.clock["now"])
+
+        return chores, told, store
+
+    def test_a_fresh_order_is_not_reminded_about(self):
+        chores, told, _ = self.build()
+        chores.tick([Order("o1", "80 робуксов")])
+
+        self.assertEqual(told, [])
+
+    def test_the_hanging_order_is_named(self):
+        chores, told, _ = self.build(hours=6)
+        chores.tick([Order("o1", "80 робуксов")])
+        self.clock["now"] += 7 * 3600
+        chores.tick([Order("o1", "80 робуксов")])
+
+        self.assertEqual(len(told), 1)
+        self.assertIn("80 робуксов", told[0])
+        self.assertIn("o1", told[0])
+
+    def test_it_is_said_once_and_not_every_minute(self):
+        chores, told, _ = self.build(hours=6)
+        chores.tick([Order("o1")])
+        self.clock["now"] += 7 * 3600
+
+        for _ in range(5):
+            chores.tick([Order("o1")])
+
+        self.assertEqual(len(told), 1)
+
+    def test_switched_off_it_says_nothing(self):
+        chores, told, _ = self.build(on=False)
+        chores.tick([Order("o1")])
+        self.clock["now"] += 99 * 3600
+        chores.tick([Order("o1")])
+
+        self.assertEqual(told, [])
+
+    def test_a_silent_manager_silences_the_clock_too(self):
+        store = ChoresStore({"manager": {"on": False,
+                                         "remind": {"on": True, "hours": 1}}})
+        told = []
+        clock = {"now": 10_000.0}
+        chores = manager.Chores(store, told.append, now=lambda: clock["now"])
+        chores.tick([Order("o1")])
+        clock["now"] += 99 * 3600
+        chores.tick([Order("o1")])
+
+        self.assertEqual(told, [])
+
+    def test_a_delivered_order_is_forgotten(self):
+        """Память живёт в файле и без уборки растёт вместе с продажами."""
+        chores, _, store = self.build()
+        chores.tick([Order("o1")])
+        chores.tick([])
+
+        self.assertEqual(manager.seen_of(store.shared()), {})
+
+    def test_several_orders_come_in_one_letter(self):
+        """Письмо на заказ — это рассылка, а не помощь."""
+        chores, told, _ = self.build(hours=6)
+        orders = [Order(f"o{n}", f"товар {n}") for n in range(3)]
+        chores.tick(orders)
+        self.clock["now"] += 7 * 3600
+        chores.tick(orders)
+
+        self.assertEqual(len(told), 1)
+        self.assertIn("товар 2", told[0])
+
+    def test_a_long_list_is_cut_with_a_count(self):
+        chores, told, _ = self.build(hours=6)
+        orders = [Order(f"o{n}") for n in range(manager.REMIND_SHOWN + 4)]
+        chores.tick(orders)
+        self.clock["now"] += 7 * 3600
+        chores.tick(orders)
+
+        self.assertIn("и ещё 4", told[0])
+
+
+class ReportTest(unittest.TestCase):
+    """Отчёт за сутки — по журналу выдач, без единого запроса к площадке."""
+
+    def entry(self, at, paid=149.0, cost=0.9):
+        import stats
+
+        return {"state": stats.DONE, "done_at": at, "paid": paid,
+                "price": cost, "currency": "USD"}
+
+    def build(self, hour=20, on=True, log=(), now=None):
+        # 15 часов по местному времени — до отчёта в 20:00.
+        now = now if now is not None else self.at_hour(15)
+        store = ChoresStore(
+            {"manager": {"on": True, "report": {"on": on, "hour": hour,
+                                                "day": ""}}},
+            log=list(log))
+        told = []
+        self.clock = {"now": now}
+        chores = manager.Chores(store, told.append,
+                                cards=[Card("robux", "Robux")],
+                                now=lambda: self.clock["now"])
+
+        return chores, told, store
+
+    def at_hour(self, hour: int) -> float:
+        """Время сегодняшнего дня в местном часовом поясе."""
+        import time as _time
+
+        now = _time.time()
+        parts = list(_time.localtime(now))
+        parts[3], parts[4], parts[5] = hour, 0, 0
+
+        return _time.mktime(_time.struct_time(tuple(parts)))
+
+    def test_nothing_before_the_hour(self):
+        chores, told, _ = self.build(hour=20)
+        chores.tick([])
+
+        self.assertEqual(told, [])
+
+    def test_the_report_comes_after_the_hour(self):
+        chores, told, _ = self.build(hour=20)
+        self.clock["now"] = self.at_hour(21)
+        chores.tick([])
+
+        self.assertEqual(len(told), 1)
+        self.assertIn("Отчёт за сутки", told[0])
+
+    def test_it_comes_once_a_day(self):
+        chores, told, _ = self.build(hour=20)
+        self.clock["now"] = self.at_hour(21)
+        chores.tick([])
+        chores.tick([])
+
+        self.assertEqual(len(told), 1)
+
+    def test_the_numbers_come_from_the_journal(self):
+        now = self.at_hour(21)
+        chores, told, _ = self.build(
+            hour=20, log=[self.entry(now - 3600), self.entry(now - 7200)])
+        self.clock["now"] = now
+        chores.tick([])
+
+        self.assertIn("Выдано: 2", told[0])
+        self.assertIn("298", told[0].replace(" ", " ").replace(" ", " "))
+
+    def test_yesterday_is_not_counted(self):
+        now = self.at_hour(21)
+        chores, told, _ = self.build(hour=20,
+                                     log=[self.entry(now - 3 * 86400)])
+        self.clock["now"] = now
+        chores.tick([])
+
+        self.assertIn("Выдач не было", told[0])
+
+
+class MoneyReminderTest(unittest.TestCase):
+    class Money:
+        def __init__(self, withdrawable):
+            self.withdrawable = withdrawable
+
+    def build(self, limit=3000, on=True):
+        store = ChoresStore({"manager": {"on": True,
+                                         "money": {"on": on, "from": limit}}})
+        told = []
+        self.clock = {"now": 10_000.0}
+        chores = manager.Chores(store, told.append,
+                                now=lambda: self.clock["now"])
+
+        return chores, told
+
+    def test_below_the_limit_it_is_silent(self):
+        chores, told = self.build(limit=3000)
+        chores.tick([], self.Money(500))
+
+        self.assertEqual(told, [])
+
+    def test_above_the_limit_it_says_so_once(self):
+        chores, told = self.build(limit=3000)
+        chores.tick([], self.Money(4200))
+        chores.tick([], self.Money(4300))
+
+        self.assertEqual(len(told), 1)
+        self.assertIn("Накопилось", told[0])
+
+    def test_after_a_withdrawal_it_can_say_it_again(self):
+        chores, told = self.build(limit=3000)
+        chores.tick([], self.Money(4200))
+        chores.tick([], self.Money(0))
+        chores.tick([], self.Money(5000))
+
+        self.assertEqual(len(told), 2)
+
+    def test_the_balance_is_asked_rarely(self):
+        """Лишний запрос в каждом проходе — это запрос каждую минуту."""
+        chores, _ = self.build()
+
+        self.assertTrue(chores.wants_money())
+        self.assertFalse(chores.wants_money())
+
+        self.clock["now"] += manager.MONEY_EVERY + 1
+
+        self.assertTrue(chores.wants_money())
+
+    def test_switched_off_the_balance_is_not_asked_at_all(self):
+        chores, _ = self.build(on=False)
+
+        self.assertFalse(chores.wants_money())
+
+
+class ChoresAreHarmlessTest(unittest.TestCase):
+    def test_a_broken_clock_does_not_break_the_delivery(self):
+        class Broken(FakeStore):
+            def shared(self):
+                raise RuntimeError("бум")
+
+        said = manager.Chores(Broken(), lambda text: None).tick([])
+
+        self.assertTrue(any("споткнулись" in one for one in said))
+
+    def test_a_silent_telegram_is_not_a_crash(self):
+        store = ChoresStore({"manager": {"on": True,
+                                         "remind": {"on": True, "hours": 1}}})
+
+        def explode(text):
+            raise RuntimeError("телеграм молчит")
+
+        clock = {"now": 10_000.0}
+        chores = manager.Chores(store, explode, now=lambda: clock["now"])
+        chores.tick([Order("o1")])
+        clock["now"] += 2 * 3600
+
+        self.assertTrue(chores.tick([Order("o1")]))

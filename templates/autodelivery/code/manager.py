@@ -73,7 +73,11 @@ DEFAULT = {
     # Звать ли продавца на жалобы и по каким своим словам.
     "complaint": {"on": True, "words": []},
     # Напоминание о заказах, которые давно ждут.
-    "remind": {"on": False, "hours": 24},
+    "remind": {"on": False, "hours": 6},
+    # Отчёт раз в сутки: сколько выдано, на сколько, что с деньгами.
+    "report": {"on": False, "hour": 20, "day": ""},
+    # Напоминание «накопилось, можно выводить».
+    "money": {"on": False, "from": 3000, "said": False},
     # Чаты, в которые менеджер не пишет вовсе.
     "mute": [],
 }
@@ -462,3 +466,268 @@ def deal_link(event) -> str:
     deal_id = _text(getattr(deal, "id", ""))
 
     return f"{DEAL_URL}{deal_id}" if deal_id else ""
+
+
+# ---------------------------------------------------------------------------
+# Часы менеджера: то, что делается по времени, а не по событию
+# ---------------------------------------------------------------------------
+
+# Сколько висящих заказов перечислять в одном напоминании. Дальше — числом:
+# письмо на два экрана читают через раз, а напоминание должно дочитываться.
+REMIND_SHOWN = 5
+
+DAY = 86400.0
+
+# Как часто спрашивать баланс площадки. Накопления быстрее не растут, а
+# проход по заказам случается каждую минуту.
+MONEY_EVERY = 600.0
+
+
+def seen_of(shared: dict) -> dict:
+    """Когда каждый заказ попался нам на глаза впервые: {заказ: время}.
+
+    Площадка времени оплаты в списке не отдаёт, а «висит третий час» без
+    него не сказать. Поэтому замечаем сами: первый проход, на котором
+    заказ увиден, и есть точка отсчёта. Для напоминания этого довольно —
+    оно и так про «давно», а не про минуты.
+    """
+    found = shared.get("manager_seen")
+
+    if not isinstance(found, dict):
+        found = shared["manager_seen"] = {}
+
+    return found
+
+
+def remind_text(rows, hours: float) -> str:
+    """Письмо о заказах, которые висят слишком долго."""
+    lines = [f"⏰ Оплачено, но так и не выдано — больше "
+             f"{_hours(hours)}:", ""]
+
+    for order_id, title, waited in rows[:REMIND_SHOWN]:
+        lines.append(f"  • «{title or 'без названия'}» — {_hours(waited)}")
+        lines.append(f"    заказ {order_id}")
+
+    if len(rows) > REMIND_SHOWN:
+        lines.append(f"  … и ещё {len(rows) - REMIND_SHOWN}")
+
+    lines += ["", "Покупатель всё это время ждёт. Посмотрите «🩺 Проверка "
+                  "выдачи» — там написано, на чём она встала."]
+
+    return "\n".join(lines)
+
+
+def _hours(value: float) -> str:
+    """Часы словами: «6 часов», «сутки». Считать в голове продавцу незачем."""
+    hours = int(round(float(value or 0)))
+
+    if hours >= 24 and hours % 24 == 0:
+        days = hours // 24
+
+        return "сутки" if days == 1 else f"{days} суток"
+
+    last = hours % 10
+    tens = hours % 100
+
+    if last == 1 and tens != 11:
+        return f"{hours} час"
+
+    if 2 <= last <= 4 and not 12 <= tens <= 14:
+        return f"{hours} часа"
+
+    return f"{hours} часов"
+
+
+class Chores:
+    """Часы менеджера: напоминания, отчёт и «накопилось — выводите».
+
+    Живут в проходе выдачи, а не в слушателе событий: слушатель ждёт
+    событие и между ними не просыпается вовсе, а проход по заказам и так
+    случается каждую минуту.
+
+    Ничего не покупают и не отправляют покупателю — только говорят
+    продавцу. Поэтому единственный их способ ошибиться — сказать лишнее,
+    и от этого стоит вся память о сказанном: один и тот же заказ
+    напоминается один раз, отчёт уходит раз в сутки.
+    """
+
+    def __init__(self, store, say, cards=(), now=time.time):
+        self.store = store
+        self.say = say
+        self.cards = list(cards)
+        self.now = now
+        # Когда последний раз спрашивали баланс.
+        self._asked = 0.0
+
+    def wants_money(self) -> bool:
+        """Пора ли спрашивать баланс. Нет — значит и запроса не будет.
+
+        Баланс — лишний запрос к площадке в каждом проходе, а проход
+        случается каждую минуту. Спрашиваем раз в десять минут и только
+        если продавец просил напомнить: накопления так быстро не растут.
+        """
+        conf = settings_of(self.store.shared())
+        rules = conf.get("money") or {}
+
+        if not conf.get("on") or not rules.get("on"):
+            return False
+
+        now = self.now()
+
+        if now - self._asked < MONEY_EVERY:
+            return False
+
+        self._asked = now
+
+        return True
+
+    def tick(self, orders=(), money=None) -> list:
+        """Один проход часов. → что сказали продавцу.
+
+        Список, а не молчание: по нему видно в тестах и в журнале, что
+        именно ушло, — и он же не даёт часам говорить дважды об одном.
+        """
+        try:
+            return self._tick(orders, money)
+        except Exception as e:                                # noqa: BLE001
+            # Часы — помощник. Их поломка не должна уносить с собой выдачу,
+            # ради которой проход и делается.
+            return [f"часы менеджера споткнулись: {e}"]
+
+    def _tick(self, orders, money) -> list:
+        shared = self.store.shared()
+        conf = settings_of(shared)
+        said = []
+
+        if not conf.get("on"):
+            return said
+
+        said += self._remind(conf, shared, orders)
+        said += self._report(conf)
+        said += self._money(conf, money)
+
+        if said:
+            self.store.save()
+
+            for text in said:
+                self._tell(text)
+
+        return said
+
+    def _remind(self, conf, shared, orders) -> list:
+        rem = conf.get("remind") or {}
+        seen = seen_of(shared)
+        now = self.now()
+        alive = set()
+        waiting = []
+
+        for order in orders or []:
+            order_id = _text(getattr(order, "id", ""))
+
+            if not order_id:
+                continue
+
+            alive.add(order_id)
+            was = seen.get(order_id)
+
+            if not isinstance(was, dict):
+                # Первый раз видим — с него и считаем.
+                seen[order_id] = was = {"at": now, "told": False}
+
+            waited = (now - float(was.get("at") or now)) / 3600.0
+            hours = float(rem.get("hours") or 6)
+
+            if rem.get("on") and not was.get("told") and waited >= hours:
+                was["told"] = True
+                waiting.append((order_id, _text(getattr(order, "title", "")),
+                                waited))
+
+        # Заказ ушёл из списка — значит выдан или закрыт. Помнить его
+        # дальше незачем, а память живёт в файле и растёт.
+        for order_id in list(seen):
+            if order_id not in alive:
+                seen.pop(order_id, None)
+
+        if not waiting:
+            return []
+
+        return [remind_text(waiting, float(rem.get("hours") or 6))]
+
+    def _report(self, conf) -> list:
+        rep = conf.get("report") or {}
+
+        if not rep.get("on"):
+            return []
+
+        now = self.now()
+        today = _day(now)
+
+        if rep.get("day") == today:
+            return []
+
+        if time.localtime(now).tm_hour < int(rep.get("hour") or 20):
+            return []
+
+        rep["day"] = today
+
+        return [self.report_text(now)]
+
+    def report_text(self, now: float) -> str:
+        """Отчёт за сутки по журналу выдач.
+
+        По журналу, а не по площадке: в журнале лежит и цена закупки, а
+        значит и профит — ради которого отчёт и читают. Лишних запросов к
+        площадке он при этом не делает вовсе.
+        """
+        import stats                                          # noqa: PLC0415
+
+        rows = stats.by_card(self.store, self.cards, since=now - DAY)
+        whole = stats.total_of(rows)
+        lines = ["📊 Отчёт за сутки", ""]
+
+        if not whole.count:
+            return "\n".join(lines + ["Выдач не было."])
+
+        lines.append(f"Выдано: {whole.count} — {stats.money(whole.revenue)}")
+
+        for card, one in rows[:REMIND_SHOWN]:
+            lines.append(f"  • {card.title}: {one.count} — "
+                         f"{stats.money(one.revenue)}")
+
+        return "\n".join(lines)
+
+    def _money(self, conf, money) -> list:
+        rules = conf.get("money") or {}
+
+        if not rules.get("on") or money is None:
+            return []
+
+        try:
+            can = float(getattr(money, "withdrawable", 0) or 0)
+        except (TypeError, ValueError):
+            return []
+
+        limit = float(rules.get("from") or 0)
+
+        if can < limit:
+            # Упало ниже порога — значит вывели. Скажем снова, когда
+            # накопится заново: иначе одно напоминание превратится в
+            # ежеминутное.
+            rules["said"] = False
+
+            return []
+
+        if rules.get("said"):
+            return []
+
+        rules["said"] = True
+
+        import stats                                          # noqa: PLC0415
+
+        return [f"💸 Накопилось: {stats.money(can)} — можно выводить."]
+
+    def _tell(self, text: str) -> None:
+        try:
+            self.say(text)
+        except Exception:                                     # noqa: BLE001
+            pass

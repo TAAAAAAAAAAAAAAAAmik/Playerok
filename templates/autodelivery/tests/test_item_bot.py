@@ -5201,3 +5201,67 @@ class ManagerScreensTest(unittest.TestCase):
         names = [name for row in item_bot.MENU for name, _ in row]
 
         self.assertIn("👔 Менеджер", names)
+
+
+class ManagerClockScreenTest(unittest.TestCase):
+    """⏰ Напоминания и отчёт: то, что менеджер делает по времени."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        item_bot.SETTINGS_DIR = os.path.join(self.root, "выдача")
+        item_bot.ACCOUNTS_DIR = os.path.join(self.root, "кабинеты")
+
+    def conf(self):
+        return item_bot.manager_conf()[0]
+
+    def open(self, *answers):
+        link = FakeLink([item_bot.PICK_MAN + "часы", *answers])
+        item_bot.manager_menu(link)
+
+        return link
+
+    def test_everything_starts_switched_off(self):
+        link = self.open("отмена")
+        said = link.asked[1][0]
+
+        self.assertIn("Заказ висит без выдачи: 🔴", said)
+        self.assertIn("Отчёт за сутки: 🔴", said)
+
+    def test_the_hanging_order_reminder_switches_on(self):
+        self.open(item_bot.PICK_MAN + "час:висит", "отмена")
+
+        self.assertTrue(self.conf()["remind"]["on"])
+
+    def test_the_hours_can_be_set_and_switch_it_on(self):
+        self.open(item_bot.PICK_MAN + "час:часы", "3", "отмена")
+        remind = self.conf()["remind"]
+
+        self.assertEqual(remind["hours"], 3)
+        self.assertTrue(remind["on"])
+
+    def test_a_silly_number_changes_nothing(self):
+        self.open(item_bot.PICK_MAN + "час:часы", "500")
+
+        self.assertFalse(self.conf()["remind"]["on"])
+
+    def test_words_instead_of_a_number_change_nothing(self):
+        self.open(item_bot.PICK_MAN + "час:часы", "скоро")
+
+        self.assertFalse(self.conf()["remind"]["on"])
+
+    def test_the_report_hour_is_kept(self):
+        self.open(item_bot.PICK_MAN + "час:когда", "9", "отмена")
+        report = self.conf()["report"]
+
+        self.assertEqual(report["hour"], 9)
+        self.assertTrue(report["on"])
+
+    def test_the_withdrawal_limit_is_kept(self):
+        self.open(item_bot.PICK_MAN + "час:сумма", "5000", "отмена")
+
+        self.assertEqual(self.conf()["money"]["from"], 5000)
+
+    def test_it_says_the_clock_is_silent_while_the_manager_is_off(self):
+        link = self.open("отмена")
+
+        self.assertIn("часы молчат", link.asked[1][0])
